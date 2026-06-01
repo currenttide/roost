@@ -1,0 +1,38 @@
+# Run one or more Roost worker containers on this host, isolated from each other
+# and the host. Each worker enrolls into the fleet and runs jobs in its own
+# container. Usage:
+#
+#   1. Build the wheel first:        uv build --wheel
+#   2. Mint a token on the CP:       roost enroll-token --label docker-worker --trust --no-curl
+#   3. ROOST_ENROLL_TOKEN=<tok> docker compose -f docker/docker-compose.yml up -d --build
+#
+# Each replica needs its own single-use token + unique name, so scale by adding
+# services (worker-2, worker-3, …) rather than `--scale`.
+services:
+  worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: roost-worker:latest
+    environment:
+      ROOST_URL: ${ROOST_URL:-http://host.docker.internal:8787}
+      ROOST_ENROLL_TOKEN: ${ROOST_ENROLL_TOKEN:-}
+      ROOST_WORKER_NAME: ${ROOST_WORKER_NAME:-docker-worker}
+    extra_hosts:
+      # lets the container reach the control plane running on the host
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # persist enrollment + provisioned claude creds across restarts
+      - worker-config:/home/roost/.config/roost
+      - worker-claude:/home/roost/.claude
+    restart: unless-stopped
+    # Cap resource use so jobs here can't starve the host (tune to taste).
+    deploy:
+      resources:
+        limits:
+          cpus: "${ROOST_WORKER_CPUS:-4}"
+          memory: ${ROOST_WORKER_MEM:-4g}
+
+volumes:
+  worker-config:
+  worker-claude:

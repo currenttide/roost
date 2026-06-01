@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Roost Fleet</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font: 12px/1.35 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+    background: #0b0e14; color: #d7dde8; -webkit-user-select: none; user-select: none;
+  }
+  header {
+    position: sticky; top: 0; z-index: 5; padding: 8px 12px;
+    background: linear-gradient(180deg,#11151f,#0b0e14); border-bottom: 1px solid #1c2230;
+    display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  }
+  header .title { font-weight: 700; letter-spacing: .3px; }
+  header .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 5px; }
+  .up { background: #34d399; box-shadow: 0 0 8px #34d399; }
+  .down { background: #f87171; box-shadow: 0 0 8px #f87171; }
+  header .stat { color: #8b95a7; }
+  header .stat b { color: #d7dde8; }
+  header .busy { color: #fbbf24; }
+  #grid { display: grid; grid-template-columns: 1fr; gap: 6px; padding: 8px; }
+  .node {
+    border: 1px solid #1c2230; border-radius: 8px; padding: 7px 9px;
+    background: #0f1117; display: flex; flex-direction: column; gap: 3px; transition: border-color .2s;
+  }
+  .node.busy { border-color: #f59e0b; box-shadow: 0 0 0 1px #f59e0b55, 0 0 14px #f59e0b22; }
+  .node.offline { opacity: .4; }
+  .row1 { display: flex; align-items: center; gap: 7px; }
+  .name { font-weight: 600; }
+  .badge { font-size: 10px; padding: 1px 6px; border-radius: 999px; border: 1px solid #2a3346; color: #9fb0c9; }
+  .badge.gpu { color: #6ee7b7; border-color: #134e3a; background: #0b231b; }
+  .badge.cpu { color: #93b4e7; border-color: #1e3a5f; background: #0b1626; }
+  .pill { font-size: 10px; padding: 1px 7px; border-radius: 999px; margin-left: auto; }
+  .pill.idle { color: #7f8aa0; border: 1px solid #2a3346; }
+  .pill.busy { color: #0b0e14; background: #fbbf24; font-weight: 700; animation: pulse 1.4s infinite; }
+  .pill.offline { color: #f87171; border: 1px solid #4b2226; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.55} }
+  .meta { color: #6b7689; font-size: 10.5px; }
+  .task { color: #e8c98b; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .task .k { color: #9fb0c9; }
+  .act { color: #7fb0e0; font-size: 10.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .empty { color: #5b6678; padding: 16px; text-align: center; }
+  footer { color: #5b6678; font-size: 10px; padding: 6px 12px; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <span class="title"><span id="dot" class="dot down"></span>Roost Fleet</span>
+  <span class="stat"><b id="nworkers">–</b> workers</span>
+  <span class="stat"><b id="ncores">–</b> cores</span>
+  <span class="stat"><b id="ngpus">–</b> GPUs</span>
+  <span class="busy" id="nbusy"></span>
+</header>
+<div id="grid"></div>
+<footer id="foot">connecting…</footer>
+<script>
+const params = new URLSearchParams(location.search);
+const TOKEN = params.get("token") || "";
+const H = TOKEN ? { Authorization: "Bearer " + TOKEN } : {};
+const FRESH = 45; // seconds; older last_seen = offline
+
+function gpuLabel(c) {
+  const n = c.gpu_count || 0;
+  if (n) return `${n}× ${(c.gpu && c.gpu[0] || "").replace("NVIDIA ", "").replace("GeForce ", "")}`;
+  if (c.docker_gpu) return "GPU (docker)";
+  return "";
+}
+function jobLabel(spec, intent) {
+  let t = intent || (spec && spec.command) || "";
+  if (Array.isArray(t)) t = t.join(" ");
+  if (spec && spec.kind === "docker") t = (spec.image || "") + "  " + t;
+  return String(t).replace(/\s+/g, " ").slice(0, 120);
+}
+async function tick() {
+  try {
+    const [wr, jr] = await Promise.all([
+      fetch("/workers", { headers: H }),
+      fetch("/jobs?limit=80", { headers: H }),
+    ]);
+    if (!wr.ok || !jr.ok) throw new Error("HTTP " + wr.status + "/" + jr.status);
+    const workers = await wr.json(), jobs = await jr.json();
+    document.getElementById("dot").className = "dot up";
+    const now = Date.now() / 1000;
+    const live = workers.filter(w => (now - w.last_seen) < FRESH || w.status === "busy");
+    // current job per worker (running/assigned)
+    const cur = {};
+    for (const j of jobs) if (["running", "assigned"].includes(j.state) && j.worker_id) cur[j.worker_id] = j;
+    let cores = 0, gpus = 0, busy = 0;
+    live.sort((a, b) => (b.capabilities.cpus||0) - (a.capabilities.cpus||0));
+    const grid = document.getElementById("grid");
+    grid.innerHTML = "";
+    for (const w of live) {
+      const c = w.capabilities || {}; cores += c.cpus || 0; gpus += c.gpu_count || 0;
+      const job = cur[w.id];
+      const isBusy = w.status === "busy" || !!job;
+      if (isBusy) busy++;
+      const gl = gpuLabel(c);
+      const div = document.createElement("div");
+      div.className = "node" + (isBusy ? " busy" : "");
+      let inner = `<div class="row1">
+        <span class="name">${w.name}</span>
+        <span class="badge ${c.gpu_count||c.docker_gpu?'gpu':'cpu'}">${gl || (c.cpus||0)+'c'}</span>
+        <span class="pill ${isBusy?'busy':'idle'}">${isBusy?'BUSY':'idle'}</span>
+      </div>`;
+      if (job) {
+        inner += `<div class="task"><span class="k">▶</span> ${jobLabel(job.spec, job.intent)}</div>`;
+        if (job.last_activity) inner += `<div class="act">${job.last_activity}${job.idle_sec!=null?'  ·  '+job.idle_sec+'s idle':''}</div>`;
+      } else {
+        const load = (c.load||{});
+        inner += `<div class="meta">${c.cpus||0} cores${gl?'  ·  '+gl:''}${load.loadavg1!=null?'  ·  load '+load.loadavg1:''}${load.free_vram_gb!=null?'  ·  '+load.free_vram_gb+'GB free':''}</div>`;
+      }
+      div.innerHTML = inner;
+      grid.appendChild(div);
+    }
+    document.getElementById("nworkers").textContent = live.length;
+    document.getElementById("ncores").textContent = cores;
+    document.getElementById("ngpus").textContent = gpus;
+    document.getElementById("nbusy").textContent = busy ? `● ${busy} working` : "";
+    document.getElementById("foot").textContent = "updated " + new Date().toLocaleTimeString();
+  } catch (e) {
+    document.getElementById("dot").className = "dot down";
+    document.getElementById("foot").textContent = "control plane unreachable — " + e.message;
+  }
+}
+tick(); setInterval(tick, 1500);
+</script>
+</body>
+</html>

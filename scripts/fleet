@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+"""Roost fleet control panel. Usage:
+
+  scripts/fleet            # dashboard: workers, GPUs, recent jobs, tunnels
+  scripts/fleet gpus       # GPU-capable workers + free VRAM
+  scripts/fleet jobs [N]   # recent N jobs (default 15)
+  scripts/fleet watch      # refresh the dashboard every 3s
+
+Resolves the control-plane URL/token the same way the `roost` CLI does:
+ROOST_URL/ROOST_TOKEN env → ~/.config/roost/config.toml (url / credential) →
+http://127.0.0.1:8787 with no token.
+"""
+import os, re, sys, time, json, urllib.request
+
+
+def _config():
+    """Minimal read of url/credential from ~/.config/roost/config.toml (no TOML dep)."""
+    base = os.environ.get("ROOST_CONFIG_DIR")
+    path = (os.path.join(base, "config.toml") if base else os.path.join(
+        os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
+        "roost", "config.toml"))
+    out = {}
+    try:
+        with open(path) as f:
+            for line in f:
+                m = re.match(r'\s*(url|credential)\s*=\s*"(.*)"\s*$', line)
+                if m:
+                    out[m.group(1)] = m.group(2)
+    except OSError:
+        pass
+    return out
+
+
+_cfg = _config()
+URL = (os.environ.get("ROOST_URL") or _cfg.get("url") or "http://127.0.0.1:8787").rstrip("/")
+TOKEN = os.environ.get("ROOST_TOKEN") or _cfg.get("credential") or ""
+
+
+def api(path):
+    req = urllib.request.Request(URL + path, headers={"Authorization": f"Bearer {TOKEN}"})
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return json.load(r)
+
+
+def gpu_str(c):
+    n = c.get("gpu_count") or 0
+    if not n and c.get("docker_gpu"):
+        return "gpu(docker)"
+    if not n:
+        return ""
+    name = (c.get("gpu") or [""])[0].replace("NVIDIA ", "").replace("GeForce ", "")
+    return f"{n}x {name}"
+
+
+def dashboard():
+    try:
+        hz = api("/healthz"); cp = f"UP v{hz.get('version','?')}"
+    except Exception as e:
+        cp = f"DOWN ({e})"
+    print(f"\033[1mROOST FLEET\033[0m   control plane {URL}  [{cp}]")
+    try:
+        ws = [w for w in api("/workers") if w.get("status") in ("idle", "busy")]
+    except Exception as e:
+        print("  cannot reach control plane:", e); return
+    cores = sum(w["capabilities"].get("cpus", 0) for w in ws)
+    gpus = sum(w["capabilities"].get("gpu_count") or 0 for w in ws)
+    print(f"\n\033[1m{len(ws)} workers · {cores} cores · {gpus} GPUs\033[0m")
+    print(f"  {'NAME':16}{'STATUS':8}{'CORES':>6}  {'GPU':16}{'CLAUDE':7}{'DOCKER':7}SEEN")
+    now = time.time()
+    for w in sorted(ws, key=lambda x: -(x["capabilities"].get("cpus", 0))):
+        c = w["capabilities"]; t = c.get("tools") or []
+        cl = "✓" if "claude" in t else "·"
+        dk = "gpu" if c.get("docker_gpu") else ("✓" if c.get("docker") else "·")
+        seen = f"{round(now - w['last_seen'])}s"
+        st = w["status"]
+        color = "\033[33m" if st == "busy" else ""
+        print(f"  {color}{w['name']:16}{st:8}{c.get('cpus',0):>6}  {gpu_str(c):16}{cl:^7}{dk:^7}{seen}\033[0m")
+    # recent jobs
+    try:
+        jobs = api("/jobs?limit=8")
+        if jobs:
+            print(f"\n\033[1mRECENT JOBS\033[0m")
+            for j in jobs:
+                intent = (j.get("intent") or (j.get("spec") or {}).get("command") or "")
+                intent = (intent if isinstance(intent, str) else " ".join(intent))[:46].replace("\n", " ")
+                print(f"  {j['id'][:12]} {j['state']:10} {(j.get('worker_id') or '-')[:12]:12} {intent}")
+    except Exception:
+        pass
+
+
+def gpus():
+    ws = [w for w in api("/workers") if w.get("status") in ("idle", "busy")]
+    print("GPU-capable workers:")
+    for w in ws:
+        c = w["capabilities"]; load = c.get("load") or {}
+        if c.get("gpu_count") or c.get("docker_gpu"):
+            fv = load.get("free_vram_gb")
+            print(f"  {w['name']:16}{gpu_str(c):20} status={w['status']}"
+                  + (f" free_vram={fv}GB" if fv else ""))
+
+
+def jobs(n=15):
+    for j in api(f"/jobs?limit={n}"):
+        intent = (j.get("intent") or (j.get("spec") or {}).get("command") or "")
+        intent = (intent if isinstance(intent, str) else " ".join(intent))[:50].replace("\n", " ")
+        print(f"  {j['id'][:12]} {j['state']:10} {(j.get('worker_id') or '-')[:14]:14} {intent}")
+
+
+if __name__ == "__main__":
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
+    if cmd == "gpus":
+        gpus()
+    elif cmd == "jobs":
+        jobs(int(sys.argv[2]) if len(sys.argv) > 2 else 15)
+    elif cmd == "watch":
+        try:
+            while True:
+                os.system("clear"); dashboard(); time.sleep(3)
+        except KeyboardInterrupt:
+            pass
+    else:
+        dashboard()

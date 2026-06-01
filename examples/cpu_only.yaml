@@ -1,0 +1,6 @@
+# A job that should NOT match GPU-required jobs but is happy on any CPU box.
+command: "python3 -c 'import sys, platform; print(platform.platform()); print(sys.version)'"
+requires:
+  tools: [python3]
+budget:
+  max_wallclock_min: 1

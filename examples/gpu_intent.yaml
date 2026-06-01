@@ -1,0 +1,16 @@
+# Example agent job that only a GPU-equipped worker can pick up.
+# Replace `intent` with whatever you want claude -p to do, and tighten
+# `permissions` to whatever the task actually needs.
+kind: claude
+intent: "Summarize the README in this repo, then list the open TODOs."
+requires:
+  gpu_vram_gb: ">=8"
+  tools: [claude, git]
+success_criteria: "summary printed to stdout; TODO list non-empty if any exist."
+budget:
+  max_tokens: 100000
+  max_wallclock_min: 10
+permissions:
+  mode: acceptEdits
+  allow_paths: ["./"]
+  allow_commands: ["git", "grep", "rg"]

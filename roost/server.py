@@ -1,0 +1,1489 @@
+"""Roost control plane (V1).
+
+A FastAPI app backed by SQLite. Adds, on top of V0:
+
+  * lease-based job execution (renewed by heartbeat; expired leases requeue)
+  * enrollment-token + per-worker credential flow (shared token still works
+    as LAN convenience)
+  * lineage / depth / tree-budget guardrails for hierarchical dispatch via
+    roost-mcp
+  * subtree cancel (`DELETE /jobs/{id}?tree=true`)
+  * background sweeper that marks stale/offline workers and requeues
+    abandoned jobs
+  * `/install.sh` one-line installer endpoint
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import os
+import secrets
+import sqlite3
+import time
+import uuid
+from contextlib import asynccontextmanager, contextmanager
+from pathlib import Path
+from typing import Any, AsyncIterator, Optional
+
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.responses import (
+    HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse,
+)
+from pydantic import BaseModel, Field
+
+from .matcher import matches, placement_score
+from .schema import migrate
+
+DEFAULT_DB = Path.home() / ".roost" / "roost.db"
+
+# Timing knobs (Decision B3).
+HEARTBEAT_INTERVAL = 15.0
+STALE_AFTER = 45.0
+OFFLINE_AFTER = 120.0
+LEASE_TTL = 60.0
+POLL_HOLD_MAX = 30.0
+SWEEPER_INTERVAL = 5.0
+# How long a queued job will wait for a better-fit worker to poll before any
+# capable worker may take it (placement grace window, Decision V2-2/V2-4).
+PLACEMENT_GRACE = 3.0
+ENROLL_TOKEN_TTL = 900.0  # 15 minutes
+ENROLL_PREFIX = "rst-enr-"
+WORKER_CRED_PREFIX = "rst-wkr-"
+
+TERMINAL_STATES = ("succeeded", "failed", "cancelled")
+ACTIVE_STATES = ("queued", "assigned", "running")
+
+
+# ---------- DB helpers ----------
+
+
+@contextmanager
+def _connect(db_path: Path):
+    conn = sqlite3.connect(db_path, isolation_level=None, timeout=30.0)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        yield conn
+    finally:
+        conn.close()
+
+
+def _init_db(db_path: Path) -> None:
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with _connect(db_path) as conn:
+        migrate(conn)
+
+
+def _row_to_job(row: sqlite3.Row | None) -> Optional[dict[str, Any]]:
+    if row is None:
+        return None
+    d = dict(row)
+    d["spec"] = json.loads(d["spec"])
+    d["requires"] = json.loads(d["requires"])
+    if d.get("result"):
+        try:
+            d["result"] = json.loads(d["result"])
+        except (TypeError, json.JSONDecodeError):
+            pass
+    return d
+
+
+def _row_to_worker(row: sqlite3.Row | None) -> Optional[dict[str, Any]]:
+    if row is None:
+        return None
+    d = dict(row)
+    d["capabilities"] = json.loads(d["capabilities"])
+    d["policy"] = json.loads(d.get("policy_json") or "{}")
+    d.pop("policy_json", None)
+    d.pop("cred_hash", None)  # never leak hash
+    return d
+
+
+def _hash_cred(raw: str) -> str:
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+# ---------- Submit / lineage ----------
+
+
+def _insert_job(
+    db_path: Path,
+    spec: dict[str, Any],
+    parent: Optional[dict[str, Any]] = None,
+    *,
+    as_running: bool = False,
+) -> dict[str, Any]:
+    """Insert a job. ``as_running`` anchors a captain-root: it starts in
+    ``running`` with no worker and no lease (the sweeper ignores it, workers
+    never pull it), existing only to root a plan's lineage + tree budget.
+    """
+    job_id = uuid.uuid4().hex[:12]
+    now = time.time()
+    requires = spec.get("requires") or {}
+    hierarchy = spec.get("hierarchy") or {}
+    budget = spec.get("budget") or {}
+    max_attempts = int(spec.get("max_attempts") or budget.get("max_attempts") or 2)
+    max_depth = int(hierarchy.get("max_depth", parent["max_depth"] if parent else 3))
+    if parent is not None:
+        depth = parent["depth"] + 1
+        if depth > max_depth:
+            raise ValueError(
+                f"max_depth exceeded: parent depth={parent['depth']} max_depth={max_depth}"
+            )
+        root_id = parent["root_job_id"] or parent["id"]
+    else:
+        depth = 0
+        root_id = job_id
+    tree_budget = budget.get("tree_max_tokens") or budget.get("max_tokens") if parent is None else None
+    model = spec.get("model")
+    subagent_model = spec.get("subagent_model")
+
+    with _connect(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            # Budget enforcement against parent root.
+            if parent is not None:
+                root_row = conn.execute(
+                    "SELECT tree_budget_tokens, tree_budget_spent FROM jobs WHERE id=?",
+                    (root_id,),
+                ).fetchone()
+                if root_row is None:
+                    conn.execute("ROLLBACK")
+                    raise ValueError(f"root job {root_id} not found")
+                root_budget = root_row["tree_budget_tokens"]
+                root_spent = root_row["tree_budget_spent"] or 0
+                requested = int(budget.get("max_tokens") or 0)
+                if root_budget is not None and requested:
+                    remaining = root_budget - root_spent
+                    if requested > remaining:
+                        conn.execute("ROLLBACK")
+                        raise ValueError(
+                            f"tree budget exhausted: requested {requested} tokens, "
+                            f"only {remaining} remaining of root cap {root_budget}"
+                        )
+            state = "running" if as_running else "queued"
+            started_at = now if as_running else None
+            conn.execute(
+                "INSERT INTO jobs("
+                "id, spec, intent, requires, state, created_at, started_at, max_attempts, "
+                "parent_job_id, root_job_id, depth, max_depth, "
+                "tree_budget_tokens, model, subagent_model"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    job_id,
+                    json.dumps(spec),
+                    spec.get("intent"),
+                    json.dumps(requires),
+                    state,
+                    now,
+                    started_at,
+                    max_attempts,
+                    parent["id"] if parent else None,
+                    root_id,
+                    depth,
+                    max_depth,
+                    tree_budget,
+                    model,
+                    subagent_model,
+                ),
+            )
+            conn.execute("COMMIT")
+            row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        except Exception:
+            # Inner error paths may have already rolled back; guard so we
+            # don't raise "no transaction is active" over the real error.
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+    return _row_to_job(row)
+
+
+def _list_jobs(
+    db_path: Path,
+    state: Optional[str] = None,
+    root: Optional[str] = None,
+    parent: Optional[str] = None,
+    limit: int = 100,
+) -> list[dict]:
+    clauses, params = [], []
+    if state:
+        clauses.append("state = ?")
+        params.append(state)
+    if root:
+        clauses.append("root_job_id = ?")
+        params.append(root)
+    if parent:
+        clauses.append("parent_job_id = ?")
+        params.append(parent)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    params.append(limit)
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            f"SELECT * FROM jobs {where} ORDER BY created_at DESC LIMIT ?", params
+        )
+        return [_row_to_job(r) for r in cur.fetchall()]
+
+
+def _get_job(db_path: Path, job_id: str) -> Optional[dict]:
+    with _connect(db_path) as conn:
+        row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    return _row_to_job(row)
+
+
+def _get_tree(db_path: Path, root_id: str) -> list[dict]:
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            "SELECT * FROM jobs WHERE root_job_id = ? ORDER BY depth ASC, created_at ASC",
+            (root_id,),
+        )
+        return [_row_to_job(r) for r in cur.fetchall()]
+
+
+def _annotate_liveness(db_path: Path, jobs: list[dict]) -> list[dict]:
+    """Attach raw liveness FACTS to job dicts (no verdicts — judgment is the
+    agent's job). Adds, where meaningful:
+
+      idle_sec        seconds since the job's last sign of life (running/assigned)
+      queued_sec      seconds a job has sat queued
+      capable_workers count of online workers whose capabilities satisfy `requires`
+
+    `capable_workers == 0` on a queued job is the mechanical fact behind a
+    silently-unplaceable plan; an overseer agent decides what it means.
+    """
+    jobs = [j for j in jobs if j]
+    if not jobs:
+        return jobs
+    now = time.time()
+    # Online workers (fresh enough to poll) and their capabilities, fetched once.
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT capabilities FROM workers WHERE last_seen >= ?",
+            (now - STALE_AFTER,),
+        ).fetchall()
+    online_caps = [json.loads(r["capabilities"]) for r in rows]
+    for j in jobs:
+        state = j.get("state")
+        if j.get("last_activity_at") and state in ("running", "assigned"):
+            j["idle_sec"] = round(now - float(j["last_activity_at"]), 1)
+        if state == "queued":
+            j["queued_sec"] = round(now - float(j["created_at"]), 1)
+            req = j.get("requires") or {}
+            j["capable_workers"] = sum(1 for caps in online_caps if matches(caps, req))
+    return jobs
+
+
+def _recently_cancelled_for_worker(db_path: Path, worker_id: str) -> list[str]:
+    """Job ids assigned to this worker that were cancelled in the last few
+    minutes — so a heartbeat can tell the worker to kill the still-running
+    process/container. Bounded by a time window so the list stays small; the
+    worker ignores ids it isn't actually running."""
+    now = time.time()
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT id FROM jobs WHERE worker_id=? AND state='cancelled' "
+            "AND finished_at >= ?",
+            (worker_id, now - 300.0),
+        ).fetchall()
+    return [r["id"] for r in rows]
+
+
+def _cancel_job(db_path: Path, job_id: str, cascade: bool) -> int:
+    """Cancel a job (and optionally its subtree). Returns count cancelled."""
+    now = time.time()
+    with _connect(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            target = conn.execute(
+                "SELECT id, state, root_job_id FROM jobs WHERE id=?", (job_id,)
+            ).fetchone()
+            if not target:
+                conn.execute("ROLLBACK")
+                return 0
+            ids: list[str] = []
+            if cascade:
+                # BFS over children using parent_job_id.
+                pending = [job_id]
+                visited = set()
+                while pending:
+                    current = pending.pop()
+                    if current in visited:
+                        continue
+                    visited.add(current)
+                    ids.append(current)
+                    kids = conn.execute(
+                        "SELECT id FROM jobs WHERE parent_job_id=?", (current,)
+                    ).fetchall()
+                    for k in kids:
+                        pending.append(k["id"])
+            else:
+                ids = [job_id]
+            placeholders = ",".join("?" * len(ids))
+            cur = conn.execute(
+                f"UPDATE jobs SET state='cancelled', finished_at=? "
+                f"WHERE id IN ({placeholders}) AND state NOT IN ('succeeded','failed','cancelled')",
+                [now, *ids],
+            )
+            count = cur.rowcount
+            # Free a worker ONLY if a job we JUST cancelled (finished_at=now) was
+            # its work AND it has no other in-flight job. Otherwise a cascade that
+            # sweeps an already-finished child would wrongly idle the worker that
+            # child's old owner has since moved on to a different job — letting it
+            # be assigned a second concurrent job.
+            conn.execute(
+                f"UPDATE workers SET status='idle' "
+                f"WHERE id IN (SELECT worker_id FROM jobs WHERE id IN ({placeholders}) "
+                f"            AND state='cancelled' AND finished_at=? AND worker_id IS NOT NULL) "
+                f"AND id NOT IN (SELECT worker_id FROM jobs "
+                f"               WHERE state IN ('assigned','running') AND worker_id IS NOT NULL)",
+                [*ids, now],
+            )
+            for jid in ids:
+                conn.execute(
+                    "INSERT INTO job_logs(job_id, seq, stream, data, ts) "
+                    "VALUES (?, (SELECT COALESCE(MAX(seq), 0)+1 FROM job_logs WHERE job_id=?), 'event', ?, ?)",
+                    (jid, jid, json.dumps({"type": "cancelled", "cascade": cascade}), now),
+                )
+            conn.execute("COMMIT")
+            return count
+        except Exception:
+            # Inner error paths may have already rolled back; guard so we
+            # don't raise "no transaction is active" over the real error.
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+
+
+def _finalize_job(
+    db_path: Path,
+    job_id: str,
+    state: str,
+    result: Any,
+    error: Optional[str],
+) -> Optional[bool]:
+    """Terminate a non-worker-owned job (captain root). Returns None if missing,
+    False if worker-owned/terminal, True on success."""
+    now = time.time()
+    with _connect(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute(
+                "SELECT worker_id, state FROM jobs WHERE id=?", (job_id,)
+            ).fetchone()
+            if row is None:
+                conn.execute("ROLLBACK")
+                return None
+            if row["worker_id"] is not None or row["state"] in TERMINAL_STATES:
+                conn.execute("ROLLBACK")
+                return False
+            conn.execute(
+                "UPDATE jobs SET state=?, finished_at=?, result=?, error=?, "
+                "lease_expires_at=NULL WHERE id=?",
+                (
+                    state,
+                    now,
+                    json.dumps(result) if result is not None else None,
+                    error,
+                    job_id,
+                ),
+            )
+            conn.execute("COMMIT")
+            return True
+        except Exception:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+
+
+# ---------- Worker registry ----------
+
+
+def _register_worker(
+    db_path: Path,
+    name: str,
+    capabilities: dict,
+    enroll_id: Optional[str] = None,
+    cred_hash: Optional[str] = None,
+    policy: Optional[dict] = None,
+) -> dict:
+    worker_id = uuid.uuid4().hex[:12]
+    now = time.time()
+    with _connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO workers("
+            "id, name, capabilities, registered_at, last_seen, status, "
+            "enroll_id, cred_hash, policy_json) "
+            "VALUES (?, ?, ?, ?, ?, 'idle', ?, ?, ?)",
+            (
+                worker_id,
+                name,
+                json.dumps(capabilities),
+                now,
+                now,
+                enroll_id,
+                cred_hash,
+                json.dumps(policy or {}),
+            ),
+        )
+        row = conn.execute("SELECT * FROM workers WHERE id = ?", (worker_id,)).fetchone()
+    return _row_to_worker(row)
+
+
+def _heartbeat_worker(
+    db_path: Path,
+    worker_id: str,
+    capabilities: dict | None = None,
+) -> bool:
+    now = time.time()
+    with _connect(db_path) as conn:
+        # A heartbeat is proof of life: a worker the sweeper had marked 'stale'
+        # or 'offline' (gap-based) has recovered, so flip it back to 'idle'.
+        # 'busy'/'idle' are preserved. A `revoked` worker stays offline (it must
+        # never heartbeat its way back in, even in no-auth mode).
+        recover = ("status = CASE WHEN status IN ('stale','offline') "
+                   "AND revoked = 0 THEN 'idle' ELSE status END")
+        if capabilities is not None:
+            cur = conn.execute(
+                f"UPDATE workers SET last_seen=?, capabilities=?, {recover} WHERE id=?",
+                (now, json.dumps(capabilities), worker_id),
+            )
+        else:
+            cur = conn.execute(
+                f"UPDATE workers SET last_seen=?, {recover} WHERE id=?", (now, worker_id)
+            )
+        if cur.rowcount == 0:
+            return False
+        # Renew lease on any jobs this worker is currently running.
+        conn.execute(
+            "UPDATE jobs SET lease_expires_at=? "
+            "WHERE worker_id=? AND state IN ('assigned', 'running')",
+            (now + LEASE_TTL, worker_id),
+        )
+        # If the sweeper had marked a BUSY worker 'stale' and the recover-CASE
+        # just flipped it to 'idle' while it still owns an in-flight job, correct
+        # it back to 'busy' — otherwise it could be assigned a second job.
+        conn.execute(
+            "UPDATE workers SET status='busy' WHERE id=? AND status='idle' "
+            "AND EXISTS (SELECT 1 FROM jobs WHERE worker_id=? "
+            "            AND state IN ('assigned','running'))",
+            (worker_id, worker_id),
+        )
+        return True
+
+
+def _revoke_worker(db_path: Path, worker_id: str) -> bool:
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE workers SET cred_hash=NULL, status='offline', revoked=1 WHERE id=?",
+            (worker_id,),
+        )
+        return cur.rowcount > 0
+
+
+def _list_workers(db_path: Path) -> list[dict]:
+    with _connect(db_path) as conn:
+        cur = conn.execute("SELECT * FROM workers ORDER BY registered_at DESC")
+        rows = [_row_to_worker(r) for r in cur.fetchall()]
+    now = time.time()
+    for r in rows:
+        if r["status"] == "offline":
+            continue
+        gap = now - r["last_seen"]
+        if gap >= OFFLINE_AFTER:
+            r["status"] = "offline"
+        elif gap >= STALE_AFTER:
+            r["status"] = "stale"
+    return rows
+
+
+def _worker_by_cred_hash(db_path: Path, cred_hash: str) -> Optional[dict]:
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM workers WHERE cred_hash = ?", (cred_hash,)
+        ).fetchone()
+    return _row_to_worker(row)
+
+
+def _get_worker(db_path: Path, worker_id: str) -> Optional[dict]:
+    with _connect(db_path) as conn:
+        row = conn.execute("SELECT * FROM workers WHERE id=?", (worker_id,)).fetchone()
+    return _row_to_worker(row)
+
+
+# ---------- Assignment / events ----------
+
+
+def _score_worker_row(row: sqlite3.Row) -> dict[str, Any]:
+    """Lift a worker row into the dict shape placement_score expects."""
+    return {
+        "id": row["id"],
+        "status": row["status"],
+        "capabilities": json.loads(row["capabilities"]),
+        "last_assigned_at": row["last_assigned_at"],
+    }
+
+
+def _try_assign_one(db_path: Path, worker_id: str) -> Optional[dict]:
+    """Pull-side placement: decide whether the polling worker should take a
+    queued job *now*, or leave it for a better-fit worker (Decision V2-2/V2-4).
+
+    For each queued job the polling worker is capable of (oldest first), score
+    all currently-idle capable workers; the polling worker takes the job iff it
+    is the (tied) best fit OR the job has already waited past PLACEMENT_GRACE.
+    """
+    with _connect(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            now = time.time()
+            me_row = conn.execute(
+                "SELECT id, status, capabilities, last_assigned_at FROM workers WHERE id=?",
+                (worker_id,),
+            ).fetchone()
+            if not me_row:
+                conn.execute("ROLLBACK")
+                return None
+            if me_row["status"] == "busy":
+                conn.execute("ROLLBACK")
+                return None
+            me = _score_worker_row(me_row)
+
+            # Other idle, recently-seen workers that might out-compete us.
+            other_rows = conn.execute(
+                "SELECT id, status, capabilities, last_assigned_at FROM workers "
+                "WHERE id != ? AND status='idle' AND last_seen >= ?",
+                (worker_id, now - STALE_AFTER),
+            ).fetchall()
+            others = [_score_worker_row(r) for r in other_rows]
+
+            rows = conn.execute(
+                "SELECT * FROM jobs WHERE state='queued' ORDER BY created_at ASC"
+            ).fetchall()
+            chosen = None
+            for row in rows:
+                requires = json.loads(row["requires"])
+                if not matches(me["capabilities"], requires):
+                    continue
+                spec = json.loads(row["spec"])
+                job = {"prefer": spec.get("prefer"), "requires": requires}
+                waited = now - (row["created_at"] or now)
+                if waited >= PLACEMENT_GRACE:
+                    chosen = row  # don't starve: take it regardless of fit
+                    break
+                my_score = placement_score(me, job, now=now)
+                # Best competing fit among *capable* idle others.
+                best_other = max(
+                    (
+                        placement_score(w, job, now=now)
+                        for w in others
+                        if matches(w["capabilities"], requires)
+                    ),
+                    default=float("-inf"),
+                )
+                if my_score >= best_other - 1e-9:
+                    chosen = row
+                    break
+                # else: a better-fit worker exists and is expected to poll; skip.
+            if chosen is None:
+                conn.execute("ROLLBACK")
+                return None
+            new_attempt = (chosen["attempt"] or 0) + 1
+            conn.execute(
+                "UPDATE jobs SET state='assigned', worker_id=?, assigned_at=?, "
+                "lease_expires_at=?, attempt=? WHERE id=?",
+                (worker_id, now, now + LEASE_TTL, new_attempt, chosen["id"]),
+            )
+            conn.execute(
+                "UPDATE workers SET status='busy', last_seen=?, last_assigned_at=? WHERE id=?",
+                (now, now, worker_id),
+            )
+            conn.execute("COMMIT")
+            return _row_to_job(
+                conn.execute(
+                    "SELECT * FROM jobs WHERE id=?", (chosen["id"],)
+                ).fetchone()
+            )
+        except Exception:
+            # Inner error paths may have already rolled back; guard so we
+            # don't raise "no transaction is active" over the real error.
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+
+
+def _append_log(db_path: Path, job_id: str, stream: str, data: str) -> int:
+    with _connect(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute(
+                "SELECT COALESCE(MAX(seq), 0) AS s FROM job_logs WHERE job_id=?",
+                (job_id,),
+            ).fetchone()
+            seq = (row["s"] or 0) + 1
+            now = time.time()
+            conn.execute(
+                "INSERT INTO job_logs(job_id, seq, stream, data, ts) VALUES (?,?,?,?,?)",
+                (job_id, seq, stream, data, now),
+            )
+            # Every log line is a sign of life. Bump the liveness timestamp; for
+            # human-readable streams also keep a compact snapshot of the latest
+            # line (event lines are raw JSON, so a worker-supplied `activity`
+            # string via the event endpoint is preferred for those).
+            if stream in ("stdout", "stderr") and data.strip():
+                snippet = data.strip().replace("\n", " ")[:160]
+                conn.execute(
+                    "UPDATE jobs SET last_activity_at=?, last_activity=? WHERE id=?",
+                    (now, snippet, job_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE jobs SET last_activity_at=? WHERE id=?", (now, job_id)
+                )
+            conn.execute("COMMIT")
+            return seq
+        except Exception:
+            # Inner error paths may have already rolled back; guard so we
+            # don't raise "no transaction is active" over the real error.
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+
+
+def _read_logs(
+    db_path: Path, job_id: str, since_seq: int = 0, limit: int = 1000
+) -> list[dict]:
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            "SELECT seq, stream, data, ts FROM job_logs "
+            "WHERE job_id=? AND seq > ? ORDER BY seq ASC LIMIT ?",
+            (job_id, since_seq, limit),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def _apply_event(
+    db_path: Path,
+    job_id: str,
+    worker_id: str,
+    event: dict,
+) -> tuple[dict, bool]:
+    """Apply a worker-reported event. Returns (job, accepted).
+
+    Stale events (from an attempt that the control plane has already
+    superseded via lease expiry + requeue) are ignored.
+    """
+    etype = event.get("type")
+    reported_attempt = event.get("attempt")
+    now = time.time()
+    with _connect(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if not row:
+                conn.execute("ROLLBACK")
+                raise KeyError(job_id)
+            if row["worker_id"] != worker_id:
+                conn.execute("ROLLBACK")
+                raise PermissionError("job is not assigned to this worker")
+            if reported_attempt is not None and reported_attempt != row["attempt"]:
+                # Stale — server has moved on, ignore.
+                conn.execute("ROLLBACK")
+                return _row_to_job(row), False
+            if row["state"] in ("succeeded", "failed", "cancelled"):
+                # Already terminal (e.g. cancelled out from under the worker) —
+                # don't let a late event resurrect or relabel it.
+                conn.execute("ROLLBACK")
+                return _row_to_job(row), False
+            if etype == "started":
+                conn.execute(
+                    "UPDATE jobs SET state='running', started_at=?, lease_expires_at=?, "
+                    "last_activity_at=?, last_activity=? WHERE id=?",
+                    (now, now + LEASE_TTL, now, "started", job_id),
+                )
+            elif etype in ("succeeded", "failed"):
+                tokens_used = int(event.get("tokens_used") or 0)
+                conn.execute(
+                    "UPDATE jobs SET state=?, finished_at=?, exit_code=?, "
+                    "result=?, error=?, lease_expires_at=NULL, tokens_used=? "
+                    "WHERE id=?",
+                    (
+                        etype,
+                        now,
+                        event.get("exit_code"),
+                        json.dumps(event.get("result")) if event.get("result") is not None else None,
+                        event.get("error"),
+                        tokens_used,
+                        job_id,
+                    ),
+                )
+                if tokens_used:
+                    conn.execute(
+                        "UPDATE jobs SET tree_budget_spent = COALESCE(tree_budget_spent,0) + ? "
+                        "WHERE id = ?",
+                        (tokens_used, row["root_job_id"] or job_id),
+                    )
+                conn.execute(
+                    "UPDATE workers SET status='idle', last_seen=? WHERE id=?",
+                    (now, worker_id),
+                )
+            elif etype == "progress":
+                # token-meter + liveness checkpoint mid-run
+                activity = event.get("activity")
+                if activity:
+                    conn.execute(
+                        "UPDATE jobs SET tokens_used=?, lease_expires_at=?, "
+                        "last_activity_at=?, last_activity=? WHERE id=?",
+                        (int(event.get("tokens_used") or 0), now + LEASE_TTL,
+                         now, str(activity)[:160], job_id),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE jobs SET tokens_used=?, lease_expires_at=?, "
+                        "last_activity_at=? WHERE id=?",
+                        (int(event.get("tokens_used") or 0), now + LEASE_TTL, now, job_id),
+                    )
+            conn.execute("COMMIT")
+            updated = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+            return _row_to_job(updated), True
+        except Exception:
+            # Inner error paths may have already rolled back; guard so we
+            # don't raise "no transaction is active" over the real error.
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+
+
+# ---------- Sweeper ----------
+
+
+def _sweep(db_path: Path) -> dict[str, int]:
+    """Mark stale/offline workers; requeue jobs whose leases expired."""
+    now = time.time()
+    counts = {"requeued": 0, "failed_attempts": 0, "stale": 0, "offline": 0}
+    with _connect(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            # Worker liveness.
+            cur = conn.execute(
+                "UPDATE workers SET status='stale' "
+                "WHERE status NOT IN ('stale','offline') AND last_seen < ?",
+                (now - STALE_AFTER,),
+            )
+            counts["stale"] = cur.rowcount
+            cur = conn.execute(
+                "UPDATE workers SET status='offline' "
+                "WHERE status != 'offline' AND last_seen < ?",
+                (now - OFFLINE_AFTER,),
+            )
+            counts["offline"] = cur.rowcount
+            # Job lease expiry.
+            expired = conn.execute(
+                "SELECT id, attempt, max_attempts, worker_id FROM jobs "
+                "WHERE state IN ('assigned','running') AND lease_expires_at IS NOT NULL "
+                "AND lease_expires_at < ?",
+                (now,),
+            ).fetchall()
+            for row in expired:
+                # Free the worker that held the expired lease (it's presumed
+                # gone); otherwise it stays 'busy' and never picks up the
+                # requeued job or anything else.
+                if row["worker_id"]:
+                    conn.execute(
+                        "UPDATE workers SET status='idle' WHERE id=? AND status='busy'",
+                        (row["worker_id"],),
+                    )
+                if row["attempt"] >= row["max_attempts"]:
+                    conn.execute(
+                        "UPDATE jobs SET state='failed', finished_at=?, "
+                        "error='lease_expired', lease_expires_at=NULL WHERE id=?",
+                        (now, row["id"]),
+                    )
+                    counts["failed_attempts"] += 1
+                else:
+                    conn.execute(
+                        "UPDATE jobs SET state='queued', worker_id=NULL, "
+                        "assigned_at=NULL, started_at=NULL, lease_expires_at=NULL "
+                        "WHERE id=?",
+                        (row["id"],),
+                    )
+                    counts["requeued"] += 1
+                conn.execute(
+                    "INSERT INTO job_logs(job_id, seq, stream, data, ts) "
+                    "VALUES (?, (SELECT COALESCE(MAX(seq), 0)+1 FROM job_logs WHERE job_id=?), 'event', ?, ?)",
+                    (
+                        row["id"],
+                        row["id"],
+                        json.dumps({"type": "lease_expired", "attempt": row["attempt"]}),
+                        now,
+                    ),
+                )
+            conn.execute("COMMIT")
+        except Exception:
+            # Inner error paths may have already rolled back; guard so we
+            # don't raise "no transaction is active" over the real error.
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+    return counts
+
+
+# ---------- Enrollment ----------
+
+
+def _mint_enroll_token(
+    db_path: Path,
+    label: Optional[str],
+    policy: Optional[dict],
+    ttl: float = ENROLL_TOKEN_TTL,
+) -> tuple[str, float]:
+    raw = ENROLL_PREFIX + secrets.token_urlsafe(24)
+    now = time.time()
+    with _connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO enroll_tokens(token_hash, label, policy_json, created_at, expires_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (_hash_cred(raw), label, json.dumps(policy or {}), now, now + ttl),
+        )
+    return raw, now + ttl
+
+
+def _consume_enroll_token(db_path: Path, token: str) -> dict:
+    """Validate + mark used. Returns the row dict on success."""
+    th = _hash_cred(token)
+    now = time.time()
+    with _connect(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute(
+                "SELECT * FROM enroll_tokens WHERE token_hash=?", (th,)
+            ).fetchone()
+            if row is None:
+                conn.execute("ROLLBACK")
+                raise PermissionError("invalid enrollment token")
+            if row["used_at"] is not None:
+                conn.execute("ROLLBACK")
+                raise PermissionError("enrollment token already used")
+            if row["expires_at"] < now:
+                conn.execute("ROLLBACK")
+                raise PermissionError("enrollment token expired")
+            conn.execute(
+                "UPDATE enroll_tokens SET used_at=? WHERE token_hash=?",
+                (now, th),
+            )
+            conn.execute("COMMIT")
+            return dict(row)
+        except Exception:
+            # Inner error paths may have already rolled back; guard so we
+            # don't raise "no transaction is active" over the real error.
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+
+
+def _list_enroll_tokens(db_path: Path) -> list[dict]:
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            "SELECT label, created_at, expires_at, used_at, used_by_worker "
+            "FROM enroll_tokens ORDER BY created_at DESC"
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+# ---------- Log retention (called periodically) ----------
+
+
+def _prune_logs(db_path: Path, max_age_sec: float, max_rows_per_job: int) -> int:
+    cutoff = time.time() - max_age_sec
+    with _connect(db_path) as conn:
+        cur = conn.execute("DELETE FROM job_logs WHERE ts < ?", (cutoff,))
+        pruned = cur.rowcount
+        # Cap per-job log row count.
+        conn.execute(
+            f"""
+            DELETE FROM job_logs WHERE rowid IN (
+                SELECT rowid FROM job_logs WHERE (job_id, seq) IN (
+                    SELECT job_id, seq FROM (
+                        SELECT job_id, seq,
+                               ROW_NUMBER() OVER (PARTITION BY job_id ORDER BY seq DESC) AS rn
+                        FROM job_logs
+                    ) WHERE rn > {int(max_rows_per_job)}
+                )
+            )
+            """
+        )
+        pruned += conn.execute("SELECT changes()").fetchone()[0]
+    return pruned
+
+
+# ---------- Pydantic models ----------
+
+
+class JobSubmit(BaseModel):
+    intent: Optional[str] = None
+    command: Optional[Any] = None  # str | list[str]
+    args: Optional[list[str]] = None
+    cwd: Optional[str] = None
+    env: Optional[dict[str, str]] = None
+    requires: dict[str, Any] = Field(default_factory=dict)
+    prefer: Optional[Any] = None  # soft routing hint, e.g. {"worker": "<id>"} (V2-4)
+    success_criteria: Optional[str] = None
+    budget: dict[str, Any] = Field(default_factory=dict)
+    permissions: dict[str, Any] = Field(default_factory=dict)
+    hierarchy: dict[str, Any] = Field(default_factory=dict)
+    kind: Optional[str] = None
+    image: Optional[str] = None  # kind: docker — image to run the job in
+    container: Optional[dict[str, Any]] = None  # kind: docker — gpus/cpus/memory/volumes/env/...
+    model: Optional[str] = None
+    subagent_model: Optional[str] = None
+    parent_job_id: Optional[str] = None  # populated by roost-mcp dispatches
+    max_attempts: Optional[int] = None
+    captain_root: bool = False  # anchor a captain plan's lineage/budget (V2-1)
+
+
+class WorkerRegister(BaseModel):
+    name: str
+    capabilities: dict[str, Any] = Field(default_factory=dict)
+
+
+class EnrollRequest(BaseModel):
+    token: str
+    name: str
+    capabilities: dict[str, Any] = Field(default_factory=dict)
+
+
+class EnrollTokenRequest(BaseModel):
+    label: Optional[str] = None
+    policy: dict[str, Any] = Field(default_factory=dict)
+    ttl_sec: Optional[float] = None
+
+
+class HeartbeatPayload(BaseModel):
+    capabilities: Optional[dict[str, Any]] = None
+
+
+class JobEvent(BaseModel):
+    type: str  # started | succeeded | failed | progress
+    attempt: Optional[int] = None
+    exit_code: Optional[int] = None
+    result: Any = None
+    error: Optional[str] = None
+    tokens_used: Optional[int] = None
+    activity: Optional[str] = None  # compact "what it's doing now" (liveness)
+
+
+# ---------- App factory ----------
+
+
+def _read_host_claude_creds() -> Optional[str]:
+    """Read the operator's Claude Code credentials (~/.claude/.credentials.json)
+    so an enrolling worker can be provisioned with the same auth. Returns the
+    raw file text, or None if absent/unreadable. Linux-only path (matches the
+    fleet); on macOS Claude stores creds in the Keychain, not this file."""
+    path = Path.home() / ".claude" / ".credentials.json"
+    try:
+        text = path.read_text()
+        json.loads(text)  # validate it's well-formed before handing it out
+        return text
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+# Default install command a worker runs when it lacks Claude Code. Centralised
+# here so the operator controls it fleet-wide via the enroll response.
+CLAUDE_INSTALL_CMD = "curl -fsSL https://claude.ai/install.sh | bash"
+
+
+def create_app(
+    db_path: Optional[Path] = None,
+    token: Optional[str] = None,
+    *,
+    run_sweeper: bool = True,
+    provision_claude_auth: bool = True,
+) -> FastAPI:
+    db = Path(db_path or os.environ.get("ROOST_DB", DEFAULT_DB))
+    shared_token = token if token is not None else os.environ.get("ROOST_TOKEN", "")
+    _init_db(db)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        sweeper_task: Optional[asyncio.Task] = None
+        if run_sweeper:
+            sweeper_task = asyncio.create_task(_sweep_loop(db))
+        yield
+        if sweeper_task:
+            sweeper_task.cancel()
+            try:
+                await sweeper_task
+            except asyncio.CancelledError:
+                pass
+
+    app = FastAPI(title="Roost", version="0.2.0", lifespan=lifespan)
+    app.state.db_path = db
+    app.state.shared_token = shared_token
+
+    def authenticate(request: Request, authorization: Optional[str] = Header(None)) -> dict:
+        """Returns dict with at least {kind: 'shared'|'worker'|'none', worker?: dict}."""
+        if not shared_token:
+            return {"kind": "none"}
+        if not authorization or not authorization.startswith("Bearer "):
+            raise HTTPException(401, "missing bearer token")
+        raw = authorization[7:]
+        if raw == shared_token:
+            return {"kind": "shared"}
+        worker = _worker_by_cred_hash(db, _hash_cred(raw))
+        if worker is not None:
+            return {"kind": "worker", "worker": worker}
+        raise HTTPException(401, "invalid bearer token")
+
+    def require_admin(principal: dict = Depends(authenticate)) -> dict:
+        if principal["kind"] not in ("shared", "none"):
+            raise HTTPException(403, "admin auth required")
+        return principal
+
+    def require_any(principal: dict = Depends(authenticate)) -> dict:
+        return principal
+
+    def require_worker(principal: dict = Depends(authenticate)) -> dict:
+        if principal["kind"] == "none":
+            return principal  # auth disabled
+        if principal["kind"] == "shared":
+            return principal  # admin can act as any worker
+        if principal["kind"] == "worker":
+            return principal
+        raise HTTPException(403, "worker credential required")
+
+    # ---- public health + installer ----
+
+    @app.get("/healthz")
+    async def healthz():
+        return {"ok": True, "version": "0.2.0"}
+
+    @app.get("/install.sh", response_class=PlainTextResponse)
+    async def install_sh(request: Request):
+        return render_install_script(str(request.base_url).rstrip("/"))
+
+    _panel_html = Path(__file__).parent / "panel.html"
+
+    @app.get("/panel", response_class=HTMLResponse)
+    async def panel():
+        # Live fleet dashboard (the data fetches inside carry ?token=… as a
+        # bearer header). The HTML itself is static and harmless, so unauthenticated.
+        try:
+            return _panel_html.read_text()
+        except OSError:
+            raise HTTPException(404, "panel not available")
+
+    # ---- enrollment ----
+
+    @app.post("/enroll-tokens", dependencies=[Depends(require_admin)])
+    async def mint_token(payload: EnrollTokenRequest):
+        ttl = payload.ttl_sec or ENROLL_TOKEN_TTL
+        raw, exp = await asyncio.to_thread(
+            _mint_enroll_token, db, payload.label, payload.policy, ttl
+        )
+        return {"token": raw, "expires_at": exp}
+
+    @app.get("/enroll-tokens", dependencies=[Depends(require_admin)])
+    async def list_tokens():
+        return await asyncio.to_thread(_list_enroll_tokens, db)
+
+    @app.post("/enroll")
+    async def enroll(payload: EnrollRequest):
+        try:
+            tok_row = await asyncio.to_thread(_consume_enroll_token, db, payload.token)
+        except PermissionError as e:
+            raise HTTPException(403, str(e))
+        policy = json.loads(tok_row["policy_json"] or "{}")
+        raw_cred = WORKER_CRED_PREFIX + secrets.token_urlsafe(32)
+        cred_hash = _hash_cred(raw_cred)
+        # Token row's `token_hash` identifies which enrollment was used.
+        worker = await asyncio.to_thread(
+            _register_worker,
+            db,
+            payload.name,
+            payload.capabilities,
+            tok_row["token_hash"],
+            cred_hash,
+            policy,
+        )
+        # Link token → worker for audit.
+        with _connect(db) as conn:
+            conn.execute(
+                "UPDATE enroll_tokens SET used_by_worker=? WHERE token_hash=?",
+                (worker["id"], tok_row["token_hash"]),
+            )
+        resp = {"worker_id": worker["id"], "credential": raw_cred, "policy": policy}
+        # Onboarding (v1): help the worker run Claude Code. Install it if missing
+        # and provision auth by COPYING the operator's credentials. Gated by the
+        # serve-level switch and opt-out-able per token (`provision_claude:false`).
+        # `auth.method` leaves room for future schemes (api_key, interactive).
+        if provision_claude_auth and policy.get("provision_claude", True):
+            onboarding: dict[str, Any] = {
+                "install_claude": True,
+                "install_cmd": CLAUDE_INSTALL_CMD,
+            }
+            creds = await asyncio.to_thread(_read_host_claude_creds)
+            if creds is not None:
+                onboarding["auth"] = {
+                    "method": "copy",
+                    "target": "~/.claude/.credentials.json",
+                    "credentials_json": creds,
+                }
+            resp["onboarding"] = onboarding
+        return resp
+
+    @app.get("/claude-creds", dependencies=[Depends(require_worker)])
+    async def claude_creds():
+        """Current operator Claude credentials, for a worker to refresh its local
+        copy before the access token expires (copied OAuth creds rotate, so a
+        one-time copy goes stale fleet-wide). Gated by the same provisioning flag."""
+        if not provision_claude_auth:
+            raise HTTPException(404, "credential provisioning is disabled")
+        creds = await asyncio.to_thread(_read_host_claude_creds)
+        if creds is None:
+            raise HTTPException(404, "no host credentials available")
+        return {"credentials_json": creds}
+
+    # ---- job submit / list / status / logs / stream / cancel ----
+
+    @app.post("/jobs")
+    async def submit_job(payload: JobSubmit, principal: dict = Depends(require_any)):
+        is_docker = (payload.kind or "").lower() == "docker"
+        if not payload.intent and not payload.command and not (is_docker and payload.image):
+            raise HTTPException(
+                400, "job must have either `intent`, `command`, or (kind: docker + `image`)")
+        parent_dict: Optional[dict] = None
+        if payload.parent_job_id:
+            parent_dict = await asyncio.to_thread(_get_job, db, payload.parent_job_id)
+            if parent_dict is None:
+                raise HTTPException(404, f"parent job {payload.parent_job_id} not found")
+            # A worker may only dispatch from a job assigned to it. Server-anchored
+            # roots (captain roots: worker_id is NULL) have no worker owner, so any
+            # authenticated principal may dispatch from them (single-operator trust).
+            if principal["kind"] == "worker" and parent_dict["worker_id"] is not None:
+                worker_id = principal["worker"]["id"]
+                if parent_dict["worker_id"] != worker_id:
+                    raise HTTPException(
+                        403, "parent job is not assigned to caller; cannot dispatch from it"
+                    )
+            # Hierarchy must be enabled on the parent for sub-dispatch.
+            parent_hier = (parent_dict["spec"].get("hierarchy") or {})
+            if not parent_hier.get("can_dispatch", False):
+                raise HTTPException(
+                    403, "parent job does not declare hierarchy.can_dispatch=true"
+                )
+        as_running = bool(payload.captain_root and parent_dict is None)
+        try:
+            job = await asyncio.to_thread(
+                _insert_job, db, payload.model_dump(exclude_none=False), parent_dict,
+                as_running=as_running,
+            )
+        except ValueError as e:
+            raise HTTPException(409, str(e))
+        return job
+
+    @app.post("/jobs/{job_id}/finalize", dependencies=[Depends(require_any)])
+    async def finalize_job(job_id: str, payload: dict[str, Any]):
+        """Move a non-worker-owned job (a captain root) to a terminal state.
+
+        Used by `roost dispatch` to close out the plan anchor when the captain
+        exits. Refuses to touch a job currently owned by a worker.
+        """
+        state = payload.get("state", "succeeded")
+        if state not in TERMINAL_STATES:
+            raise HTTPException(400, f"state must be one of {TERMINAL_STATES}")
+        ok = await asyncio.to_thread(
+            _finalize_job, db, job_id, state, payload.get("result"), payload.get("error")
+        )
+        if ok is None:
+            raise HTTPException(404, "job not found")
+        if ok is False:
+            raise HTTPException(409, "job is worker-owned or already terminal")
+        return await asyncio.to_thread(_get_job, db, job_id)
+
+    @app.get("/jobs", dependencies=[Depends(require_any)])
+    async def list_jobs_endpoint(
+        state: Optional[str] = None,
+        root: Optional[str] = None,
+        parent: Optional[str] = None,
+        limit: int = 100,
+    ):
+        jobs = await asyncio.to_thread(_list_jobs, db, state, root, parent, limit)
+        return await asyncio.to_thread(_annotate_liveness, db, jobs)
+
+    @app.get("/jobs/{job_id}", dependencies=[Depends(require_any)])
+    async def get_job_endpoint(job_id: str):
+        job = await asyncio.to_thread(_get_job, db, job_id)
+        if not job:
+            raise HTTPException(404, "job not found")
+        return (await asyncio.to_thread(_annotate_liveness, db, [job]))[0]
+
+    @app.get("/jobs/{job_id}/tree", dependencies=[Depends(require_any)])
+    async def get_tree(job_id: str):
+        job = await asyncio.to_thread(_get_job, db, job_id)
+        if not job:
+            raise HTTPException(404, "job not found")
+        root_id = job["root_job_id"] or job["id"]
+        tree = await asyncio.to_thread(_get_tree, db, root_id)
+        return await asyncio.to_thread(_annotate_liveness, db, tree)
+
+    @app.delete("/jobs/{job_id}", dependencies=[Depends(require_any)])
+    async def cancel_job_endpoint(job_id: str, tree: bool = False):
+        count = await asyncio.to_thread(_cancel_job, db, job_id, tree)
+        if count == 0:
+            raise HTTPException(409, "job not found or already terminal")
+        return {"cancelled": count}
+
+    @app.get("/jobs/{job_id}/logs", dependencies=[Depends(require_any)])
+    async def get_logs_endpoint(job_id: str, since: int = 0, limit: int = 1000):
+        job = await asyncio.to_thread(_get_job, db, job_id)
+        if not job:
+            raise HTTPException(404, "job not found")
+        logs = await asyncio.to_thread(_read_logs, db, job_id, since, limit)
+        return {"job_id": job_id, "state": job["state"], "logs": logs}
+
+    @app.get("/jobs/{job_id}/stream", dependencies=[Depends(require_any)])
+    async def stream_job(job_id: str, since: int = 0):
+        async def gen() -> AsyncIterator[bytes]:
+            last = since
+            terminal = False
+            last_state: Optional[str] = None
+            while not terminal:
+                job = await asyncio.to_thread(_get_job, db, job_id)
+                if not job:
+                    yield (
+                        b"event: error\ndata: "
+                        + json.dumps({"error": "job not found"}).encode()
+                        + b"\n\n"
+                    )
+                    return
+                if job["state"] != last_state:
+                    yield (
+                        b"event: state\ndata: "
+                        + json.dumps({"state": job["state"]}).encode()
+                        + b"\n\n"
+                    )
+                    last_state = job["state"]
+                logs = await asyncio.to_thread(_read_logs, db, job_id, last, 500)
+                for log in logs:
+                    yield (
+                        b"event: log\ndata: "
+                        + json.dumps(log, ensure_ascii=False).encode()
+                        + b"\n\n"
+                    )
+                    last = log["seq"]
+                if job["state"] in TERMINAL_STATES:
+                    final = {
+                        "state": job["state"],
+                        "exit_code": job["exit_code"],
+                        "error": job["error"],
+                        "result": job["result"],
+                        "tokens_used": job["tokens_used"],
+                    }
+                    yield b"event: done\ndata: " + json.dumps(final).encode() + b"\n\n"
+                    terminal = True
+                else:
+                    await asyncio.sleep(0.5)
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
+    # ---- worker plane ----
+
+    @app.post("/workers/register")
+    async def register_worker(
+        payload: WorkerRegister, principal: dict = Depends(require_any)
+    ):
+        """Legacy / LAN-convenience register: uses shared token only.
+
+        Workers using per-worker credentials enroll via POST /enroll instead.
+        """
+        if principal["kind"] not in ("shared", "none"):
+            raise HTTPException(
+                403, "use POST /enroll for per-worker credentials; "
+                     "POST /workers/register only accepts the shared token"
+            )
+        worker = await asyncio.to_thread(
+            _register_worker, db, payload.name, payload.capabilities, None, None, {}
+        )
+        return worker
+
+    @app.get("/workers", dependencies=[Depends(require_any)])
+    async def list_workers_endpoint():
+        return await asyncio.to_thread(_list_workers, db)
+
+    @app.get("/workers/{worker_id}", dependencies=[Depends(require_any)])
+    async def get_worker_endpoint(worker_id: str):
+        worker = await asyncio.to_thread(_get_worker, db, worker_id)
+        if not worker:
+            raise HTTPException(404, "worker not found")
+        return worker
+
+    @app.delete("/workers/{worker_id}", dependencies=[Depends(require_admin)])
+    async def revoke_worker_endpoint(worker_id: str):
+        ok = await asyncio.to_thread(_revoke_worker, db, worker_id)
+        if not ok:
+            raise HTTPException(404, "worker not found")
+        return {"revoked": True}
+
+    @app.post("/workers/{worker_id}/heartbeat", dependencies=[Depends(require_worker)])
+    async def heartbeat(worker_id: str, payload: HeartbeatPayload):
+        ok = await asyncio.to_thread(
+            _heartbeat_worker, db, worker_id, payload.capabilities
+        )
+        if not ok:
+            raise HTTPException(404, "worker not found")
+        # Tell the worker which of its jobs were cancelled so it can tear down the
+        # running process / docker container (cancel can't push under the pull
+        # model; this is the back-channel).
+        cancelled = await asyncio.to_thread(_recently_cancelled_for_worker, db, worker_id)
+        return {"ok": True, "cancel": cancelled}
+
+    @app.get("/workers/{worker_id}/poll", dependencies=[Depends(require_worker)])
+    async def poll(worker_id: str, timeout: float = Query(POLL_HOLD_MAX, ge=0, le=POLL_HOLD_MAX)):
+        worker = await asyncio.to_thread(_get_worker, db, worker_id)
+        if not worker:
+            raise HTTPException(404, "worker not found")
+        end = asyncio.get_event_loop().time() + min(timeout, POLL_HOLD_MAX)
+        while True:
+            job = await asyncio.to_thread(_try_assign_one, db, worker_id)
+            if job:
+                return job
+            remaining = end - asyncio.get_event_loop().time()
+            if remaining <= 0:
+                return JSONResponse(status_code=204, content=None)
+            await asyncio.sleep(min(0.5, remaining))
+
+    @app.post(
+        "/workers/{worker_id}/jobs/{job_id}/logs",
+        dependencies=[Depends(require_worker)],
+    )
+    async def post_log(worker_id: str, job_id: str, payload: dict[str, Any]):
+        stream = payload.get("stream", "stdout")
+        data = payload.get("data", "")
+        if not isinstance(data, str):
+            data = json.dumps(data)
+        seq = await asyncio.to_thread(_append_log, db, job_id, stream, data)
+        await asyncio.to_thread(_heartbeat_worker, db, worker_id, None)
+        return {"seq": seq}
+
+    @app.post(
+        "/workers/{worker_id}/jobs/{job_id}/event",
+        dependencies=[Depends(require_worker)],
+    )
+    async def post_event(worker_id: str, job_id: str, event: JobEvent):
+        try:
+            job, accepted = await asyncio.to_thread(
+                _apply_event, db, job_id, worker_id, event.model_dump(exclude_none=False)
+            )
+        except KeyError:
+            raise HTTPException(404, "job not found")
+        except PermissionError as e:
+            raise HTTPException(403, str(e))
+        if not accepted:
+            raise HTTPException(409, "stale attempt; event ignored")
+        await asyncio.to_thread(
+            _append_log,
+            db,
+            job_id,
+            "event",
+            json.dumps(event.model_dump(exclude_none=False)),
+        )
+        return job
+
+    return app
+
+
+# ---------- Sweeper task ----------
+
+
+async def _sweep_loop(db_path: Path) -> None:
+    while True:
+        try:
+            await asyncio.to_thread(_sweep, db_path)
+        except Exception as e:  # noqa: BLE001
+            print(f"[roost] sweeper error: {e}", flush=True)
+        try:
+            await asyncio.sleep(SWEEPER_INTERVAL)
+        except asyncio.CancelledError:
+            return
+
+
+# ---------- Install script ----------
+
+
+def render_install_script(control_plane_url: str) -> str:
+    return f"""#!/usr/bin/env sh
+# Roost worker installer. Idempotent: re-running upgrades in place.
+# Usage:
+#   curl -fsSL {control_plane_url}/install.sh | sh -s -- <enroll-token> [--name NAME] [--source SOURCE]
+#
+# SOURCE defaults to the published roost wheel. Override with a git URL or
+# a local path when iterating, e.g. --source 'git+https://github.com/you/roost'.
+set -eu
+
+ROOST_URL="${{ROOST_URL:-{control_plane_url}}}"
+ROOST_ENROLL_TOKEN="${{ROOST_ENROLL_TOKEN:-${{1:-}}}}"
+ROOST_NAME="${{ROOST_NAME:-$(hostname)}}"
+ROOST_SOURCE="${{ROOST_SOURCE:-roost}}"
+
+shift 2>/dev/null || true
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --name) ROOST_NAME="$2"; shift 2 ;;
+        --source) ROOST_SOURCE="$2"; shift 2 ;;
+        --no-start) ROOST_NO_START=1; shift ;;
+        *) shift ;;
+    esac
+done
+
+if [ -z "$ROOST_ENROLL_TOKEN" ]; then
+    echo "Usage: curl <url>/install.sh | sh -s -- <enroll-token>" >&2
+    exit 1
+fi
+
+# Install uv if absent.
+if ! command -v uv >/dev/null 2>&1; then
+    echo "[install] installing uv..."
+    curl -fsSL https://astral.sh/uv/install.sh | sh
+    export PATH="$HOME/.local/bin:$PATH"
+fi
+
+echo "[install] installing roost from $ROOST_SOURCE..."
+uv tool install --force "$ROOST_SOURCE"
+
+# Ensure tool dir on PATH for this session.
+export PATH="$HOME/.local/bin:$PATH"
+
+echo "[install] enrolling as $ROOST_NAME ..."
+roost enroll --url "$ROOST_URL" --token "$ROOST_ENROLL_TOKEN" --name "$ROOST_NAME"
+
+if [ "${{ROOST_NO_START:-0}}" = "0" ]; then
+    echo "[install] installing supervisor unit and starting..."
+    roost service install --start
+fi
+
+echo "[install] done. Tail logs with: roost service logs"
+"""
+
+
+def run(
+    host: str = "0.0.0.0",
+    port: int = 8787,
+    db_path: Optional[Path] = None,
+    token: Optional[str] = None,
+    provision_claude_auth: bool = True,
+) -> None:
+    import uvicorn
+
+    if provision_claude_auth and _read_host_claude_creds() is not None:
+        print(
+            "[roost] WARNING: claude-auth provisioning is ON — enrolling workers "
+            "will receive a COPY of this host's ~/.claude/.credentials.json. Only "
+            "enroll machines you trust; use --no-provision-auth to disable.",
+            flush=True,
+        )
+    app = create_app(db_path=db_path, token=token,
+                     provision_claude_auth=provision_claude_auth)
+    uvicorn.run(app, host=host, port=port, log_level="info")

@@ -1,0 +1,9 @@
+# Smoke-test job: run a trivial command on any worker.
+# Submit with:  roost submit examples/echo.yaml
+command: |
+  echo "hello from $(hostname) at $(date)"
+  echo "uname: $(uname -a)"
+  for i in 1 2 3; do echo "tick $i"; sleep 0.2; done
+requires: {}
+budget:
+  max_wallclock_min: 1

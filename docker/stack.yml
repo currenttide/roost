@@ -1,0 +1,69 @@
+# Full Roost stack in Docker: control plane + a GPU-enabled worker that can
+# launch isolated per-job containers (Docker-as-executor, DooD).
+#
+# Usage (from repo root):
+#   uv build --wheel
+#   export ROOST_TOKEN=<admin-token>
+#   export DOCKER_GID=$(getent group docker | cut -d: -f3)   # host docker gid (NOT always 999)
+#   export GPU_WORKER_TOKEN=$(roost --token $ROOST_TOKEN enroll-token --label gpu-worker --trust --no-curl | grep -oE 'token: \S+' | awk '{print $2}')
+#   docker compose -f docker/stack.yml up -d --build
+#
+# If DOCKER_GID is wrong, the worker can't read the mounted socket and silently
+# advertises no docker capability (so GPU container jobs never place there).
+#
+# The control plane publishes 8787 on the host, so native workers elsewhere on
+# the network keep reaching it at http://<host-ip>:8787 unchanged.
+services:
+  control-plane:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: roost-worker:latest
+    entrypoint: ["roost"]
+    command: ["serve", "--host", "0.0.0.0", "--port", "8787",
+              "--db", "/data/roost.db", "--provision-auth"]
+    environment:
+      ROOST_TOKEN: ${ROOST_TOKEN:?set ROOST_TOKEN}
+    ports:
+      - "8787:8787"
+    volumes:
+      # Host dir holding the SQLite DB. Point ROOST_DATA_DIR at a persistent path
+      # so enrollments + job history survive a container recreate.
+      - ${ROOST_DATA_DIR:-./roost-data}:/data
+      # read the operator's creds so --provision-auth can hand them to workers
+      - ${HOME}/.claude:/home/roost/.claude:ro
+    restart: unless-stopped
+
+  gpu-worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: roost-worker:latest
+    environment:
+      ROOST_URL: http://control-plane:8787
+      ROOST_ENROLL_TOKEN: ${GPU_WORKER_TOKEN:-}
+      ROOST_WORKER_NAME: ${GPU_WORKER_NAME:-gpu-worker}
+    volumes:
+      # DooD: launch per-job containers as siblings on the host daemon
+      - /var/run/docker.sock:/var/run/docker.sock
+      - gpu-worker-config:/home/roost/.config/roost
+      - gpu-worker-claude:/home/roost/.claude
+    # non-root container user must be in the host's docker group (gid 999) to use the socket
+    group_add:
+      - "${DOCKER_GID:-999}"
+    depends_on:
+      - control-plane
+    restart: unless-stopped
+    # GPU access for the worker itself (direct GPU jobs + nvidia-smi capability detection).
+    # Per-job containers it spawns get GPUs via `docker run --gpus` on the host daemon.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  gpu-worker-config:
+  gpu-worker-claude:
