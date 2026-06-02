@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🪺 Roost
+# Roost
 
 **A pull-based orchestrator for agent jobs across a fleet of heterogeneous machines.**
 
@@ -8,7 +8,7 @@ Drive laptops, servers, Raspberry Pis, GPU boxes, and cloud VMs from one control
 State a goal in plain language — a captain agent splits it and places each piece on the
 best-fit node. Or submit jobs directly.
 
-[Quickstart](#-quickstart) · [Job kinds](#-submitting-jobs) · [Auth](#-auth-for-agent-jobs) · [Docker](#-running-in-docker) · [Architecture](#-architecture)
+[Quickstart](#quickstart) · [Job kinds](#submitting-jobs) · [Auth](#auth-for-agent-jobs) · [Docker](#running-in-docker) · [Architecture](#architecture)
 
 </div>
 
@@ -64,7 +64,7 @@ The control plane never connects *to* a worker — workers dial out. That buys y
 
 ---
 
-## 📦 Install
+## Install
 
 Requires Python **3.10+** (3.12 recommended). Easiest with [`uv`](https://docs.astral.sh/uv/):
 
@@ -76,14 +76,14 @@ uv tool install --python 3.12 .
 uv tool install --python 3.12 "git+https://github.com/<you>/roost"
 ```
 
-> ⚠️ **Pin Python 3.12.** `uv` may otherwise pick a newer interpreter the async HTTP
+> **Pin Python 3.12.** `uv` may otherwise pick a newer interpreter the async HTTP
 > client doesn't support yet.
 
 This puts a `roost` command on your PATH. (Prefer pip? `pip install -e ".[dev]"` in a venv.)
 
 ---
 
-## 🚀 Quickstart
+## Quickstart
 
 ### Option A — let Claude set it up (recommended)
 
@@ -126,7 +126,7 @@ job they're running.
 
 ---
 
-## 🧩 Submitting jobs
+## Submitting jobs
 
 `roost dispatch "<goal>"` is the plain-language path. For precise control, write a spec
 and `roost submit spec.yaml` (add `--detach` to not block):
@@ -174,7 +174,7 @@ Runnable specs live in [`examples/`](examples/).
 
 ---
 
-## 🔑 Auth for agent jobs
+## Auth for agent jobs
 
 Agent (`claude`) jobs run Claude Code on the worker, which needs credentials. The method
 is **always an explicit choice** (the onboarding skill asks — never silent):
@@ -189,13 +189,13 @@ When creds are copied, workers **re-pull fresh credentials periodically** so rot
 OAuth tokens don't go stale. On shared machines, set `CLAUDE_CONFIG_DIR` so Roost's
 credentials don't disturb the user's own Claude.
 
-> 🔒 Copying real credentials across machines is sensitive. Keep it to hosts you own on a
+> **Security:** copying real credentials across machines is sensitive. Keep it to hosts you own on a
 > trusted network, prefer per-worker API keys for anything shared, and never commit a
 > token, DB, or `*.credentials.json` (the `.gitignore` blocks them).
 
 ---
 
-## 🐳 Running in Docker
+## Running in Docker
 
 Everything can run in containers so jobs don't disturb the host or each other.
 
@@ -213,7 +213,7 @@ See the header comments in each file for the full recipe.
 
 ---
 
-## 🖥 macOS control app (optional)
+## macOS control app (optional)
 
 [`mac-app/build.sh`](mac-app/build.sh) builds **RoostFleet.app** — a double-click app with
 a floating, always-on-top panel (which node is doing what, live) plus a Terminal running
@@ -225,7 +225,7 @@ mac-app/build.sh http://<control-plane-host>:8787 "<admin-token>"
 
 ---
 
-## 🏗 Architecture
+## Architecture
 
 ```
             submit / dispatch                    long-poll for work
@@ -245,7 +245,7 @@ mac-app/build.sh http://<control-plane-host>:8787 "<admin-token>"
 
 ---
 
-## 🛠 Development
+## Development
 
 ```bash
 uv tool install --python 3.12 --with pytest .    # or: pip install -e ".[dev]"
@@ -255,6 +255,6 @@ python -m pytest -q                               # run the suite
 Contributions welcome. Keep credentials and machine-specific config out of commits
 (see [`.gitignore`](.gitignore)).
 
-## 📄 License
+## License
 
 MIT — see [LICENSE](LICENSE).
