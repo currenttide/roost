@@ -560,3 +560,46 @@ def test_triage_prompt_endpoint(client: TestClient):
     body = r.json()
     assert body["decline_marker"] in body["system"]
     assert "decline" in body["system"].lower()
+
+
+# ---------- Derived observability model (ease-of-use-plan Part II, D0) ----------
+
+
+def test_job_phase_derivation():
+    assert server._job_phase({"state": "succeeded"}) == "succeeded"
+    assert server._job_phase({"state": "running", "last_activity": "🔎 verifying result"}) == "verifying"
+    assert server._job_phase({"state": "running", "last_activity": "🔧 self-healing (1)"}) == "self-healing"
+    assert server._job_phase({"state": "running", "last_activity": "→ Bash"}) == "running"
+
+
+def test_job_health_verdicts():
+    assert server._job_health({"state": "failed", "error": "boom"})["status"] == "failed"
+    assert server._job_health({"state": "succeeded", "result": {"verified": True}})["status"] == "verified"
+    assert server._job_health({"state": "succeeded", "result": {"verified": False}})["status"] == "unverified"
+    assert server._job_health({"state": "queued", "capable_workers": 0})["status"] == "unplaceable"
+    assert server._job_health({"state": "queued", "capable_workers": 2, "queued_sec": 5})["status"] == "queued"
+    assert server._job_health({"state": "running", "idle_sec": 999})["status"] == "stuck?"
+    assert server._job_health({"state": "running", "idle_sec": 3})["status"] == "running"
+
+
+def test_job_cost_and_budget():
+    c = server._job_cost({"tokens_used": 500_000, "tree_budget_tokens": 1_000_000, "tree_budget_spent": 250_000})
+    assert c["tokens_used"] == 500_000 and c["cost_est_usd"] > 0 and c["budget_pct"] == 25.0
+
+
+def test_fleet_verdict_flags_problems_first():
+    workers = [{"status": "idle"}, {"status": "busy"}]
+    bad = server._derive_run({"id": "x", "state": "queued", "capable_workers": 0,
+                              "spec": {"task": "need a GPU"}})
+    good = server._derive_run({"id": "y", "state": "running", "spec": {"task": "ok"}})
+    assert server._fleet_verdict(workers, [bad, good])["level"] == "alert"
+    assert server._fleet_verdict(workers, [good])["level"] == "ok"
+
+
+def test_derive_run_shape():
+    r = server._derive_run({"id": "j1", "state": "succeeded", "worker_id": "w1",
+                            "spec": {"task": "write a file"},
+                            "result": {"verified": True, "output": "done", "evidence": "confirmed"}})
+    assert r["run_id"] == "j1" and r["goal"] == "write a file"
+    assert r["phase"] == "succeeded" and r["health"]["status"] == "verified"
+    assert "cost" in r and "tokens_used" in r["cost"]

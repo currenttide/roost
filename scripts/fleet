@@ -58,6 +58,14 @@ def dashboard():
     except Exception as e:
         cp = f"DOWN ({e})"
     print(f"\033[1mROOST FLEET\033[0m   control plane {URL}  [{cp}]")
+    # Fleet verdict line (same derived model the web panel renders).
+    try:
+        v = api("/derived").get("fleet_verdict") or {}
+        col = {"ok": "\033[32m", "warn": "\033[33m", "alert": "\033[31m"}.get(v.get("level"), "")
+        if v.get("summary"):
+            print(f"  {col}● {v['summary']}\033[0m")
+    except Exception:
+        pass
     try:
         ws = [w for w in api("/workers") if w.get("status") in ("idle", "busy")]
     except Exception as e:

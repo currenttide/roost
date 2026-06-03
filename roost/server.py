@@ -283,6 +283,115 @@ def _annotate_liveness(db_path: Path, jobs: list[dict]) -> list[dict]:
     return jobs
 
 
+# ---------- Derived observability model (ease-of-use-plan Part II, D0) ----------
+# Composes the deterministic facts above into operator-meaningful fields: phase,
+# a rule-based health verdict, cost, and a single fleet verdict. The web panel,
+# `scripts/fleet`, and the MCP inbox all render this one model. Agents (D2) later
+# fill cached narrative slots; this layer stays deterministic + always-available.
+
+STUCK_AFTER = 150.0          # a running job idle this long is a stuck-suspect
+WAITING_AFTER = 90.0         # a queued (but placeable) job waiting this long
+COST_PER_MTOK_USD = 10.0     # rough blended marginal $/Mtok on tokens_used (approximate)
+
+
+def _goal_text(job: dict) -> str:
+    spec = job.get("spec") or {}
+    g = spec.get("task") or spec.get("intent") or spec.get("command") or ""
+    return (g if isinstance(g, str) else " ".join(g))[:140]
+
+
+def _job_phase(job: dict) -> str:
+    state = job.get("state")
+    if state in ("succeeded", "failed", "cancelled"):
+        return state
+    act = job.get("last_activity") or ""
+    if "verifying" in act:
+        return "verifying"
+    if "self-healing" in act:
+        return "self-healing"
+    return state or "queued"
+
+
+def _job_health(job: dict) -> dict:
+    """Rule-based verdict from facts only (no LLM). {status, reason}."""
+    state = job.get("state")
+    if state == "failed":
+        return {"status": "failed", "reason": (job.get("error") or "failed")[:160]}
+    if state == "cancelled":
+        return {"status": "cancelled", "reason": "cancelled"}
+    if state == "succeeded":
+        res = job.get("result") if isinstance(job.get("result"), dict) else {}
+        if res.get("verified") is True:
+            return {"status": "verified", "reason": (res.get("evidence") or "verified")[:160]}
+        if res.get("verified") is False:
+            return {"status": "unverified", "reason": "completed but NOT verified"}
+        return {"status": "done", "reason": "completed"}
+    if state == "queued":
+        if job.get("capable_workers") == 0:
+            return {"status": "unplaceable", "reason": "no online worker satisfies requires"}
+        qs = job.get("queued_sec") or 0
+        if qs > WAITING_AFTER:
+            return {"status": "waiting", "reason": f"queued {int(qs)}s — capable workers busy"}
+        return {"status": "queued", "reason": "queued"}
+    idle = job.get("idle_sec")
+    if idle is not None and idle > STUCK_AFTER:
+        return {"status": "stuck?", "reason": f"no activity for {int(idle)}s — may be stuck"}
+    return {"status": "running", "reason": (job.get("last_activity") or "running")[:160]}
+
+
+def _job_cost(job: dict) -> dict:
+    tok = int(job.get("tokens_used") or 0)
+    out: dict[str, Any] = {"tokens_used": tok,
+                           "cost_est_usd": round(tok / 1_000_000 * COST_PER_MTOK_USD, 4)}
+    tb = job.get("tree_budget_tokens")
+    if tb:
+        out["budget_pct"] = round(100 * (job.get("tree_budget_spent") or 0) / tb, 1)
+    return out
+
+
+def _derive_run(job: dict) -> dict:
+    """One job → the operator-meaningful 'story' fields (D0)."""
+    res = job.get("result") if isinstance(job.get("result"), dict) else {}
+    return {
+        "run_id": job.get("id"),
+        "goal": _goal_text(job),
+        "state": job.get("state"),
+        "phase": _job_phase(job),
+        "health": _job_health(job),
+        "worker": job.get("worker_id"),
+        "verified": res.get("verified"),
+        "evidence": res.get("evidence"),
+        "result": (res.get("output") or job.get("error") or "")[:240],
+        "last_activity": job.get("last_activity"),
+        "idle_sec": job.get("idle_sec"),
+        "queued_sec": job.get("queued_sec"),
+        "capable_workers": job.get("capable_workers"),
+        "decline_count": job.get("decline_count"),
+        "cost": _job_cost(job),
+        # agentic slots (D2 fills these; empty/deterministic for now)
+        "narration": job.get("last_activity"),
+        "root_job_id": job.get("root_job_id"),
+        "created_at": job.get("created_at"),
+        "finished_at": job.get("finished_at"),
+    }
+
+
+def _fleet_verdict(workers: list[dict], runs: list[dict]) -> dict:
+    live = [w for w in workers if w.get("status") in ("idle", "busy")]
+    bad = [r for r in runs if r["health"]["status"] in
+           ("unplaceable", "stuck?", "failed", "unverified")]
+    active = [r for r in runs if r["state"] in ("running", "assigned")]
+    verifying = [r for r in runs if r["phase"] in ("verifying", "self-healing")]
+    if bad:
+        w = bad[0]
+        return {"level": "alert",
+                "summary": f"{len(bad)} need attention — {w['health']['status']}: {w['goal'][:60]}"}
+    if active or verifying:
+        return {"level": "ok",
+                "summary": f"{len(live)} nodes · {len(active)} running · {len(verifying)} verifying — all healthy"}
+    return {"level": "ok", "summary": f"{len(live)} nodes online · fleet idle"}
+
+
 def _recently_cancelled_for_worker(db_path: Path, worker_id: str) -> list[str]:
     """Job ids assigned to this worker that were cancelled in the last few
     minutes — so a heartbeat can tell the worker to kill the still-running
@@ -1309,6 +1418,27 @@ def create_app(
     ):
         jobs = await asyncio.to_thread(_list_jobs, db, state, root, parent, limit)
         return await asyncio.to_thread(_annotate_liveness, db, jobs)
+
+    @app.get("/derived", dependencies=[Depends(require_any)])
+    async def derived_endpoint(limit: int = 40):
+        """The composed observability model (D0): one fleet verdict + workers + the
+        operator-meaningful 'story' for recent runs. The web panel, scripts/fleet, and
+        the MCP inbox all render THIS, so the surfaces never diverge."""
+        jobs = await asyncio.to_thread(_list_jobs, db, None, None, None, limit)
+        jobs = await asyncio.to_thread(_annotate_liveness, db, jobs)
+        workers = await asyncio.to_thread(_list_workers, db)
+        runs = [_derive_run(j) for j in jobs]
+        return {"generated_at": time.time(),
+                "fleet_verdict": _fleet_verdict(workers, runs),
+                "workers": workers, "runs": runs}
+
+    @app.get("/jobs/{job_id}/derived", dependencies=[Depends(require_any)])
+    async def derived_job_endpoint(job_id: str):
+        job = await asyncio.to_thread(_get_job, db, job_id)
+        if not job:
+            raise HTTPException(404, "job not found")
+        job = (await asyncio.to_thread(_annotate_liveness, db, [job]))[0]
+        return _derive_run(job)
 
     @app.get("/jobs/{job_id}", dependencies=[Depends(require_any)])
     async def get_job_endpoint(job_id: str):
