@@ -722,3 +722,31 @@ def test_job_health_does_not_flag_stuck_during_verify_or_heal():
     assert server._job_health(j2)["status"] == "self-healing"
     # but a genuinely idle running job (no verify marker) is still flagged
     assert server._job_health({"state": "running", "idle_sec": 999})["status"] == "stuck?"
+
+
+# ---------- Hardening fixes (final audit) ----------
+
+
+def test_worker_cannot_act_on_another_workers_path(client: TestClient):
+    # Two enrolled workers; B's credential must not act on A's path (no impersonation).
+    a_id, _ = _enroll_worker(client, {"tools": ["python3"]})
+    r = client.post("/enroll-tokens", json={"label": "b"})
+    btok = r.json()["token"]
+    rb = client.post("/enroll", json={"token": btok, "name": "b", "capabilities": {}},
+                     headers={"Authorization": ""})
+    b_cred = rb.json()["credential"]
+    bh = {"Authorization": f"Bearer {b_cred}"}
+    # B heartbeating its own path is fine; B on A's path is forbidden.
+    assert client.post(f"/workers/{rb.json()['worker_id']}/heartbeat", json={}, headers=bh).status_code == 200
+    assert client.post(f"/workers/{a_id}/heartbeat", json={}, headers=bh).status_code == 403
+
+
+def test_child_cannot_raise_max_depth_above_parent(tmp_path: Path):
+    db = tmp_path / "roost.db"
+    server._init_db(db)
+    root = server._insert_job(db, {"command": "true", "hierarchy": {"max_depth": 2, "can_dispatch": True}})
+    assert root["max_depth"] == 2
+    # A child declaring a huge max_depth is clamped down to the parent's ceiling.
+    child = server._insert_job(
+        db, {"command": "true", "hierarchy": {"max_depth": 1000, "can_dispatch": True}}, parent=root)
+    assert child["max_depth"] == 2

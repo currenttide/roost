@@ -159,6 +159,100 @@ def _print_job(job: dict, verbose: bool = False) -> None:
         click.echo(json.dumps(job.get("spec", {}), indent=2, sort_keys=True))
 
 
+# ---------- history / discovery (pure formatting helpers) ----------
+
+_TERMINAL_STATES = ("succeeded", "failed", "cancelled")
+
+
+def _rel_time(epoch: Optional[float], now: Optional[float] = None) -> str:
+    """Compact 'how long ago' for an epoch timestamp ('3m', '2h', '4d'). '-' if
+    missing/unparsable."""
+    if epoch in (None, ""):
+        return "-"
+    try:
+        delta = (now if now is not None else time.time()) - float(epoch)
+    except (TypeError, ValueError):
+        return "-"
+    if delta < 0:
+        delta = 0
+    if delta < 60:
+        return f"{int(delta)}s"
+    if delta < 3600:
+        return f"{int(delta // 60)}m"
+    if delta < 86400:
+        return f"{int(delta // 3600)}h"
+    return f"{int(delta // 86400)}d"
+
+
+def _history_outcome(run: dict) -> tuple[str, Optional[str]]:
+    """(label, click-color) for a derived run's outcome — green verified, red
+    failed/unverified, plain otherwise. Pure: reads the run's state + health."""
+    state = run.get("state")
+    health = (run.get("health") or {}).get("status")
+    if run.get("verified") is True or health == "verified":
+        return "verified ✓", "green"
+    if state == "failed" or health == "failed":
+        return "failed ✗", "red"
+    if state == "cancelled" or health == "cancelled":
+        return "cancelled", "yellow"
+    if run.get("verified") is False or health == "unverified":
+        return "unverified ✗", "red"
+    return "done", None
+
+
+def _history_row(run: dict, now: Optional[float] = None) -> tuple[str, str, str, Optional[str], str, str, str]:
+    """One derived run → display fields for the history table. Pure; never raises.
+
+    Returns (short_id, outcome_label, outcome_color, worker, cost_str, age, goal).
+    """
+    run_id = run.get("run_id") or run.get("id") or "-"
+    short_id = str(run_id)[:8] if run_id != "-" else "-"
+    label, color = _history_outcome(run)
+    worker = run.get("worker") or "-"
+    cost = run.get("cost") or {}
+    usd = cost.get("cost_est_usd")
+    cost_str = f"${usd:.2f}" if isinstance(usd, (int, float)) and usd else ""
+    age = _rel_time(run.get("finished_at") or run.get("created_at"), now)
+    goal = (run.get("goal") or "").replace("\n", " ").strip()
+    if len(goal) > 52:
+        goal = goal[:49] + "..."
+    return (short_id, label, color, worker, cost_str, age, goal)
+
+
+def _history_runs(runs: list[dict], *, failed_only: bool = False) -> list[dict]:
+    """Filter derived runs to the 'what have I run' view: terminal states only,
+    with a real goal, newest first as returned. `failed_only` keeps just the runs
+    that failed / were not verified. Pure; tolerates missing fields."""
+    out = []
+    for r in runs:
+        if r.get("state") not in _TERMINAL_STATES:
+            continue
+        if not (r.get("goal") or "").strip():
+            continue
+        if failed_only:
+            label, _ = _history_outcome(r)
+            if "✓" in label or label == "done":
+                continue
+        out.append(r)
+    return out
+
+
+def _recent_successes(runs: list[dict], limit: int = 5) -> list[str]:
+    """Goals of the most recent verified/done runs — examples of what the fleet
+    has actually done (for `capabilities`). Pure; best-effort, may be empty."""
+    goals: list[str] = []
+    for r in runs:
+        if r.get("state") != "succeeded":
+            continue
+        goal = (r.get("goal") or "").replace("\n", " ").strip()
+        if not goal:
+            continue
+        goals.append(goal if len(goal) <= 70 else goal[:67] + "...")
+        if len(goals) >= limit:
+            break
+    return goals
+
+
 def _iter_sse(resp: httpx.Response):
     """Yield (event, data_dict) for each SSE message in an httpx streaming response."""
     event = None
@@ -914,11 +1008,19 @@ def do_(ctx: click.Context, goal: tuple, yes: bool, model: Optional[str]) -> Non
 @click.pass_context
 def capabilities(ctx: click.Context) -> None:
     """Describe what this fleet can do, in plain language, with examples (discovery)."""
+    recent: list[str] = []
     with _ctx_client(ctx) as c:
         try:
             workers = c.get("/workers").json()
         except httpx.HTTPError as e:
             raise click.ClickException(f"cannot reach control plane: {e}")
+        # Best-effort: real examples of what this fleet has actually done.
+        try:
+            d = c.get("/derived", params={"limit": 60})
+            if d.status_code < 400:
+                recent = _recent_successes((d.json() or {}).get("runs", []), limit=5)
+        except (httpx.HTTPError, ValueError):
+            recent = []
     live = [w for w in workers if w.get("status") in ("idle", "busy")]
     if not live:
         click.echo("No online workers. Start one with `roost worker`, or add nodes with /roost-onboard.")
@@ -948,7 +1050,11 @@ def capabilities(ctx: click.Context) -> None:
     if gpus:
         click.echo('  roost do "report the GPU model and free VRAM on a GPU box"')
     click.echo('  roost do "run the test suite somewhere and tell me if it passes"')
-    click.echo("\nMore: `roost workers` (the fleet) · `roost jobs` (recent runs) · "
+    if recent:
+        click.echo("\n\033[1mRecently run\033[0m (real goals this fleet has completed)")
+        for g in recent:
+            click.echo(f"  • {g}")
+    click.echo("\nMore: `roost workers` (the fleet) · `roost history` (what it has run) · "
                "`roost do --help`")
 
 
@@ -1186,6 +1292,61 @@ def list_jobs_cmd(ctx: click.Context, state: Optional[str], root: Optional[str],
             if len(intent) > 60:
                 intent = intent[:57] + "..."
             click.echo(f"{job['id']}  {job['state']:<10}  {job.get('worker_id') or '-':<14}  {intent}")
+
+
+@cli.command("history")
+@click.option("--limit", default=20, type=int, show_default=True,
+              help="How many recent finished runs to show.")
+@click.option("--failed", "failed_only", is_flag=True,
+              help="Only show runs that failed or were not verified.")
+@click.option("--json", "as_json", is_flag=True, help="Emit the runs as JSON.")
+@click.pass_context
+def history_cmd(ctx: click.Context, limit: int, failed_only: bool, as_json: bool) -> None:
+    """What this fleet has run — recent finished goals, outcome, worker, cost.
+
+    A 'what have I done' view over the goal memory the jobs table already keeps:
+    each terminal run with its outcome (verified ✓ / failed ✗ / done), the worker
+    that ran it, cost, and how long ago.
+
+      roost history                # last 20 finished runs
+      roost history --failed       # only the ones that need a second look
+      roost history --limit 50 --json
+    """
+    # Over-fetch a little so filtering to terminal/real-goal runs still fills the
+    # requested limit. /derived already computes health / verified / cost.
+    fetch = max(limit * 3, limit + 20)
+    with _ctx_client(ctx) as c:
+        try:
+            r = c.get("/derived", params={"limit": fetch})
+        except httpx.HTTPError as e:
+            raise click.ClickException(f"cannot reach control plane: {e}")
+        if r.status_code >= 400:
+            raise click.ClickException(f"control plane error: HTTP {r.status_code}: {r.text}")
+        runs = (r.json() or {}).get("runs", [])
+
+    selected = _history_runs(runs, failed_only=failed_only)[:limit]
+
+    if as_json:
+        click.echo(json.dumps(selected, indent=2))
+        return
+    if not selected:
+        click.echo("No finished runs yet."
+                   + (" (none failed)" if failed_only else
+                      " Try `roost do \"...\"` to run something."))
+        return
+
+    now = time.time()
+    rows = [_history_row(run, now) for run in selected]
+    # Align the outcome column so the goals line up regardless of color codes.
+    outcome_w = max(len(label) for _, label, *_ in rows)
+    cost_w = max((len(cost) for *_, cost, _, _ in rows), default=0)
+    for short_id, label, color, worker, cost_str, age, goal in rows:
+        painted = click.style(label.ljust(outcome_w), fg=color) if color \
+            else label.ljust(outcome_w)
+        click.echo(
+            f"{short_id:<8}  {painted}  {worker:<14}  "
+            f"{cost_str:>{cost_w}}  {age:>4}  {goal}"
+        )
 
 
 @cli.command("workers")

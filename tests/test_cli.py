@@ -98,3 +98,119 @@ def test_write_env_file_is_private(tmp_path):
     p = boot.write_env_file("http://x:1", "tok", path=tmp_path / "env")
     assert p.read_text() == boot.env_file_text("http://x:1", "tok")
     assert (os.stat(p).st_mode & 0o777) == 0o600
+
+
+# ---------- `roost history` / capabilities discovery (pure) ----------
+
+from roost.cli import (
+    _history_outcome,
+    _history_row,
+    _history_runs,
+    _recent_successes,
+    _rel_time,
+)
+
+
+def _run(**kw):
+    """Minimal derived-run dict with sane defaults, overridable per test."""
+    base = {
+        "run_id": "abcdef1234567890",
+        "goal": "report the OS and free memory",
+        "state": "succeeded",
+        "health": {"status": "verified"},
+        "worker": "w-box",
+        "verified": True,
+        "cost": {"cost_est_usd": 0.0123, "tokens_used": 1234},
+        "created_at": 1000.0,
+        "finished_at": 1000.0,
+    }
+    base.update(kw)
+    return base
+
+
+def test_rel_time_buckets():
+    now = 100000.0
+    assert _rel_time(now - 5, now) == "5s"
+    assert _rel_time(now - 120, now) == "2m"
+    assert _rel_time(now - 7200, now) == "2h"
+    assert _rel_time(now - 3 * 86400, now) == "3d"
+    # missing / unparsable / future
+    assert _rel_time(None, now) == "-"
+    assert _rel_time("nope", now) == "-"
+    assert _rel_time(now + 50, now) == "0s"
+
+
+def test_history_outcome_verified_failed_done():
+    assert _history_outcome(_run())[0] == "verified ✓"
+    assert _history_outcome(_run())[1] == "green"
+    failed = _run(state="failed", health={"status": "failed"}, verified=None)
+    assert _history_outcome(failed) == ("failed ✗", "red")
+    cancelled = _run(state="cancelled", health={"status": "cancelled"}, verified=None)
+    assert _history_outcome(cancelled) == ("cancelled", "yellow")
+    unver = _run(state="succeeded", health={"status": "unverified"}, verified=False)
+    assert _history_outcome(unver) == ("unverified ✗", "red")
+    done = _run(state="succeeded", health={"status": "done"}, verified=None)
+    assert _history_outcome(done) == ("done", None)
+
+
+def test_history_row_fields():
+    now = 2000.0
+    row = _history_row(_run(finished_at=now - 60), now)
+    short_id, label, color, worker, cost_str, age, goal = row
+    assert short_id == "abcdef12"  # truncated to 8
+    assert label == "verified ✓" and color == "green"
+    assert worker == "w-box"
+    assert cost_str == "$0.01"
+    assert age == "1m"
+    assert goal == "report the OS and free memory"
+
+
+def test_history_row_no_cost_and_truncation():
+    long_goal = "x" * 80
+    row = _history_row(_run(cost={"cost_est_usd": 0.0}, goal=long_goal))
+    _, _, _, _, cost_str, _, goal = row
+    assert cost_str == ""  # zero cost → blank, not "$0.00"
+    assert goal.endswith("...") and len(goal) == 52
+
+
+def test_history_row_missing_fields_never_crashes():
+    row = _history_row({})  # everything absent
+    short_id, label, color, worker, cost_str, age, goal = row
+    assert short_id == "-" and worker == "-" and cost_str == "" and age == "-"
+    assert goal == "" and label == "done"
+
+
+def test_history_runs_filters_terminal_and_goal():
+    runs = [
+        _run(run_id="a", state="running"),                 # not terminal → out
+        _run(run_id="b", state="succeeded", goal=""),      # no goal → out
+        _run(run_id="c", state="succeeded"),               # kept
+        _run(run_id="d", state="failed", health={"status": "failed"}, verified=None),
+    ]
+    kept = _history_runs(runs)
+    assert [r["run_id"] for r in kept] == ["c", "d"]
+
+
+def test_history_runs_failed_only():
+    runs = [
+        _run(run_id="ok", state="succeeded"),
+        _run(run_id="bad", state="failed", health={"status": "failed"}, verified=None),
+        _run(run_id="unver", state="succeeded", health={"status": "unverified"}, verified=False),
+        _run(run_id="cxl", state="cancelled", health={"status": "cancelled"}, verified=None),
+    ]
+    kept = _history_runs(runs, failed_only=True)
+    assert {r["run_id"] for r in kept} == {"bad", "unver", "cxl"}
+
+
+def test_recent_successes_examples_and_empty():
+    runs = [
+        _run(run_id="1", state="succeeded", goal="train a model"),
+        _run(run_id="2", state="failed", goal="this failed"),
+        _run(run_id="3", state="succeeded", goal=""),
+        _run(run_id="4", state="succeeded", goal="lint the repo"),
+    ]
+    assert _recent_successes(runs) == ["train a model", "lint the repo"]
+    assert _recent_successes([]) == []
+    # truncation of long goals
+    long = _recent_successes([_run(goal="y" * 90)])[0]
+    assert long.endswith("...") and len(long) == 70

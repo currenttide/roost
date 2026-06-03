@@ -142,6 +142,9 @@ def _insert_job(
     max_attempts = int(spec.get("max_attempts") or budget.get("max_attempts") or 2)
     max_depth = int(hierarchy.get("max_depth", parent["max_depth"] if parent else 3))
     if parent is not None:
+        # A child may never RAISE the depth ceiling above its parent's (prevents a
+        # sub-agent escaping the root's bound by declaring a huge max_depth).
+        max_depth = min(max_depth, int(parent["max_depth"]))
         depth = parent["depth"] + 1
         if depth > max_depth:
             raise ValueError(
@@ -1264,6 +1267,16 @@ def create_app(
             return principal
         raise HTTPException(403, "worker credential required")
 
+    def require_matching_worker(
+        worker_id: str, principal: dict = Depends(require_worker)
+    ) -> dict:
+        """Like require_worker, but a *worker* credential may only act on its OWN
+        path worker_id (a worker can't impersonate another). Admin/shared and
+        auth-disabled modes are unaffected."""
+        if principal["kind"] == "worker" and principal["worker"]["id"] != worker_id:
+            raise HTTPException(403, "worker credential does not match the path worker_id")
+        return principal
+
     # ---- public health + installer ----
 
     @app.get("/healthz")
@@ -1592,7 +1605,7 @@ def create_app(
             raise HTTPException(404, "worker not found")
         return {"revoked": True}
 
-    @app.post("/workers/{worker_id}/heartbeat", dependencies=[Depends(require_worker)])
+    @app.post("/workers/{worker_id}/heartbeat", dependencies=[Depends(require_matching_worker)])
     async def heartbeat(worker_id: str, payload: HeartbeatPayload):
         ok = await asyncio.to_thread(
             _heartbeat_worker, db, worker_id, payload.capabilities
@@ -1605,7 +1618,7 @@ def create_app(
         cancelled = await asyncio.to_thread(_recently_cancelled_for_worker, db, worker_id)
         return {"ok": True, "cancel": cancelled}
 
-    @app.get("/workers/{worker_id}/poll", dependencies=[Depends(require_worker)])
+    @app.get("/workers/{worker_id}/poll", dependencies=[Depends(require_matching_worker)])
     async def poll(worker_id: str, timeout: float = Query(POLL_HOLD_MAX, ge=0, le=POLL_HOLD_MAX)):
         worker = await asyncio.to_thread(_get_worker, db, worker_id)
         if not worker:
@@ -1622,7 +1635,7 @@ def create_app(
 
     @app.post(
         "/workers/{worker_id}/jobs/{job_id}/logs",
-        dependencies=[Depends(require_worker)],
+        dependencies=[Depends(require_matching_worker)],
     )
     async def post_log(worker_id: str, job_id: str, payload: dict[str, Any]):
         stream = payload.get("stream", "stdout")
@@ -1635,7 +1648,7 @@ def create_app(
 
     @app.post(
         "/workers/{worker_id}/jobs/{job_id}/event",
-        dependencies=[Depends(require_worker)],
+        dependencies=[Depends(require_matching_worker)],
     )
     async def post_event(worker_id: str, job_id: str, event: JobEvent):
         try:
