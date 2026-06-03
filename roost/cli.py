@@ -378,7 +378,11 @@ def up(ctx: click.Context, host: str, port: int, url_opt: Optional[str],
         click.echo("[up] enrolling this machine as a worker")
         try:
             with _client(url, admin_token) as c:
-                rt = c.post("/enroll-tokens", json={"label": "roost up", "policy": {}})
+                # This is the operator's OWN machine — enroll it trusted so agent jobs
+                # (roost do / kind: auto) can actually act (write files, run commands)
+                # without per-tool permission prompts that auto-deny when headless.
+                rt = c.post("/enroll-tokens",
+                            json={"label": "roost up", "policy": {"trust_skip_perms": True}})
                 if rt.status_code == 403:
                     raise click.ClickException(
                         "admin auth required to mint an enroll token — the CP at "
