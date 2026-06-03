@@ -80,23 +80,35 @@ def render_narration_prompt(
     return (
         "You are observing ONE long-running automated agent job on a compute "
         "fleet. You did not do the work; you only narrate it for a human "
-        "watching a dashboard. Be concise, concrete, and honest about whether it "
-        "looks healthy or stuck.\n\n"
+        "watching a dashboard.\n\n"
+        "CRITICAL GROUNDING RULE: describe ONLY what is explicitly present in "
+        "the input below (the goal, the elapsed time, the most recent activity "
+        "line, and the recent log tail). Do NOT invent, speculate about, or "
+        "infer facts that are not literally in that input. In particular, never "
+        "mention rate limits, quotas, percentages, error counts, causes, "
+        "warnings, or any specific numbers unless those exact facts appear in "
+        "the provided activity or log tail. If you are tempted to explain WHY "
+        "something is happening, stop — only report WHAT the input shows.\n\n"
         f"GOAL (what the job was asked to do):\n{goal}\n\n"
         f"TIME RUNNING SO FAR: {elapsed}\n\n"
         f"MOST RECENT ACTIVITY LINE:\n{act}\n\n"
         f"RECENT LOG TAIL (last output, may be truncated):\n{tail}\n\n"
+        "Write the narration as ONE plain factual sentence stating what the job "
+        "appears to be doing RIGHT NOW, based only on the above. If the input is "
+        "sparse, be honest and minimal — e.g. \"just started, no output yet\" or "
+        "\"running; latest step: <quote the actual last activity line>\". You MAY "
+        "note the job looks stalled ONLY if the elapsed time is large AND the "
+        "most recent activity line is old or unchanged; phrase that as a neutral "
+        "observation (\"no new output for a while\"), not a diagnosis of a cause.\n\n"
         "Respond with ONLY a JSON object (no prose, no markdown fences) of "
         "exactly this shape:\n"
-        '{"narration": "<ONE plain-language sentence: what it is doing right now '
-        'and whether it looks healthy or stuck>", '
-        '"progress": <integer 0-100 best-guess percent complete, or null if '
-        'unknowable>, '
-        '"eta_sec": <integer best-guess seconds until done, or null if '
-        "unknowable>}\n"
-        "Rules: narration is one sentence, no newlines. If the logs show an "
-        "error, repeated retries, or no movement, say so plainly. Never invent "
-        "progress you cannot justify — use null when unsure."
+        '{"narration": "<ONE grounded, plain-language sentence, no newlines>", '
+        '"progress": <integer 0-100, a ROUGH best guess of percent complete, or '
+        'null>, '
+        '"eta_sec": <integer ROUGH best guess of seconds until done, or null>}\n'
+        "progress and eta_sec are rough estimates only; prefer null over a guess "
+        "you cannot justify from the input. Never invent facts to fill the "
+        "narration."
     )
 
 
@@ -296,6 +308,9 @@ async def narrate_job(job: dict, run_claude: Callable[[str], Awaitable[str]]) ->
     return parse_narration(raw or "")
 
 
+MAX_CONCURRENT_NARRATIONS = 4  # cap claude subprocesses spawned per pass (CP host safety)
+
+
 async def watch_once(
     jobs: list[dict],
     run_claude: Callable[[str], Awaitable[str]],
@@ -303,6 +318,7 @@ async def watch_once(
     *,
     min_interval: float = DEFAULT_MIN_INTERVAL,
     now: Optional[float] = None,
+    max_concurrency: int = MAX_CONCURRENT_NARRATIONS,
 ) -> int:
     """Narrate every job that needs it and persist each result via ``store``.
 
@@ -320,8 +336,16 @@ async def watch_once(
     if not todo:
         return 0
 
+    # Bound concurrency so a wide running set can't spawn dozens of claude
+    # subprocesses at once on the (possibly tight) control-plane host.
+    sem = asyncio.Semaphore(max(1, max_concurrency))
+
+    async def _one(j: dict) -> dict:
+        async with sem:
+            return await narrate_job(j, run_claude)
+
     results = await asyncio.gather(
-        *(narrate_job(j, run_claude) for j in todo), return_exceptions=True
+        *(_one(j) for j in todo), return_exceptions=True
     )
     count = 0
     for job, res in zip(todo, results):

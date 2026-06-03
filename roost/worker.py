@@ -417,6 +417,11 @@ def _validate_container(container: Optional[dict], policy: Optional[dict]) -> No
         home, home / ".claude", home / ".config" / "roost", home / ".ssh",
         home / "roost-fleet",
     ]
+    # On shared boxes (Mac/WSL/Oracle) the live OAuth creds live under an isolated
+    # CLAUDE_CONFIG_DIR, not ~/.claude — block that too (H-2).
+    ccd = os.environ.get("CLAUDE_CONFIG_DIR")
+    if ccd:
+        sensitive_subtrees.append(Path(ccd))
     sensitive_subtrees = [p.resolve(strict=False) for p in sensitive_subtrees]
     # `/` is rejected only as an exact mount (mounting the whole filesystem); a path
     # *under* `/` (e.g. /data) is fine — otherwise every absolute mount would fail.

@@ -50,6 +50,21 @@ def test_prompt_handles_missing_fields():
     assert "unknown" in p  # elapsed unknown
 
 
+def test_prompt_forbids_speculation_and_invention():
+    p = render_narration_prompt(
+        goal="do a thing",
+        last_activity="step 5",
+        log_tail="working...",
+        elapsed_sec=10,
+    )
+    low = p.lower()
+    # The prompt must instruct the model not to invent facts and to use only
+    # the provided input (grounding against the rate-limit hallucination bug).
+    assert "invent" in low
+    assert "rate limit" in low  # explicitly called out as a forbidden fabrication
+    assert ("only what" in low) or ("only" in low and "input" in low)
+
+
 # ---------- parse_narration ----------
 
 

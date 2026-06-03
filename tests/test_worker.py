@@ -186,3 +186,11 @@ def test_budget_remaining_garbage_values_safe():
     rem, exhausted = _budget_remaining(
         {"max_tokens": "nan", "max_wallclock_min": "x"}, elapsed_s=5.0, tokens_used=10)
     assert exhausted is False and rem == VERIFY_HEAL_TIMEOUT
+
+
+def test_validate_container_rejects_claude_config_dir(monkeypatch, tmp_path):
+    # On shared boxes the live creds live under CLAUDE_CONFIG_DIR — block mounting it.
+    ccd = tmp_path / "isolated-claude"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(ccd))
+    with pytest.raises(ValueError):
+        _validate_container({"volumes": [f"{ccd}:/c:ro"]}, None)

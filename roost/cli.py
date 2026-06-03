@@ -226,6 +226,276 @@ def serve(host: str, port: int, db_path: Optional[str], serve_token: Optional[st
                 provision_claude_auth=provision_auth)
 
 
+# ---------- one-command on-ramp ----------
+
+
+def _spawn_detached(args: list[str], log_path: Path,
+                    extra_env: Optional[dict[str, str]] = None):
+    """Start `args` fully detached (own session, output → log_path). Returns the
+    Popen handle. Used for the background control plane and worker so `roost up`
+    returns instead of blocking on a long-lived process."""
+    import subprocess
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ)
+    if extra_env:
+        env.update(extra_env)
+    logf = open(log_path, "ab")  # noqa: SIM115 — kept open for the child's lifetime
+    return subprocess.Popen(
+        args, stdout=logf, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+        start_new_session=True, env=env,
+    )
+
+
+def _worker_already_running(config_dir: Optional[str]) -> bool:
+    """Best-effort: is a worker ALREADY serving THIS control plane (so `up` doesn't
+    double-start one)? We scope by the worker's CLAUDE/ROOST config dir: a worker
+    spawned by `up` inherits our env (incl. ROOST_CONFIG_DIR), so a running worker
+    that shares our config_dir is serving our CP; one with a different (or no)
+    config_dir belongs to a different fleet and must not count. This keeps isolated
+    `roost up --port N` runs from being fooled by the host's production worker."""
+    import getpass
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["pgrep", "-fa", "-u", getpass.getuser(), "roost worker"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (subprocess.SubprocessError, OSError, FileNotFoundError):
+        return False
+    pids = []
+    for line in out.stdout.splitlines():
+        parts = line.split(None, 1)
+        if not parts or not parts[0].isdigit():
+            continue
+        cmd = parts[1] if len(parts) > 1 else ""
+        if "roost worker" not in cmd or " up" in cmd:
+            continue  # skip non-worker lines and our own `roost up`
+        pids.append(parts[0])
+    if not pids:
+        return False
+    # Compare each candidate worker's ROOST_CONFIG_DIR (from /proc) to ours, so we
+    # only treat it as "already running" when it serves the SAME config (CP).
+    want = config_dir or ""
+    for pid in pids:
+        try:
+            environ = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+        except OSError:
+            # No /proc (e.g. macOS): fall back to the conservative "already running"
+            # answer — on a single-fleet box this is the common, safe case.
+            return True
+        their_dir = ""
+        for kv in environ:
+            if kv.startswith(b"ROOST_CONFIG_DIR="):
+                their_dir = kv[len(b"ROOST_CONFIG_DIR="):].decode("utf-8", "replace")
+                break
+        if their_dir == want:
+            return True
+    return False
+
+
+@cli.command()
+@click.option("--host", default="127.0.0.1", show_default=True,
+              help="Host to bind a new control plane to (loopback is safest).")
+@click.option("--port", default=8787, show_default=True, type=int,
+              help="Port for a new control plane.")
+@click.option("--url", "url_opt", default=None,
+              help="Point at an EXISTING control plane instead of starting one.")
+@click.option("--db", "db_path", default=None, type=click.Path(),
+              help="SQLite path for a new control plane (default: ~/.roost/roost.db).")
+@click.pass_context
+def up(ctx: click.Context, host: str, port: int, url_opt: Optional[str],
+       db_path: Optional[str]) -> None:
+    """Zero to a running single-node fleet on THIS machine.
+
+    Starts (or reuses) a control plane, enrolls this machine as a worker, starts
+    the worker, smoke-tests it, and prints the panel URL + next steps. Idempotent
+    and sudo-free.
+
+      roost up                       # local fleet-of-one on 127.0.0.1:8787
+      roost up --port 8788 --db /tmp/r.db   # isolated, e.g. alongside another CP
+
+    Test in isolation (won't touch an existing CP) by pointing ROOST_CONFIG_DIR at
+    a scratch dir and choosing a free port + db:
+      ROOST_CONFIG_DIR=/tmp/roost-test roost up --port 8788 --db /tmp/roost-test/r.db
+    """
+    from . import bootstrap as boot
+
+    # Resolve where the CP should live. An explicit --url (or ROOST_URL / config)
+    # means "use that one"; otherwise we build a URL from --host/--port.
+    cfg = roost_config.load()
+    resolved_url, resolved_token, _ = roost_config.resolve_url_token(
+        url_opt or ctx.obj.get("url"), ctx.obj.get("token"), cfg
+    )
+    explicit_url = url_opt or ctx.obj.get("url") or os.environ.get("ROOST_URL")
+    url = explicit_url or boot.build_url(host, port)
+    admin_token = resolved_token  # may be "" — only used if a CP is already up
+
+    roost_home = Path(os.environ.get("ROOST_HOME") or (Path.home() / ".roost"))
+    log_dir = roost_home / "logs"
+
+    # --- 1. control plane: reuse if reachable, else start one detached ----------
+    if boot.ping_ok(url, admin_token):
+        click.echo(f"[up] control plane already reachable at {url} — reusing it")
+        started_cp = False
+    elif explicit_url:
+        # User pointed us at a CP that isn't answering — don't silently start a
+        # different one on top of their URL; fail clearly.
+        raise click.ClickException(
+            f"no control plane reachable at {url} (you passed --url/ROOST_URL). "
+            f"Start it there, or drop --url to launch a local one.")
+    else:
+        # Fresh CP. Mint an admin token unless one is bound in env (so a
+        # non-loopback bind isn't refused, and the fleet is authenticated).
+        admin_token = os.environ.get("ROOST_TOKEN") or boot.gen_admin_token()
+        db_arg = db_path or str(roost_home / "roost.db")
+        Path(db_arg).parent.mkdir(parents=True, exist_ok=True)
+        cp_log = log_dir / "control-plane.log"
+        roost_bin = _roost_argv()
+        serve_args = [*roost_bin, "serve", "--host", host, "--port", str(port),
+                      "--db", db_arg, "--token", admin_token]
+        click.echo(f"[up] starting control plane on {host}:{port} (logs: {cp_log})")
+        try:
+            _spawn_detached(serve_args, cp_log)
+        except OSError as e:
+            raise click.ClickException(f"could not launch control plane: {e}")
+        if not boot.wait_for_health(url, admin_token, timeout=15.0):
+            raise click.ClickException(
+                f"control plane did not come up within 15s — check {cp_log} "
+                f"(is port {port} already in use?)")
+        click.echo(f"[up] control plane healthy at {url}")
+        started_cp = True
+
+    # --- 2. persist config so later `roost` commands + the panel work flag-free -
+    cfg.update(boot.config_payload(url, admin_token))
+    cfg_path = roost_config.save(cfg)
+    env_path = boot.write_env_file(url, admin_token)
+    click.echo(f"[up] config written to {cfg_path} (and {env_path})")
+
+    # --- 3. enroll THIS machine as a worker ------------------------------------
+    enrolled = bool(cfg.get("worker_id") and cfg.get("credential")
+                    and cfg.get("url") == url)
+    if not enrolled:
+        click.echo("[up] enrolling this machine as a worker")
+        try:
+            with _client(url, admin_token) as c:
+                rt = c.post("/enroll-tokens", json={"label": "roost up", "policy": {}})
+                if rt.status_code == 403:
+                    raise click.ClickException(
+                        "admin auth required to mint an enroll token — the CP at "
+                        f"{url} has a different token than we have. Pass --token or "
+                        "set ROOST_TOKEN to its admin token.")
+                if rt.status_code >= 400:
+                    raise click.ClickException(
+                        f"could not mint enroll token: HTTP {rt.status_code}: {rt.text}")
+                enroll_tok = rt.json()["token"]
+        except httpx.HTTPError as e:
+            raise click.ClickException(f"cannot reach control plane at {url}: {e}")
+        # Reuse the enroll flow (writes worker_id+credential into the same config).
+        try:
+            ctx.invoke(enroll, enroll_token=enroll_tok, url_opt=url)
+        except click.ClickException as e:
+            raise click.ClickException(f"enrollment failed: {e.message}")
+        cfg = roost_config.load()  # reload to pick up worker_id/credential
+    else:
+        click.echo(f"[up] already enrolled as worker {cfg.get('worker_id')} — reusing")
+
+    # --- 4. start the worker ----------------------------------------------------
+    # For the DEFAULT install we use the durable supervised service (survives
+    # logout/reboot). For an ISOLATED run (a custom ROOST_CONFIG_DIR — e.g. testing
+    # alongside another CP) we must NOT use the global `roost-worker.service`: that
+    # single shared unit wouldn't carry our ROOST_CONFIG_DIR and would serve the
+    # default fleet instead. So we spawn a detached worker that inherits our env
+    # (incl. ROOST_CONFIG_DIR) and thus polls OUR control plane.
+    worker_name = cfg.get("name") or boot.default_worker_name()
+    isolated = bool(os.environ.get("ROOST_CONFIG_DIR"))
+    wlog = log_dir / "worker.log"
+    if _worker_already_running(os.environ.get("ROOST_CONFIG_DIR")):
+        click.echo("[up] a worker is already serving this control plane — not starting another")
+    elif isolated:
+        click.echo("[up] isolated config dir → starting a detached worker "
+                   f"(logs: {wlog})")
+        try:
+            _spawn_detached([*_roost_argv(), "worker"], wlog)
+        except OSError as e:
+            raise click.ClickException(f"could not start worker: {e}")
+    else:
+        from . import service as _svc
+        rc, msg = _svc.install(start=True)
+        if rc == 0:
+            click.echo(f"[up] worker service installed and started ({msg})")
+        else:
+            # No supervisor (or it failed) — fall back to a detached background worker.
+            click.echo(f"[up] supervised service unavailable ({msg.strip()}); "
+                       "starting a detached worker")
+            try:
+                _spawn_detached([*_roost_argv(), "worker"], wlog)
+                click.echo(f"[up] worker started (logs: {wlog})")
+            except OSError as e:
+                raise click.ClickException(f"could not start worker: {e}")
+
+    # --- 5. smoke test: worker registers, then a trivial command job succeeds ---
+    click.echo("[up] waiting for the worker to register…")
+    w = boot.wait_for_worker(url, admin_token, worker_id=cfg.get("worker_id"),
+                             timeout=20.0)
+    if not w:
+        raise click.ClickException(
+            "worker did not register within 20s. Check the worker logs "
+            f"({log_dir}/worker.log) or `roost service logs`. The control plane "
+            f"is up at {url} — re-run `roost up` once the worker is healthy.")
+    click.echo(f"[up] worker online: {w['name']} ({w['id']})")
+
+    smoke_ok = _smoke_test(url, admin_token)
+    if smoke_ok:
+        click.echo("[up] smoke test passed — a job ran end-to-end ✓")
+    else:
+        click.echo("[up] WARNING: worker registered but the smoke-test job did not "
+                   "complete; the fleet is up — inspect with `roost jobs`.", err=True)
+
+    # --- next steps -------------------------------------------------------------
+    panel = boot.panel_url(url, admin_token)
+    click.echo("")
+    click.echo("\033[1mYour Roost fleet is up.\033[0m")
+    click.echo(f"  Panel:   {panel}")
+    click.echo('  Use it:  roost do "report the OS and free memory on a CPU box"')
+    click.echo("  Status:  roost workers   ·   roost jobs")
+    click.echo("  Add machines: run /roost-onboard (or `roost enroll-token` for a join token)")
+
+
+def _roost_argv() -> list[str]:
+    """How to re-invoke this CLI for a detached child. Prefer the `roost` on PATH;
+    fall back to `python -m roost.cli` so it works from a source checkout/venv."""
+    import shutil
+    found = shutil.which("roost")
+    if found:
+        return [found]
+    return [sys.executable, "-m", "roost.cli"]
+
+
+def _smoke_test(url: str, token: str) -> bool:
+    """Submit a trivial command job and confirm it succeeds within ~30s. Returns
+    True on success; False (never raises) so `up` can warn rather than abort."""
+    try:
+        with _client(url, token) as c:
+            r = c.post("/jobs", json={"kind": "command",
+                                      "command": "echo roost-up-ok"})
+            if r.status_code >= 400:
+                return False
+            job_id = r.json()["id"]
+            deadline = time.monotonic() + 30.0
+            while time.monotonic() < deadline:
+                jr = c.get(f"/jobs/{job_id}")
+                if jr.status_code < 400:
+                    st = jr.json().get("state")
+                    if st == "succeeded":
+                        return True
+                    if st in ("failed", "cancelled"):
+                        return False
+                time.sleep(0.5)
+    except (httpx.HTTPError, KeyError):
+        return False
+    return False
+
+
 # ---------- enrollment / fleet membership ----------
 
 
