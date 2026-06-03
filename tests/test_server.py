@@ -712,3 +712,13 @@ def test_run_refuses_unauthenticated_non_loopback(monkeypatch):
     monkeypatch.setitem(sys.modules, "uvicorn", fake_uvicorn)
     with pytest.raises(_Served):
         server.run(host="0.0.0.0", token="", insecure=True, provision_claude_auth=False)
+
+
+def test_job_health_does_not_flag_stuck_during_verify_or_heal():
+    # A job in verify/self-heal is legitimately quiet on its own activity line.
+    j = {"state": "running", "idle_sec": 999, "last_activity": "🔎 verifying result"}
+    assert server._job_health(j)["status"] == "verifying"
+    j2 = {"state": "running", "idle_sec": 999, "last_activity": "🔧 self-healing (attempt 1)"}
+    assert server._job_health(j2)["status"] == "self-healing"
+    # but a genuinely idle running job (no verify marker) is still flagged
+    assert server._job_health({"state": "running", "idle_sec": 999})["status"] == "stuck?"

@@ -339,6 +339,11 @@ def _job_health(job: dict) -> dict:
         if qs > WAITING_AFTER:
             return {"status": "waiting", "reason": f"queued {int(qs)}s — capable workers busy"}
         return {"status": "queued", "reason": "queued"}
+    # A job in the verify/self-heal phase is legitimately quiet on its own activity
+    # line (its verifier/fix runs as a separate subprocess) — don't call it stuck.
+    phase = _job_phase(job)
+    if phase in ("verifying", "self-healing"):
+        return {"status": phase, "reason": (job.get("last_activity") or phase)[:160]}
     idle = job.get("idle_sec")
     if idle is not None and idle > STUCK_AFTER:
         return {"status": "stuck?", "reason": f"no activity for {int(idle)}s — may be stuck"}
