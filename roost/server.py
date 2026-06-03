@@ -34,6 +34,7 @@ from fastapi.responses import (
 from pydantic import BaseModel, Field
 
 from . import triage
+from . import watcher
 from .matcher import matches, placement_score
 from .schema import migrate
 
@@ -53,8 +54,13 @@ PLACEMENT_GRACE = 3.0
 # poor fit won't become a good one), so the task waits for a capable node. It's
 # escalated to failed only when every currently-online capable worker has declined
 # (the genuine "no node can do this" case) — never while a capable node is just busy.
-# A high backstop guards against pathological flapping (workers churning in/out).
-MAX_DECLINES = 20
+# A backstop guards against pathological flapping (workers churning in/out).
+MAX_DECLINES = 10
+# Log retention (M1): the sweeper prunes job_logs on a throttle so the DB
+# doesn't grow unbounded. Keep ~24h of log lines and cap per-job rows.
+LOG_PRUNE_INTERVAL = 1800.0   # seconds between prune passes (~30 min)
+LOG_MAX_AGE_SEC = 24 * 3600.0  # drop log rows older than 24h
+LOG_MAX_ROWS_PER_JOB = 5000   # and cap rows per job
 ENROLL_TOKEN_TTL = 900.0  # 15 minutes
 ENROLL_PREFIX = "rst-enr-"
 WORKER_CRED_PREFIX = "rst-wkr-"
@@ -369,7 +375,9 @@ def _derive_run(job: dict) -> dict:
         "decline_count": job.get("decline_count"),
         "cost": _job_cost(job),
         # agentic slots (D2 fills these; empty/deterministic for now)
-        "narration": job.get("last_activity"),
+        "narration": job.get("narration") or job.get("last_activity"),
+        "progress": job.get("progress"),
+        "eta_sec": job.get("eta_sec"),
         "root_job_id": job.get("root_job_id"),
         "created_at": job.get("created_at"),
         "finished_at": job.get("finished_at"),
@@ -890,7 +898,17 @@ def _apply_event(
                 new_count = (row["decline_count"] or 0) + 1
                 requires = json.loads(row["requires"])
                 remaining = _online_capable_ids(conn, requires, now) - decliners
-                escalate = (not remaining) or new_count >= MAX_DECLINES
+                # Escalate to permanent failure only when:
+                #   * the hard backstop trips (pathological flapping), OR
+                #   * no capable worker remains AND at least two DISTINCT nodes
+                #     have declined — a genuine "no node can do this".
+                # A single decline with a momentarily-empty capable set (a capable
+                # node merely stale/offline for one sweep window) must NOT fail the
+                # job permanently — it just requeues and waits for the node to return.
+                escalate = (
+                    new_count >= MAX_DECLINES
+                    or (not remaining and len(decliners) >= 2)
+                )
                 if escalate:
                     conn.execute(
                         "UPDATE jobs SET state='failed', finished_at=?, "
@@ -1247,6 +1265,21 @@ def create_app(
     async def healthz():
         return {"ok": True, "version": "0.2.0"}
 
+    @app.get("/readyz")
+    async def readyz():
+        """Readiness probe (unauthenticated, like /healthz): does a trivial DB
+        read to prove the control plane can actually serve. 503 if the DB is
+        unreachable, so a load balancer can drain a broken instance."""
+        def _probe() -> int:
+            with _connect(db) as conn:
+                row = conn.execute("SELECT COUNT(*) AS n FROM workers").fetchone()
+                return int(row["n"])
+        try:
+            n = await asyncio.to_thread(_probe)
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse(status_code=503, content={"ready": False, "error": str(e)})
+        return {"ready": True, "workers": n, "version": "0.2.0"}
+
     @app.get("/install.sh", response_class=PlainTextResponse)
     async def install_sh(request: Request):
         return render_install_script(str(request.base_url).rstrip("/"))
@@ -1390,7 +1423,7 @@ def create_app(
             raise HTTPException(409, str(e))
         return job
 
-    @app.post("/jobs/{job_id}/finalize", dependencies=[Depends(require_any)])
+    @app.post("/jobs/{job_id}/finalize", dependencies=[Depends(require_admin)])
     async def finalize_job(job_id: str, payload: dict[str, Any]):
         """Move a non-worker-owned job (a captain root) to a terminal state.
 
@@ -1625,12 +1658,65 @@ def create_app(
 # ---------- Sweeper task ----------
 
 
+def _log_tail(db_path: Path, job_id: str, chars: int = 1200) -> str:
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT data FROM job_logs WHERE job_id=? ORDER BY seq DESC LIMIT 40",
+            (job_id,),
+        ).fetchall()
+    return "\n".join(r["data"] for r in reversed(rows))[-chars:]
+
+
+def _make_narration_store(db_path: Path):
+    def store(job_id: str, payload: dict) -> None:
+        with _connect(db_path) as conn:
+            conn.execute(
+                "UPDATE jobs SET narration=?, narrated_at=?, progress=?, eta_sec=? "
+                "WHERE id=? AND state IN ('running','assigned')",
+                (payload.get("narration"), payload.get("narrated_at"),
+                 payload.get("progress"), payload.get("eta_sec"), job_id),
+            )
+    return store
+
+
+async def _narrate_pass(db_path: Path) -> None:
+    """D2: refresh agentic narration for running jobs (opt-in via ROOST_NARRATE=1;
+    requires `claude` on the control-plane host). Best-effort: deterministic health
+    in `/derived` works regardless. Never blocks the sweep loop."""
+    jobs = await asyncio.to_thread(_list_jobs, db_path, "running", None, None, 30)
+    jobs += await asyncio.to_thread(_list_jobs, db_path, "assigned", None, None, 30)
+    if not jobs:
+        return
+    for j in watcher.jobs_needing_narration(jobs, time.time()):
+        j["log_tail"] = await asyncio.to_thread(_log_tail, db_path, j["id"])
+    await watcher.watch_once(jobs, watcher.default_claude_runner,
+                             _make_narration_store(db_path))
+
+
 async def _sweep_loop(db_path: Path) -> None:
+    last_prune = 0.0
+    narrate = os.environ.get("ROOST_NARRATE") == "1"
     while True:
         try:
             await asyncio.to_thread(_sweep, db_path)
         except Exception as e:  # noqa: BLE001
             print(f"[roost] sweeper error: {e}", flush=True)
+        if narrate:
+            try:
+                await _narrate_pass(db_path)
+            except Exception as e:  # noqa: BLE001
+                print(f"[roost] narration error: {e}", flush=True)
+        # Throttled, best-effort log retention (M1): never let a prune error
+        # break the sweep loop.
+        now = time.time()
+        if now - last_prune >= LOG_PRUNE_INTERVAL:
+            last_prune = now
+            try:
+                await asyncio.to_thread(
+                    _prune_logs, db_path, LOG_MAX_AGE_SEC, LOG_MAX_ROWS_PER_JOB
+                )
+            except Exception as e:  # noqa: BLE001
+                print(f"[roost] log prune error: {e}", flush=True)
         try:
             await asyncio.sleep(SWEEPER_INTERVAL)
         except asyncio.CancelledError:
@@ -1695,14 +1781,46 @@ echo "[install] done. Tail logs with: roost service logs"
 """
 
 
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "::ffff:127.0.0.1"})
+
+
 def run(
     host: str = "0.0.0.0",
     port: int = 8787,
     db_path: Optional[Path] = None,
     token: Optional[str] = None,
     provision_claude_auth: bool = True,
+    insecure: bool = False,
 ) -> None:
     import uvicorn
+
+    # [C2] Refuse to serve unauthenticated on a non-loopback bind. With no shared
+    # token, every endpoint is wide open; on a reachable interface that exposes the
+    # whole fleet (and copy-creds onboarding) to the LAN/internet. Require either a
+    # token or an explicit opt-in.
+    effective_token = token if token is not None else os.environ.get("ROOST_TOKEN", "")
+    if not effective_token and host not in _LOOPBACK_HOSTS:
+        if not insecure:
+            raise SystemExit(
+                f"[roost] REFUSING to start: no shared token AND binding to a "
+                f"non-loopback host ({host!r}) would run the control plane "
+                f"UNAUTHENTICATED and reachable off-box. Set a token "
+                f"(ROOST_TOKEN=… or --token) — or, only if you truly intend an "
+                f"open server on a trusted network, pass --insecure / insecure=True."
+            )
+        print(
+            f"[roost] WARNING: running UNAUTHENTICATED on {host}:{port} "
+            f"(--insecure). Every endpoint is open to anything that can reach "
+            f"this interface.",
+            flush=True,
+        )
+    elif not effective_token:
+        print(
+            f"[roost] WARNING: running with NO shared token on loopback "
+            f"({host}:{port}) — all endpoints are unauthenticated. Fine for local "
+            f"dev; set ROOST_TOKEN before exposing this box.",
+            flush=True,
+        )
 
     if provision_claude_auth and _read_host_claude_creds() is not None:
         print(

@@ -603,3 +603,112 @@ def test_derive_run_shape():
     assert r["run_id"] == "j1" and r["goal"] == "write a file"
     assert r["phase"] == "succeeded" and r["health"]["status"] == "verified"
     assert "cost" in r and "tokens_used" in r["cost"]
+
+
+# ---------- Audit fixes (C2/H6/M1/M6/L7) ----------
+
+
+def test_single_decline_with_no_remaining_capable_requeues_not_fails(tmp_path: Path):
+    """[H6] A single decline where the capable set is momentarily empty (the only
+    other capable node briefly stale/offline) must REQUEUE, not permanently fail —
+    a transient must never destroy a placeable job."""
+    import sqlite3
+    import time as _time
+    db = tmp_path / "roost.db"
+    server._init_db(db)
+    cpu = server._register_worker(db, "cpu", {"tools": ["claude"], "cpus": 4})
+    gpu = server._register_worker(
+        db, "gpu", {"tools": ["claude"], "gpu_count": 1, "gpu_vram_gb": 80})
+    # The GPU box is the only other capable node but is momentarily stale/offline
+    # (last_seen far in the past) → _online_capable_ids excludes it this instant.
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE workers SET last_seen=?, status='offline' WHERE id=?",
+                     (_time.time() - 10_000, gpu["id"]))
+        conn.commit()
+    jid = server._insert_job(db, {"kind": "auto", "task": "needs a GPU", "requires": {}})["id"]
+    _age_job(db, jid, seconds=5)
+
+    got = server._try_assign_one(db, cpu["id"])
+    assert got is not None and got["worker_id"] == cpu["id"]
+    job, accepted = server._apply_event(
+        db, jid, cpu["id"],
+        {"type": "declined", "attempt": got["attempt"], "reason": "no GPU"})
+    assert accepted
+    # Only ONE distinct decliner and empty remaining → transient: must requeue.
+    assert job["state"] == "queued", "single decline must not permanently fail"
+    assert job["decline_count"] == 1
+
+
+def test_two_distinct_decliners_none_remaining_fails_fast(tmp_path: Path):
+    """[H6] Two DISTINCT capable nodes both decline and none remain → genuinely
+    impossible, fail fast (don't bounce forever)."""
+    db = tmp_path / "roost.db"
+    server._init_db(db)
+    a = server._register_worker(db, "a", {"tools": ["claude"]})
+    b = server._register_worker(db, "b", {"tools": ["claude"]})
+    jid = server._insert_job(db, {"kind": "auto", "task": "impossible", "requires": {}})["id"]
+    _age_job(db, jid, seconds=5)
+
+    got_a = server._try_assign_one(db, a["id"])
+    assert got_a is not None
+    job, _ = server._apply_event(
+        db, jid, a["id"], {"type": "declined", "attempt": got_a["attempt"], "reason": "no"})
+    # First decline (only b remains capable) → still queued.
+    assert job["state"] == "queued"
+
+    got_b = server._try_assign_one(db, b["id"])
+    assert got_b is not None
+    final, _ = server._apply_event(
+        db, jid, b["id"], {"type": "declined", "attempt": got_b["attempt"], "reason": "no"})
+    # Now 2 distinct decliners and none remaining → fail fast.
+    assert final["state"] == "failed"
+    assert "declined" in (final["error"] or "")
+
+
+def test_finalize_requires_admin(client: TestClient):
+    """[M6] finalize must reject a worker credential and only accept admin."""
+    root = client.post("/jobs", json={
+        "intent": "captain", "captain_root": True,
+        "hierarchy": {"can_dispatch": True}}).json()
+    worker_id, cred = _enroll_worker(client, {"tools": ["python3"]})
+    wh = {"Authorization": f"Bearer {cred}"}
+    # Worker credential is forbidden from finalizing.
+    r = client.post(f"/jobs/{root['id']}/finalize", json={"state": "succeeded"}, headers=wh)
+    assert r.status_code == 403, r.text
+    # Admin (shared token, default client headers) still works.
+    ok = client.post(f"/jobs/{root['id']}/finalize", json={"state": "succeeded"})
+    assert ok.status_code == 200, ok.text
+
+
+def test_readyz_endpoint(client: TestClient):
+    """[L7] /readyz is unauthenticated and reports a real DB read."""
+    r = client.get("/readyz", headers={})  # no auth header
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ready"] is True
+    assert "workers" in body
+
+
+def test_run_refuses_unauthenticated_non_loopback(monkeypatch):
+    """[C2] run() must refuse to serve unauthenticated on a non-loopback bind."""
+    monkeypatch.delenv("ROOST_TOKEN", raising=False)
+    with pytest.raises(SystemExit):
+        server.run(host="0.0.0.0", token="", provision_claude_auth=False)
+    # Explicit insecure opt-in should NOT raise SystemExit before serving; we
+    # stop it right at uvicorn.run so the test never actually binds a socket.
+    import roost.server as _srv
+    monkeypatch.setattr(_srv, "create_app", lambda **kw: object())
+
+    class _Served(Exception):
+        pass
+
+    def _fake_uvicorn_run(*a, **k):
+        raise _Served()
+
+    import sys
+    import types
+    fake_uvicorn = types.ModuleType("uvicorn")
+    fake_uvicorn.run = _fake_uvicorn_run
+    monkeypatch.setitem(sys.modules, "uvicorn", fake_uvicorn)
+    with pytest.raises(_Served):
+        server.run(host="0.0.0.0", token="", insecure=True, provision_claude_auth=False)

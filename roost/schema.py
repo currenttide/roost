@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import sqlite3
 
-CURRENT_VERSION = 6
+CURRENT_VERSION = 7
 
 # Full V1 schema for fresh installs.
 SCHEMA_V1 = """
@@ -61,7 +61,12 @@ CREATE TABLE IF NOT EXISTS jobs (
     last_activity       TEXT,                            -- compact "what it's doing now"
     -- bare-worker self-selection (V6)
     decline_count       INTEGER NOT NULL DEFAULT 0,      -- times a worker self-declined (kind: auto)
-    declined_by         TEXT                             -- last worker that declined; it skips on its next poll
+    declined_by         TEXT,                            -- last worker that declined; it skips on its next poll
+    -- agentic narration cache (V7) — D2 dashboard; deterministic facts still win
+    narration           TEXT,                            -- one-sentence human "what it's doing"
+    narrated_at         REAL,                            -- when narration was last refreshed
+    progress            INTEGER,                         -- rough 0-100, or NULL
+    eta_sec             INTEGER                          -- rough seconds remaining, or NULL
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_state       ON jobs(state);
 CREATE INDEX IF NOT EXISTS idx_jobs_created     ON jobs(created_at);
@@ -130,6 +135,13 @@ _JOB_V6_ADDS = [
     ("decline_count", "decline_count INTEGER NOT NULL DEFAULT 0"),
     ("declined_by",   "declined_by TEXT"),
 ]
+# V6 → V7 (D2 narration cache for the observability dashboard).
+_JOB_V7_ADDS = [
+    ("narration",   "narration TEXT"),
+    ("narrated_at", "narrated_at REAL"),
+    ("progress",    "progress INTEGER"),
+    ("eta_sec",     "eta_sec INTEGER"),
+]
 
 
 def migrate(conn: sqlite3.Connection) -> int:
@@ -177,6 +189,10 @@ def migrate(conn: sqlite3.Connection) -> int:
     if version < 6:
         # V5 → V6: bare-worker self-selection (kind: auto decline/requeue).
         _add_missing("jobs", _JOB_V6_ADDS)
+
+    if version < 7:
+        # V6 → V7: agentic narration cache (D2 dashboard).
+        _add_missing("jobs", _JOB_V7_ADDS)
 
     conn.execute(f"PRAGMA user_version = {CURRENT_VERSION}")
     return CURRENT_VERSION

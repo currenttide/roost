@@ -329,7 +329,7 @@ def build_command(
     # per job). Checked before `command` because a docker job carries BOTH an
     # `image` and the in-container `command`.
     if (spec.get("kind") or "").lower() == "docker":
-        return _build_docker_argv(spec, job_id), cwd, tempfiles
+        return _build_docker_argv(spec, job_id, worker_policy or {}), cwd, tempfiles
 
     if spec.get("command"):
         cmd = spec["command"]
@@ -359,7 +359,100 @@ def docker_container_name(job_id: str) -> str:
     return f"roost-job-{job_id}"
 
 
-def _build_docker_argv(spec: dict, job_id: str) -> list[str]:
+# [M4] Env vars a job must NOT be able to set, because they could redirect the
+# operator's Claude OAuth token to an attacker endpoint, inject code into the
+# subprocess, or proxy/exfiltrate traffic. The worker inherits the operator's real
+# environment (incl. live creds); a job-supplied env is layered on top, so any of
+# these from the job is dropped unless worker policy explicitly allows it.
+_BLOCKED_ENV: frozenset[str] = frozenset({
+    "NODE_OPTIONS", "LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH",
+})
+_BLOCKED_ENV_PREFIXES: tuple[str, ...] = ("ANTHROPIC_", "CLAUDE_CODE_")
+
+
+def _is_blocked_env_key(key: str) -> bool:
+    """Whether a job-supplied env var name is dangerous to honor (credential/endpoint
+    redirect, proxy, or code-injection vector). Case-insensitive on the proxy class."""
+    if key in _BLOCKED_ENV:
+        return True
+    if key.startswith(_BLOCKED_ENV_PREFIXES):
+        return True
+    up = key.upper()
+    if up.endswith("_PROXY") or up in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"):
+        return True
+    return False
+
+
+def _sanitize_env(env: Optional[dict], policy: Optional[dict]) -> tuple[dict[str, str], list[str]]:
+    """Filter a job-supplied env dict, dropping keys that could exfiltrate the
+    operator's Claude OAuth token or inject code (see _BLOCKED_ENV*). Returns the
+    cleaned {str: str} mapping plus the list of dropped key names. Worker policy may
+    opt in to the raw env via `policy.allow_unsafe_env: true` (trusted use only)."""
+    out: dict[str, str] = {}
+    dropped: list[str] = []
+    allow_unsafe = bool((policy or {}).get("allow_unsafe_env"))
+    for k, v in (env or {}).items():
+        key = str(k)
+        if not allow_unsafe and _is_blocked_env_key(key):
+            dropped.append(key)
+            continue
+        out[key] = str(v)
+    return out, dropped
+
+
+def _validate_container(container: Optional[dict], policy: Optional[dict]) -> None:
+    """[H3] Reject docker container specs that would breach the host: mounting a
+    sensitive HOST dir (operator home, creds, ssh, /, /etc, roost DB) or using
+    `network: host`. Raises ValueError with a clear message. Worker policy may opt in
+    via `policy.allow_host_mounts: true` (trusted use only)."""
+    c = container or {}
+    if bool((policy or {}).get("allow_host_mounts")):
+        return
+    home = Path.home()
+    # Roots whose entire subtree is off-limits (mounting them OR anything inside them
+    # exposes the operator's creds/keys/state). Resolved for prefix comparison.
+    sensitive_subtrees = [
+        Path("/etc"), Path("/root"),
+        home, home / ".claude", home / ".config" / "roost", home / ".ssh",
+        home / "roost-fleet",
+    ]
+    sensitive_subtrees = [p.resolve(strict=False) for p in sensitive_subtrees]
+    # `/` is rejected only as an exact mount (mounting the whole filesystem); a path
+    # *under* `/` (e.g. /data) is fine — otherwise every absolute mount would fail.
+    root_fs = Path("/").resolve(strict=False)
+
+    for vol in c.get("volumes") or []:
+        spec = str(vol)
+        if ".." in spec.split(":"):
+            raise ValueError(f"refusing volume with '..' path traversal: {spec!r}")
+        host = spec.split(":", 1)[0].strip()
+        if not host:
+            continue
+        if ".." in Path(host).parts:
+            raise ValueError(f"refusing volume with '..' path traversal: {spec!r}")
+        # Only host-path mounts (absolute or ~) are sensitive; named volumes are fine.
+        if not (host.startswith("/") or host.startswith("~")):
+            continue
+        hp = Path(host).expanduser().resolve(strict=False)
+        if hp == root_fs:
+            raise ValueError(
+                "refusing to mount the entire host filesystem '/' into container "
+                "(set policy.allow_host_mounts to override)"
+            )
+        for root in sensitive_subtrees:
+            if hp == root or root in hp.parents:
+                raise ValueError(
+                    f"refusing to mount sensitive host path {host!r} into container "
+                    "(set policy.allow_host_mounts to override)"
+                )
+    if str(c.get("network") or "").lower() == "host":
+        raise ValueError(
+            "refusing `network: host` for container (set policy.allow_host_mounts to override)"
+        )
+
+
+def _build_docker_argv(spec: dict, job_id: str, policy: Optional[dict] = None) -> list[str]:
     """Build a `docker run` argv for a `kind: docker` job.
 
     Spec shape:
@@ -380,6 +473,8 @@ def _build_docker_argv(spec: dict, job_id: str) -> list[str]:
     image = spec.get("image") or c.get("image")
     if not image:
         raise ValueError("docker job requires `image`")
+    # [H3] Reject sensitive host mounts / host networking unless policy opts in.
+    _validate_container(c, policy)
     # --rm so the container is cleaned up; --name so cancel/timeout can kill it.
     argv = ["docker", "run", "--rm", "--name", docker_container_name(job_id)]
     gpus = c.get("gpus")
@@ -512,6 +607,50 @@ AUTO_DEFAULT_MODEL = "claude-sonnet-4-6"
 # re-verify on the same node up to this many times before reporting failure.
 MAX_FIX_ATTEMPTS = 2
 
+# [C4/H2] Default per-subprocess ceiling for verify/self-heal agents.
+VERIFY_HEAL_TIMEOUT = 300.0
+
+
+def _budget_remaining(
+    budget: dict,
+    elapsed_s: float,
+    tokens_used: int,
+) -> tuple[Optional[float], bool]:
+    """[C4/H2] Bound the verify/self-heal loop's cost. Given the job's `budget`
+    (max_wallclock_min/max_wallclock_sec, max_tokens) plus what the executor+verify+heal
+    have already spent, return (remaining_wallclock_s, exhausted):
+
+      remaining_wallclock_s — how long the NEXT verify/heal subprocess may run, capped at
+        VERIFY_HEAL_TIMEOUT; None means "no wallclock budget set" (use the default cap).
+      exhausted — True if there's no budget left to start another subprocess (token cap
+        hit, or wallclock fully consumed), so the caller should accept the current result.
+
+    Pure + total; safe on missing/garbage budget values."""
+    max_tokens = budget.get("max_tokens")
+    try:
+        if max_tokens is not None and int(tokens_used) >= int(max_tokens):
+            return 0.0, True
+    except (TypeError, ValueError):
+        pass
+
+    total_wallclock: Optional[float] = None
+    try:
+        if budget.get("max_wallclock_min"):
+            total_wallclock = float(budget["max_wallclock_min"]) * 60.0
+        elif budget.get("max_wallclock_sec"):
+            total_wallclock = float(budget["max_wallclock_sec"])
+    except (TypeError, ValueError):
+        total_wallclock = None
+
+    if total_wallclock is None:
+        # No wallclock budget: each subprocess still capped at the default ceiling.
+        return VERIFY_HEAL_TIMEOUT, False
+
+    remaining = total_wallclock - max(0.0, elapsed_s)
+    if remaining <= 1.0:  # not enough headroom to do anything useful
+        return 0.0, True
+    return min(VERIFY_HEAL_TIMEOUT, remaining), False
+
 # Strong signals that a task genuinely needs a CUDA GPU. Conservative on purpose:
 # only triggers an instant (no-LLM) decline on a node that has no GPU, so the worst
 # case of a false positive is the task waiting for / escalating to another node.
@@ -636,6 +775,10 @@ class Worker:
         # so a server-side cancel (delivered via the heartbeat response) can tear
         # them down — including the sibling docker container of a kind:docker job.
         self._active: dict[str, dict] = {}
+        # [H5] Verify/self-heal subprocesses spawned by _oneshot_agent, keyed by
+        # job_id, so a server cancel (or timeout teardown) of the parent job also
+        # kills an in-flight verifier/fix agent instead of leaking tokens.
+        self._aux_procs: dict[str, set] = {}
         headers = {"Authorization": f"Bearer {token}"} if token else {}
         self.client = httpx.AsyncClient(
             base_url=self.base_url,
@@ -655,6 +798,10 @@ class Worker:
         """Terminate a running job's process (and its docker container, if any).
         Safe to call for an unknown/finished job_id. Marks it so the executor
         reports the right terminal state."""
+        # [H5] Always tear down any aux verify/fix subprocesses for this job, even
+        # if the main executor process has already finished (the job may be mid
+        # verify/self-heal, where _active has no live process but tokens are burning).
+        self._kill_aux_procs(job_id, reason)
         entry = self._active.get(job_id)
         if not entry:
             return
@@ -686,6 +833,23 @@ class Worker:
                     await k.wait()
                 except Exception:  # noqa: BLE001
                     pass
+
+    def _kill_aux_procs(self, job_id: str, reason: str) -> None:
+        """[H5] SIGKILL any in-flight verify/self-heal subprocesses for this job
+        (and their process groups). Marks the set so _oneshot_agent knows it was
+        cancelled. Synchronous + best-effort; the spawning coroutine reaps them."""
+        procs = self._aux_procs.get(job_id)
+        if not procs:
+            return
+        for proc in list(procs):
+            if getattr(proc, "returncode", None) is None:
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError):
+                    try:
+                        proc.kill()
+                    except (ProcessLookupError, OSError):
+                        pass
 
     async def _register_legacy(self) -> None:
         """Fallback registration via /workers/register using the shared token."""
@@ -908,6 +1072,8 @@ class Worker:
 
         await self._post_event(job_id, {"type": "started", "attempt": attempt})
         self._running += 1
+        # [C4/H2] Wallclock origin for bounding the verify/self-heal loop's total cost.
+        job_started = time.monotonic()
 
         can_dispatch = bool((spec.get("hierarchy") or {}).get("can_dispatch", False))
 
@@ -943,8 +1109,16 @@ class Worker:
         )
 
         env = os.environ.copy()
-        for k, v in (spec.get("env") or {}).items():
-            env[str(k)] = str(v)
+        # [M4] Layer the job-supplied env on top of the operator's real environment,
+        # but strip keys that could redirect/exfiltrate the Claude OAuth token or
+        # inject code (ANTHROPIC_*/CLAUDE_CODE_*/*_PROXY/NODE_OPTIONS/LD_*).
+        job_env, dropped_env = _sanitize_env(spec.get("env"), self.policy)
+        env.update(job_env)
+        if dropped_env:
+            await self._send_log(
+                job_id, "event",
+                f"dropped unsafe job env keys: {', '.join(sorted(dropped_env))}",
+            )
         if spec.get("subagent_model"):
             env["CLAUDE_CODE_SUBAGENT_MODEL"] = spec["subagent_model"]
 
@@ -1053,8 +1227,13 @@ class Worker:
                 p.unlink(missing_ok=True)
 
         # Was this job killed by a server-side cancel (vs. finishing on its own)?
-        cancelled = (self._active.get(job_id) or {}).get("cancelled") == "cancelled"
-        self._active.pop(job_id, None)
+        # NOTE: do NOT pop _active yet — keep the entry alive through the verify/
+        # self-heal phase so a server cancel still routes to _kill_active_job (which
+        # tears down the in-flight aux verifier/fix subprocess too). Popped below.
+        def _is_cancelled() -> bool:
+            return (self._active.get(job_id) or {}).get("cancelled") == "cancelled"
+
+        cancelled = _is_cancelled()
 
         exit_code = process.returncode
         terminal: dict[str, Any] = {"attempt": attempt, "tokens_used": tokens_used}
@@ -1062,6 +1241,7 @@ class Worker:
             # The control plane already moved the job to 'cancelled'; report a
             # terminal event it will ignore (terminal-state guard) but which
             # keeps our accounting honest. Skip posting to avoid clobbering.
+            self._active.pop(job_id, None)
             self._running = max(0, self._running - 1)
             print(f"[roost] job {job_id} torn down (cancelled)", flush=True)
             return
@@ -1075,43 +1255,89 @@ class Worker:
             # the goal was actually achieved before we call it succeeded.
             goal = spec.get("task") or spec.get("intent")
             if _wants_verify(spec, is_auto) and goal:
-                await self._post_event(job_id, {"type": "progress", "attempt": attempt,
-                                                "tokens_used": tokens_used,
-                                                "activity": "🔎 verifying result"})
-                passed, evidence, vtok = await self._run_verifier(job_id, goal, result_text)
-                tokens_used += vtok
-                # Self-healing (ease-of-use-plan Phase 3): if the verifier positively
-                # rejected the result, fix-and-re-verify on this same node, bounded.
-                heals = 0
-                while passed is False and heals < MAX_FIX_ATTEMPTS:
-                    heals += 1
+                # [C4/H2] Bound the verify/self-heal phase to the job's remaining
+                # budget (wallclock + tokens). Each _oneshot_agent is also capped per
+                # call, and we post a `progress` event BEFORE every subprocess so the
+                # 60s lease is renewed between phases (long verify/heal must not let
+                # the lease lapse → double-execution).
+                budget_exhausted_note: Optional[str] = None
+
+                async def _phase_progress(activity: str) -> Optional[float]:
+                    """Renew the lease (progress event) and return the per-subprocess
+                    wallclock cap, or None if the budget is exhausted."""
+                    nonlocal budget_exhausted_note
+                    rem, exhausted = _budget_remaining(
+                        budget, time.monotonic() - job_started, tokens_used)
+                    if exhausted:
+                        budget_exhausted_note = (
+                            "budget exhausted; accepting current result without further "
+                            "verify/self-heal")
+                        return None
                     await self._post_event(job_id, {"type": "progress", "attempt": attempt,
                                                     "tokens_used": tokens_used,
-                                                    "activity": f"🔧 self-healing (attempt {heals})"})
-                    await self._send_log(job_id, "event",
-                                         f"verification failed; self-healing attempt {heals}: {evidence[:120]}")
-                    fixed, _full, ftok = await self._oneshot_agent(
-                        job_id, verify_mod.render_fix(goal, evidence, result_text), label=f"fix{heals}")
-                    tokens_used += ftok
-                    if fixed:
-                        result_text = fixed
-                    passed, evidence, vtok = await self._run_verifier(job_id, goal, result_text)
+                                                    "activity": activity})
+                    return rem
+
+                cap = await _phase_progress("🔎 verifying result")
+                if cap is None:
+                    # No budget even to verify: accept the raw result, mark unverified.
+                    passed, evidence = None, "verification skipped (budget exhausted)"
+                    heals = 0
+                else:
+                    passed, evidence, vtok = await self._run_verifier(
+                        job_id, goal, result_text, timeout_s=cap)
                     tokens_used += vtok
+                    # Self-healing (ease-of-use-plan Phase 3): if the verifier positively
+                    # rejected the result, fix-and-re-verify on this same node, bounded.
+                    heals = 0
+                    while passed is False and heals < MAX_FIX_ATTEMPTS and not _is_cancelled():
+                        heals += 1
+                        cap = await _phase_progress(f"🔧 self-healing (attempt {heals})")
+                        if cap is None:
+                            break
+                        await self._send_log(job_id, "event",
+                                             f"verification failed; self-healing attempt {heals}: {evidence[:120]}")
+                        fixed, _full, ftok = await self._oneshot_agent(
+                            job_id, verify_mod.render_fix(goal, evidence, result_text),
+                            label=f"fix{heals}", timeout_s=cap)
+                        tokens_used += ftok
+                        if fixed:
+                            result_text = fixed
+                        cap = await _phase_progress("🔎 re-verifying result")
+                        if cap is None:
+                            break
+                        passed, evidence, vtok = await self._run_verifier(
+                            job_id, goal, result_text, timeout_s=cap)
+                        tokens_used += vtok
+                if _is_cancelled():
+                    self._active.pop(job_id, None)
+                    self._running = max(0, self._running - 1)
+                    print(f"[roost] job {job_id} torn down (cancelled during verify)", flush=True)
+                    return
                 terminal["tokens_used"] = tokens_used
+                if budget_exhausted_note:
+                    evidence = f"{evidence} [{budget_exhausted_note}]"
                 bundle = {"output": result_text, "verified": passed is True,
                           "evidence": evidence, "self_heal_attempts": heals}
                 if passed is False:
                     terminal.update(
                         type="failed", exit_code=0, result=bundle,
                         error=f"verification failed after {heals} self-heal attempt(s): {evidence}"[:300])
+                elif passed is None:
+                    # [M3] Inconclusive — verifier gave no usable verdict (crash/timeout/
+                    # budget). Complete the job, but do NOT claim a confident success:
+                    # verified=null with explicit evidence so the operator can tell.
+                    bundle["verified"] = None
+                    terminal.update(type="succeeded", exit_code=0, result=bundle,
+                                    verified=None)
                 else:
-                    # PASS, or inconclusive (a broken verifier shouldn't fail good work).
                     terminal.update(type="succeeded", exit_code=0, result=bundle)
             else:
                 terminal.update(type="succeeded", exit_code=0,
                                 result={"output": result_text} if result_text else None)
         else:
             terminal.update(type="failed", error=f"exit_code={exit_code}", exit_code=exit_code)
+        self._active.pop(job_id, None)
         await self._post_event(job_id, terminal)
         self._running = max(0, self._running - 1)
         print(
@@ -1139,7 +1365,9 @@ class Worker:
     ) -> tuple[Optional[str], str, int]:
         """Run a one-shot Sonnet agent (fresh context) and return (result_text,
         full_stdout, tokens). Used by the verifier and the self-healing fix loop — same
-        node as the executor so it sees the artifacts. No cancel tracking (sub-step)."""
+        node as the executor so it sees the artifacts. [H5] Registered in
+        self._aux_procs[job_id] so a server cancel / timeout teardown of the parent job
+        kills this subprocess too instead of leaking tokens."""
         temp: list[Path] = []
         try:
             spec = {"intent": intent, "model": AUTO_DEFAULT_MODEL,
@@ -1163,6 +1391,9 @@ class Worker:
             for p in temp:
                 p.unlink(missing_ok=True)
             return None, "", 0
+
+        # [H5] Register so a parent-job cancel/timeout can SIGKILL this aux process.
+        self._aux_procs.setdefault(job_id, set()).add(proc)
 
         chunks: list[str] = []
         tokens = 0
@@ -1190,31 +1421,63 @@ class Worker:
         t1 = asyncio.create_task(rel(proc.stdout))
         t2 = asyncio.create_task(rel(proc.stderr))
         try:
-            await asyncio.wait_for(proc.wait(), timeout=timeout_s)
-        except asyncio.TimeoutError:
             try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
-        await asyncio.gather(t1, t2, return_exceptions=True)
-        for p in temp:
-            p.unlink(missing_ok=True)
+                await asyncio.wait_for(proc.wait(), timeout=timeout_s)
+            except asyncio.TimeoutError:
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
+                # Reap so we don't leave a zombie / dangling transport on timeout.
+                try:
+                    await proc.wait()
+                except Exception:  # noqa: BLE001
+                    pass
+            await asyncio.gather(t1, t2, return_exceptions=True)
+        finally:
+            # Deregister and reap on EVERY path (success, timeout, cancel-kill).
+            procs = self._aux_procs.get(job_id)
+            if procs is not None:
+                procs.discard(proc)
+                if not procs:
+                    self._aux_procs.pop(job_id, None)
+            for p in temp:
+                p.unlink(missing_ok=True)
         return result, "\n".join(chunks), tokens
 
     async def _run_verifier(
-        self, job_id: str, goal: str, result_text: Optional[str]
+        self, job_id: str, goal: str, result_text: Optional[str],
+        *, timeout_s: float = VERIFY_HEAL_TIMEOUT,
     ) -> tuple[Optional[bool], str, int]:
         """Run an INDEPENDENT verifier (fresh context, adversarial) to check the goal was
         actually achieved. Returns (passed, evidence, tokens): True=verified,
-        False=positively unmet (→ fail), None=inconclusive (→ don't block)."""
-        result, full, tokens = await self._oneshot_agent(
-            job_id, verify_mod.render_user(goal, result_text),
-            system_prompt=verify_mod.system_prompt(), label="verify")
-        passed, reason = verify_mod.parse_verdict(result or full)
-        verdict = "PASS" if passed else ("FAIL" if passed is False else "INCONCLUSIVE")
-        await self._send_log(job_id, "event", f"verifier verdict: {verdict} — {reason[:160]}")
-        print(f"[roost] job {job_id} verifier: {verdict} — {reason[:120]}", flush=True)
-        return passed, reason, tokens
+        False=positively unmet (→ fail), None=inconclusive.
+
+        [M3] An inconclusive verdict (None) usually means the verifier crashed/timed out
+        and produced no usable PASS/FAIL line — NOT evidence of success. Retry the
+        verifier ONCE before reporting inconclusive, so a single flake doesn't either
+        block good work or silently pass bad work."""
+        total_tokens = 0
+        passed: Optional[bool] = None
+        reason = "verifier produced no verdict"
+        for attempt_i in range(2):
+            result, full, tokens = await self._oneshot_agent(
+                job_id, verify_mod.render_user(goal, result_text),
+                system_prompt=verify_mod.system_prompt(), label="verify",
+                timeout_s=timeout_s)
+            total_tokens += tokens
+            passed, reason = verify_mod.parse_verdict(result or full)
+            verdict = "PASS" if passed else ("FAIL" if passed is False else "INCONCLUSIVE")
+            await self._send_log(job_id, "event", f"verifier verdict: {verdict} — {reason[:160]}")
+            print(f"[roost] job {job_id} verifier: {verdict} — {reason[:120]}", flush=True)
+            if passed is not None:
+                break
+            if attempt_i == 0:
+                await self._send_log(job_id, "event",
+                                     "verifier inconclusive (no verdict); retrying once")
+        if passed is None:
+            reason = f"verification inconclusive (verifier produced no verdict): {reason}"
+        return passed, reason, total_tokens
 
     async def _send_log(self, job_id: str, stream: str, data: str) -> None:
         try:
