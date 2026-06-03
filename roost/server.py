@@ -33,6 +33,7 @@ from fastapi.responses import (
 )
 from pydantic import BaseModel, Field
 
+from . import triage
 from .matcher import matches, placement_score
 from .schema import migrate
 
@@ -48,6 +49,12 @@ SWEEPER_INTERVAL = 5.0
 # How long a queued job will wait for a better-fit worker to poll before any
 # capable worker may take it (placement grace window, Decision V2-2/V2-4).
 PLACEMENT_GRACE = 3.0
+# Bare-worker (kind: auto): a worker permanently skips a task it already declined (a
+# poor fit won't become a good one), so the task waits for a capable node. It's
+# escalated to failed only when every currently-online capable worker has declined
+# (the genuine "no node can do this" case) — never while a capable node is just busy.
+# A high backstop guards against pathological flapping (workers churning in/out).
+MAX_DECLINES = 20
 ENROLL_TOKEN_TTL = 900.0  # 15 minutes
 ENROLL_PREFIX = "rst-enr-"
 WORKER_CRED_PREFIX = "rst-wkr-"
@@ -566,9 +573,14 @@ def _try_assign_one(db_path: Path, worker_id: str) -> Optional[dict]:
                 requires = json.loads(row["requires"])
                 if not matches(me["capabilities"], requires):
                     continue
+                waited = now - (row["created_at"] or now)
+                # bare-worker (kind: auto): never re-grab a task this worker already
+                # declined — a poor fit won't become a good one. The task waits for a
+                # capable node; it only fails once ALL capable nodes have declined.
+                if worker_id in _decliner_set(row["declined_by"]):
+                    continue
                 spec = json.loads(row["spec"])
                 job = {"prefer": spec.get("prefer"), "requires": requires}
-                waited = now - (row["created_at"] or now)
                 if waited >= PLACEMENT_GRACE:
                     chosen = row  # don't starve: take it regardless of fit
                     break
@@ -663,6 +675,36 @@ def _read_logs(
         return [dict(r) for r in cur.fetchall()]
 
 
+def _decliner_set(value: Optional[str]) -> set[str]:
+    """Parse a job's ``declined_by`` (a JSON array of worker ids; tolerates a legacy
+    bare-id string) into a set."""
+    if not value:
+        return set()
+    try:
+        parsed = json.loads(value)
+        return set(parsed) if isinstance(parsed, list) else {str(parsed)}
+    except (json.JSONDecodeError, TypeError):
+        return {value}  # legacy single-id format
+
+
+def _online_capable_ids(conn: sqlite3.Connection, requires: dict, now: float) -> set[str]:
+    """Worker ids that are online (recently seen, not offline/revoked) and whose
+    capabilities satisfy ``requires`` — i.e. could run this job now or once free."""
+    out: set[str] = set()
+    for w in conn.execute(
+        "SELECT id, capabilities FROM workers "
+        "WHERE revoked=0 AND status != 'offline' AND last_seen >= ?",
+        (now - STALE_AFTER,),
+    ).fetchall():
+        try:
+            caps = json.loads(w["capabilities"])
+        except (json.JSONDecodeError, TypeError):
+            caps = {}
+        if matches(caps, requires):
+            out.add(w["id"])
+    return out
+
+
 def _apply_event(
     db_path: Path,
     job_id: str,
@@ -723,6 +765,40 @@ def _apply_event(
                         "UPDATE jobs SET tree_budget_spent = COALESCE(tree_budget_spent,0) + ? "
                         "WHERE id = ?",
                         (tokens_used, row["root_job_id"] or job_id),
+                    )
+                conn.execute(
+                    "UPDATE workers SET status='idle', last_seen=? WHERE id=?",
+                    (now, worker_id),
+                )
+            elif etype == "declined":
+                # Bare-worker self-selection: this worker judged itself a poor fit.
+                # Record it in the decliner set and requeue for a capable node. Escalate
+                # to failed ONLY when every currently-online capable worker has declined
+                # (genuine "no node can do this") — not while a capable node is just busy.
+                reason = str(event.get("reason") or "declined")[:200]
+                decliners = _decliner_set(row["declined_by"])
+                decliners.add(worker_id)
+                new_count = (row["decline_count"] or 0) + 1
+                requires = json.loads(row["requires"])
+                remaining = _online_capable_ids(conn, requires, now) - decliners
+                escalate = (not remaining) or new_count >= MAX_DECLINES
+                if escalate:
+                    conn.execute(
+                        "UPDATE jobs SET state='failed', finished_at=?, "
+                        "lease_expires_at=NULL, worker_id=NULL, decline_count=?, "
+                        "declined_by=?, error=?, last_activity=? WHERE id=?",
+                        (now, new_count, json.dumps(sorted(decliners)),
+                         f"declined by all {len(decliners)} capable node(s); "
+                         f"last reason: {reason}",
+                         "escalated: declined-by-all", job_id),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE jobs SET state='queued', worker_id=NULL, "
+                        "assigned_at=NULL, started_at=NULL, lease_expires_at=NULL, "
+                        "decline_count=?, declined_by=?, last_activity=? WHERE id=?",
+                        (new_count, json.dumps(sorted(decliners)),
+                         f"declined by {worker_id}: {reason}", job_id),
                     )
                 conn.execute(
                     "UPDATE workers SET status='idle', last_seen=? WHERE id=?",
@@ -922,6 +998,7 @@ def _prune_logs(db_path: Path, max_age_sec: float, max_rows_per_job: int) -> int
 
 class JobSubmit(BaseModel):
     intent: Optional[str] = None
+    task: Optional[str] = None  # kind: auto — plain-language task; the worker self-assesses
     command: Optional[Any] = None  # str | list[str]
     args: Optional[list[str]] = None
     cwd: Optional[str] = None
@@ -933,6 +1010,7 @@ class JobSubmit(BaseModel):
     permissions: dict[str, Any] = Field(default_factory=dict)
     hierarchy: dict[str, Any] = Field(default_factory=dict)
     kind: Optional[str] = None
+    verify: Optional[bool] = None  # trust loop: independent verifier checks the goal (auto: on)
     image: Optional[str] = None  # kind: docker — image to run the job in
     container: Optional[dict[str, Any]] = None  # kind: docker — gpus/cpus/memory/volumes/env/...
     model: Optional[str] = None
@@ -1146,14 +1224,33 @@ def create_app(
             raise HTTPException(404, "no host credentials available")
         return {"credentials_json": creds}
 
+    @app.get("/triage-prompt", dependencies=[Depends(require_worker)])
+    async def triage_prompt(principal: dict = Depends(require_worker)):
+        """The bare-worker (kind: auto) self-assessment system prompt, rendered for
+        THIS worker against the current fleet. Served from here (not baked into the
+        worker) so the prompt can be iterated without redeploying workers — the whole
+        point of a thin worker. The worker fetches this per auto job."""
+        worker = principal.get("worker") or {}
+        caps = worker.get("capabilities") or {}
+        fleet = await asyncio.to_thread(_list_workers, db)
+        fleet = [w for w in fleet if w["status"] in ("idle", "busy")
+                 and w.get("id") != worker.get("id")]
+        return {"system": triage.render(caps, fleet), "decline_marker": triage.DECLINE_MARKER}
+
     # ---- job submit / list / status / logs / stream / cancel ----
 
     @app.post("/jobs")
     async def submit_job(payload: JobSubmit, principal: dict = Depends(require_any)):
-        is_docker = (payload.kind or "").lower() == "docker"
-        if not payload.intent and not payload.command and not (is_docker and payload.image):
+        kind = (payload.kind or "").lower()
+        is_docker = kind == "docker"
+        is_auto = kind == "auto"
+        if is_auto and not payload.task and not payload.intent:
+            raise HTTPException(400, "kind: auto job requires `task`")
+        if (not is_auto and not payload.intent and not payload.command
+                and not (is_docker and payload.image)):
             raise HTTPException(
-                400, "job must have either `intent`, `command`, or (kind: docker + `image`)")
+                400, "job must have either `intent`, `command`, (kind: docker + `image`), "
+                     "or (kind: auto + `task`)")
         parent_dict: Optional[dict] = None
         if payload.parent_job_id:
             parent_dict = await asyncio.to_thread(_get_job, db, payload.parent_job_id)

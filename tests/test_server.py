@@ -454,3 +454,109 @@ def test_heartbeat_keeps_busy_worker_busy_after_stale(tmp_path: Path):
     server._heartbeat_worker(db, wid, None)
     w = next(x for x in server._list_workers(db) if x["id"] == wid)
     assert w["status"] == "busy"
+
+
+# ---------- Bare-worker (kind: auto) self-selection — plan.md Phase 1 ----------
+
+
+def _age_job(db: Path, job_id: str, *, seconds: float) -> None:
+    """Backdate a job's created_at so it's past the placement grace window — makes
+    the *poller* take it regardless of fit, isolating decline/requeue from the
+    (separately-tested) grace-window scoring."""
+    import sqlite3
+    import time as _time
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE jobs SET created_at=? WHERE id=?",
+                     (_time.time() - seconds, job_id))
+        conn.commit()
+
+
+def test_auto_job_decline_requeues_and_skips_decliner(tmp_path: Path):
+    """A worker that self-declines a kind:auto task requeues it, and the decliner is
+    skipped on its next poll (within the backoff) so a better-fit node can take it."""
+    db = tmp_path / "roost.db"
+    server._init_db(db)
+    cpu = server._register_worker(db, "cpu", {"tools": ["claude"], "cpus": 4})
+    gpu = server._register_worker(
+        db, "gpu", {"tools": ["claude"], "cpus": 32, "gpu_count": 1, "gpu_vram_gb": 80})
+    jid = server._insert_job(
+        db, {"kind": "auto", "task": "train a model on a GPU", "requires": {}})["id"]
+    # Aged past the grace window but within the decline backoff (30s).
+    _age_job(db, jid, seconds=5)
+
+    # CPU box happens to be free and grabs it (empty requires → matches anyone).
+    got = server._try_assign_one(db, cpu["id"])
+    assert got is not None and got["worker_id"] == cpu["id"]
+
+    # It judges itself a poor fit and declines.
+    job, accepted = server._apply_event(
+        db, jid, cpu["id"],
+        {"type": "declined", "attempt": got["attempt"], "reason": "no GPU on this node"},
+    )
+    assert accepted
+    assert job["state"] == "queued"               # requeued, not failed
+    assert job["worker_id"] is None
+
+    # The decliner is skipped on its next poll; the GPU box can take it.
+    assert server._try_assign_one(db, cpu["id"]) is None
+    got2 = server._try_assign_one(db, gpu["id"])
+    assert got2 is not None and got2["worker_id"] == gpu["id"]
+
+
+def test_auto_job_escalates_after_max_declines(tmp_path: Path):
+    """An impossible kind:auto task that every node declines escalates to failed
+    rather than bouncing forever."""
+    db = tmp_path / "roost.db"
+    server._init_db(db)
+    workers = [server._register_worker(db, f"w{i}", {"tools": ["claude"]}) for i in range(3)]
+    jid = server._insert_job(
+        db, {"kind": "auto", "task": "do the impossible", "requires": {}})["id"]
+    _age_job(db, jid, seconds=5)
+
+    final = None
+    for w in workers:  # 3 distinct nodes each decline once → hits MAX_DECLINES
+        got = server._try_assign_one(db, w["id"])
+        assert got is not None, f"{w['id']} should be able to grab the requeued task"
+        final, _ = server._apply_event(
+            db, jid, w["id"],
+            {"type": "declined", "attempt": got["attempt"], "reason": "nope"},
+        )
+    assert final["state"] == "failed"
+    assert "declined" in (final["error"] or "")
+
+
+def test_auto_job_does_not_escalate_while_capable_node_is_busy(tmp_path: Path):
+    """The Phase-1 bug: a kind:auto task must NOT be failed just because the node that
+    grabbed it declined — if another capable node exists (even busy), it stays queued."""
+    import sqlite3
+    db = tmp_path / "roost.db"
+    server._init_db(db)
+    cpu = server._register_worker(db, "cpu", {"tools": ["claude"], "cpus": 4})
+    gpu = server._register_worker(
+        db, "gpu", {"tools": ["claude"], "cpus": 32, "gpu_count": 1, "gpu_vram_gb": 80})
+    # gpu is busy on something else (capable but not free) — must still block escalation.
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE workers SET status='busy' WHERE id=?", (gpu["id"],))
+        conn.commit()
+    jid = server._insert_job(db, {"kind": "auto", "task": "needs a GPU", "requires": {}})["id"]
+    _age_job(db, jid, seconds=5)
+
+    got = server._try_assign_one(db, cpu["id"])
+    assert got is not None and got["worker_id"] == cpu["id"]
+    job, _ = server._apply_event(
+        db, jid, cpu["id"], {"type": "declined", "attempt": got["attempt"], "reason": "no GPU"})
+    # NOT failed — the busy GPU node hasn't declined, so the task waits for it.
+    assert job["state"] == "queued"
+    assert job["decline_count"] == 1
+    # cpu (the decliner) is now permanently skipped for this job.
+    assert server._try_assign_one(db, cpu["id"]) is None
+
+
+def test_triage_prompt_endpoint(client: TestClient):
+    """The control plane serves a per-worker triage prompt carrying the decline marker."""
+    worker_id, cred = _enroll_worker(client, {"tools": ["claude"], "cpus": 8})
+    r = client.get("/triage-prompt", headers={"Authorization": f"Bearer {cred}"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["decline_marker"] in body["system"]
+    assert "decline" in body["system"].lower()

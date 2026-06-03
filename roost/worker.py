@@ -21,6 +21,7 @@ import asyncio
 import json
 import os
 import platform
+import re
 import shlex
 import shutil
 import signal
@@ -35,6 +36,8 @@ from typing import Any, Optional
 import httpx
 
 from . import config as roost_config
+from . import triage
+from . import verify as verify_mod
 
 POLL_TIMEOUT = 25.0
 HEARTBEAT_INTERVAL = 15.0
@@ -303,10 +306,24 @@ def build_command(
     base_url: Optional[str] = None,
     token: Optional[str] = None,
     can_dispatch: bool = False,
+    triage_prompt: Optional[str] = None,
 ) -> tuple[list[str], str, list[Path]]:
     """Build (argv, cwd, extra_tempfiles). The tempfiles are cleaned up by caller."""
     cwd = spec.get("cwd") or default_cwd or os.getcwd()
     tempfiles: list[Path] = []
+
+    # Bare-worker (kind: auto): a triage agent self-assesses fit then accepts (does
+    # the task) or declines. It runs as a claude agent with a triage system prompt.
+    if (spec.get("kind") or "").lower() == "auto":
+        argv = _build_auto_argv(
+            spec, job_id,
+            worker_policy=worker_policy or {},
+            base_url=base_url, token=token,
+            can_dispatch=can_dispatch,
+            triage_prompt=triage_prompt or "",
+            tempfiles=tempfiles,
+        )
+        return argv, cwd, tempfiles
 
     # Docker-as-executor: run the job in a fresh, isolated container (GPU/limits
     # per job). Checked before `command` because a docker job carries BOTH an
@@ -482,6 +499,84 @@ def _build_claude_argv(
 
     if spec.get("args"):
         argv += list(spec["args"])
+    return argv
+
+
+# Default model for kind:auto triage+execution: Sonnet — capable enough to
+# reliably introspect (run nvidia-smi etc.) and execute, while far cheaper than the
+# Opus that drove the original "triage tax" (plan.md Phase 2/3). Override with
+# `model:` in the spec (e.g. a smaller model for bulk/trivial work).
+AUTO_DEFAULT_MODEL = "claude-sonnet-4-6"
+
+# Self-healing (trust loop): if the independent verifier rejects a result, fix-and-
+# re-verify on the same node up to this many times before reporting failure.
+MAX_FIX_ATTEMPTS = 2
+
+# Strong signals that a task genuinely needs a CUDA GPU. Conservative on purpose:
+# only triggers an instant (no-LLM) decline on a node that has no GPU, so the worst
+# case of a false positive is the task waiting for / escalating to another node.
+_GPU_REQUIRE_RE = re.compile(
+    r"\b(cuda|nvidia-smi|vram|cudnn|torch\.cuda|tensor\s*cores?)\b"
+    r"|\b(needs?|requires?|use[sd]?|run\w*|train\w*|benchmark\w*)\b[^.\n]{0,24}\bgpu\b"
+    r"|\bgpu\b[^.\n]{0,24}\b(required|needed|only|benchmark\w*|train\w*|matmul)\b",
+    re.IGNORECASE,
+)
+
+
+def _wants_verify(spec: dict, is_auto: bool) -> bool:
+    """Whether to run the independent verifier after a successful agentic job.
+    Explicit `verify:` wins; otherwise auto/roost-run jobs verify by default (the
+    trust loop), other kinds opt in. Never verify command/docker jobs here."""
+    v = spec.get("verify")
+    if v is not None:
+        return bool(v)
+    return is_auto
+
+
+def _auto_prefilter(task: str, caps: dict) -> Optional[str]:
+    """Cheap deterministic gate for kind:auto: return a decline reason for an obvious
+    capability mismatch (so we skip the LLM triage call), else None to run the agent."""
+    has_gpu = bool(caps.get("gpu_count")) or bool(caps.get("docker_gpu"))
+    if not has_gpu and _GPU_REQUIRE_RE.search(task or ""):
+        return "no GPU on this node (task requires CUDA/GPU)"
+    return None
+
+
+def _build_auto_argv(
+    spec: dict,
+    job_id: str,
+    *,
+    worker_policy: dict,
+    base_url: Optional[str],
+    token: Optional[str],
+    can_dispatch: bool,
+    triage_prompt: str,
+    tempfiles: list[Path],
+) -> list[str]:
+    """Bare-worker triage: run a claude agent whose system prompt tells it to
+    self-assess fit and either do the task or decline. The task is the `-p` prompt;
+    the triage prompt is injected as the system prompt."""
+    task = spec.get("task") or spec.get("intent")
+    if not task:
+        raise ValueError("auto job requires `task`")
+    sub = dict(spec)
+    sub["intent"] = task
+    # An auto agent must be able to ACT (shell / write code / docker). Default to
+    # sandboxed execution unless the spec pins permissions explicitly.
+    if not sub.get("permissions"):
+        sub["permissions"] = {"sandbox": True}
+    if not sub.get("model"):
+        sub["model"] = AUTO_DEFAULT_MODEL
+    argv = _build_claude_argv(
+        sub, job_id,
+        worker_policy=worker_policy,
+        base_url=base_url, token=token,
+        can_dispatch=can_dispatch,
+        tempfiles=tempfiles,
+    )
+    # argv[:3] == ["claude", "-p", task]; inject the triage system prompt after it.
+    if triage_prompt:
+        argv = argv[:3] + ["--append-system-prompt", triage_prompt] + argv[3:]
     return argv
 
 
@@ -798,10 +893,30 @@ class Worker:
             f"{spec.get('intent') or spec.get('command')!r}",
             flush=True,
         )
+        is_auto = (spec.get("kind") or "").lower() == "auto"
+
+        # Bare-worker pre-filter (cost mitigation, plan.md Phase 2): decline an
+        # obvious capability mismatch (e.g. a GPU task on a no-GPU node) WITHOUT
+        # spending an LLM triage call. Conservative — strong signals only.
+        if is_auto:
+            pf = _auto_prefilter(spec.get("task") or spec.get("intent") or "", self.capabilities)
+            if pf:
+                await self._send_log(job_id, "event", f"auto pre-filter declined (no LLM): {pf}")
+                await self._post_event(job_id, {"type": "declined", "attempt": attempt, "reason": pf})
+                print(f"[roost] job {job_id} pre-filter declined: {pf}", flush=True)
+                return
+
         await self._post_event(job_id, {"type": "started", "attempt": attempt})
         self._running += 1
 
         can_dispatch = bool((spec.get("hierarchy") or {}).get("can_dispatch", False))
+
+        # Bare-worker (kind: auto): fetch the triage system prompt (rendered for us
+        # against the live fleet) from the control plane, with a local fallback.
+        triage_prompt: Optional[str] = None
+        decline_marker = triage.DECLINE_MARKER
+        if is_auto:
+            triage_prompt, decline_marker = await self._fetch_triage_prompt()
 
         try:
             argv, cwd, tempfiles = build_command(
@@ -811,6 +926,7 @@ class Worker:
                 base_url=self.base_url,
                 token=self.token,
                 can_dispatch=can_dispatch,
+                triage_prompt=triage_prompt,
             )
         except (ValueError, FileNotFoundError) as e:
             await self._send_log(job_id, "stderr", f"failed to build command: {e}")
@@ -862,19 +978,31 @@ class Worker:
         self._active[job_id] = {"process": process, "is_docker": is_docker, "cancelled": None}
 
         tokens_used = 0
+        declined = False
+        decline_reason: Optional[str] = None
+        result_text: Optional[str] = None
 
         async def relay(stream: asyncio.StreamReader, kind: str) -> None:
-            nonlocal tokens_used
+            nonlocal tokens_used, declined, decline_reason, result_text
             assert stream is not None
             while True:
                 line = await stream.readline()
                 if not line:
                     return
                 text = line.decode("utf-8", errors="replace").rstrip("\n")
+                # Bare-worker accept/decline protocol: the triage agent emits the
+                # decline marker in its output to route the task to a better node.
+                if is_auto and not declined and decline_marker in text:
+                    declined = True
+                    after = text.split(decline_marker, 1)[1].strip()
+                    decline_reason = (after.split('"')[0].split("\\n")[0].strip()
+                                      or "declined")[:200]
                 # Parse stream-json for token usage if applicable.
                 if kind == "stdout" and text.startswith("{"):
                     try:
                         obj = json.loads(text)
+                        if obj.get("type") == "result" and obj.get("result") is not None:
+                            result_text = str(obj.get("result"))
                         usage = (obj.get("message") or {}).get("usage") or obj.get("usage")
                         delta = 0
                         if isinstance(usage, dict):
@@ -939,8 +1067,49 @@ class Worker:
             return
         if timed_out:
             terminal.update(type="failed", error="wallclock_exceeded", exit_code=exit_code)
+        elif declined:
+            # Self-declined: not a failure — the kernel requeues for a better-fit node.
+            terminal.update(type="declined", reason=decline_reason or "declined")
         elif exit_code == 0:
-            terminal.update(type="succeeded", exit_code=0)
+            # Trust loop: for agentic jobs that opt in, an INDEPENDENT verifier checks
+            # the goal was actually achieved before we call it succeeded.
+            goal = spec.get("task") or spec.get("intent")
+            if _wants_verify(spec, is_auto) and goal:
+                await self._post_event(job_id, {"type": "progress", "attempt": attempt,
+                                                "tokens_used": tokens_used,
+                                                "activity": "🔎 verifying result"})
+                passed, evidence, vtok = await self._run_verifier(job_id, goal, result_text)
+                tokens_used += vtok
+                # Self-healing (ease-of-use-plan Phase 3): if the verifier positively
+                # rejected the result, fix-and-re-verify on this same node, bounded.
+                heals = 0
+                while passed is False and heals < MAX_FIX_ATTEMPTS:
+                    heals += 1
+                    await self._post_event(job_id, {"type": "progress", "attempt": attempt,
+                                                    "tokens_used": tokens_used,
+                                                    "activity": f"🔧 self-healing (attempt {heals})"})
+                    await self._send_log(job_id, "event",
+                                         f"verification failed; self-healing attempt {heals}: {evidence[:120]}")
+                    fixed, _full, ftok = await self._oneshot_agent(
+                        job_id, verify_mod.render_fix(goal, evidence, result_text), label=f"fix{heals}")
+                    tokens_used += ftok
+                    if fixed:
+                        result_text = fixed
+                    passed, evidence, vtok = await self._run_verifier(job_id, goal, result_text)
+                    tokens_used += vtok
+                terminal["tokens_used"] = tokens_used
+                bundle = {"output": result_text, "verified": passed is True,
+                          "evidence": evidence, "self_heal_attempts": heals}
+                if passed is False:
+                    terminal.update(
+                        type="failed", exit_code=0, result=bundle,
+                        error=f"verification failed after {heals} self-heal attempt(s): {evidence}"[:300])
+                else:
+                    # PASS, or inconclusive (a broken verifier shouldn't fail good work).
+                    terminal.update(type="succeeded", exit_code=0, result=bundle)
+            else:
+                terminal.update(type="succeeded", exit_code=0,
+                                result={"output": result_text} if result_text else None)
         else:
             terminal.update(type="failed", error=f"exit_code={exit_code}", exit_code=exit_code)
         await self._post_event(job_id, terminal)
@@ -950,6 +1119,102 @@ class Worker:
             f"tokens_used={tokens_used}",
             flush=True,
         )
+
+    async def _fetch_triage_prompt(self) -> tuple[str, str]:
+        """Pull the bare-worker triage system prompt from the control plane (rendered
+        for us against the live fleet). Falls back to the bundled prompt + our own
+        capabilities if the control plane is unreachable, so an auto job still runs."""
+        try:
+            r = await self.client.get("/triage-prompt", timeout=10.0)
+            r.raise_for_status()
+            data = r.json()
+            return data["system"], data.get("decline_marker", triage.DECLINE_MARKER)
+        except (httpx.HTTPError, KeyError, ValueError) as e:
+            print(f"[roost] triage-prompt fetch failed ({e}); using local fallback", flush=True)
+            return triage.render(self.capabilities), triage.DECLINE_MARKER
+
+    async def _oneshot_agent(
+        self, job_id: str, intent: str, *, system_prompt: Optional[str] = None,
+        label: str = "agent", timeout_s: float = 300.0,
+    ) -> tuple[Optional[str], str, int]:
+        """Run a one-shot Sonnet agent (fresh context) and return (result_text,
+        full_stdout, tokens). Used by the verifier and the self-healing fix loop — same
+        node as the executor so it sees the artifacts. No cancel tracking (sub-step)."""
+        temp: list[Path] = []
+        try:
+            spec = {"intent": intent, "model": AUTO_DEFAULT_MODEL,
+                    "permissions": {"sandbox": True}}
+            argv = _build_claude_argv(
+                spec, f"{job_id}-{label}", worker_policy=self.policy,
+                base_url=None, token=None, can_dispatch=False, tempfiles=temp,
+            )
+            if system_prompt:
+                argv = argv[:3] + ["--append-system-prompt", system_prompt] + argv[3:]
+        except (ValueError, FileNotFoundError) as e:
+            return None, "", 0
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *argv, cwd=self.default_cwd or os.getcwd(), env=os.environ.copy(),
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+            )
+        except (FileNotFoundError, PermissionError):
+            for p in temp:
+                p.unlink(missing_ok=True)
+            return None, "", 0
+
+        chunks: list[str] = []
+        tokens = 0
+        result: Optional[str] = None
+
+        async def rel(stream: asyncio.StreamReader) -> None:
+            nonlocal tokens, result
+            while True:
+                line = await stream.readline()
+                if not line:
+                    return
+                t = line.decode("utf-8", errors="replace").rstrip("\n")
+                chunks.append(t)
+                if t.startswith("{"):
+                    try:
+                        o = json.loads(t)
+                        if o.get("type") == "result" and o.get("result") is not None:
+                            result = str(o.get("result"))
+                        u = (o.get("message") or {}).get("usage") or o.get("usage")
+                        if isinstance(u, dict):
+                            tokens += int(u.get("input_tokens") or 0) + int(u.get("output_tokens") or 0)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+
+        t1 = asyncio.create_task(rel(proc.stdout))
+        t2 = asyncio.create_task(rel(proc.stderr))
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=timeout_s)
+        except asyncio.TimeoutError:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        await asyncio.gather(t1, t2, return_exceptions=True)
+        for p in temp:
+            p.unlink(missing_ok=True)
+        return result, "\n".join(chunks), tokens
+
+    async def _run_verifier(
+        self, job_id: str, goal: str, result_text: Optional[str]
+    ) -> tuple[Optional[bool], str, int]:
+        """Run an INDEPENDENT verifier (fresh context, adversarial) to check the goal was
+        actually achieved. Returns (passed, evidence, tokens): True=verified,
+        False=positively unmet (→ fail), None=inconclusive (→ don't block)."""
+        result, full, tokens = await self._oneshot_agent(
+            job_id, verify_mod.render_user(goal, result_text),
+            system_prompt=verify_mod.system_prompt(), label="verify")
+        passed, reason = verify_mod.parse_verdict(result or full)
+        verdict = "PASS" if passed else ("FAIL" if passed is False else "INCONCLUSIVE")
+        await self._send_log(job_id, "event", f"verifier verdict: {verdict} — {reason[:160]}")
+        print(f"[roost] job {job_id} verifier: {verdict} — {reason[:120]}", flush=True)
+        return passed, reason, tokens
 
     async def _send_log(self, job_id: str, stream: str, data: str) -> None:
         try:

@@ -61,6 +61,63 @@ def _ctx_client(ctx: click.Context) -> httpx.Client:
     return _client(url, token)
 
 
+_HAIKU_MODEL = "claude-haiku-4-5-20251001"  # only for tasks the router flags trivial
+
+_CLASSIFY_PROMPT = (
+    "You route requests for a fleet orchestrator. Read the GOAL and respond with ONLY a "
+    "JSON object (no prose) with keys:\n"
+    '  "mode": "single" if it is one task, "multi" if it needs several steps or several machines;\n'
+    '  "ambiguous": true ONLY if you genuinely cannot tell what is wanted;\n'
+    '  "clarifying_question": one short question to ask, or null;\n'
+    '  "destructive": true if it deletes/overwrites data, affects production, or sends data externally;\n'
+    '  "simple": true ONLY for a TRIVIAL one-step task where a cheap, less-reliable model is '
+    'safe (e.g. print/echo a value, read a small file, report hostname/uname). Default false '
+    'when unsure — anything involving correctness, computation, code, or judgement is NOT simple;\n'
+    '  "restated": a one-line restatement of what you will do.\n'
+    "GOAL:\n"
+)
+
+
+def _parse_classification(result_text: str, goal: str) -> dict:
+    """Pure: extract the router's JSON verdict from the model's result text, with a
+    safe default (treat as a single, non-destructive task) if anything is off."""
+    import re
+    default = {"mode": "single", "ambiguous": False, "clarifying_question": None,
+               "destructive": False, "simple": False, "restated": goal}
+    try:
+        m = re.search(r"\{.*\}", result_text or "", re.S)
+        d = json.loads(m.group(0)) if m else {}
+    except (json.JSONDecodeError, TypeError):
+        return default
+    return {
+        "mode": "multi" if str(d.get("mode")).lower() == "multi" else "single",
+        "ambiguous": bool(d.get("ambiguous")),
+        "clarifying_question": d.get("clarifying_question") or None,
+        "destructive": bool(d.get("destructive")),
+        "simple": bool(d.get("simple")),
+        "restated": d.get("restated") or goal,
+    }
+
+
+def _classify_goal(goal: str) -> dict:
+    """Run a quick local classifier (Sonnet) to route + flag ambiguity/risk. Falls back
+    to 'single, non-destructive' if claude isn't available or the call fails."""
+    import shutil
+    import subprocess
+    if not shutil.which("claude"):
+        return _parse_classification("", goal)
+    try:
+        p = subprocess.run(
+            ["claude", "-p", _CLASSIFY_PROMPT + goal,
+             "--model", "claude-sonnet-4-6", "--output-format", "json"],
+            capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL,
+        )
+        obj = json.loads(p.stdout or "{}")
+        return _parse_classification(obj.get("result", ""), goal)
+    except (subprocess.SubprocessError, json.JSONDecodeError, OSError):
+        return _parse_classification("", goal)
+
+
 def _load_spec(path: str) -> dict[str, Any]:
     if path == "-":
         text = sys.stdin.read()
@@ -536,6 +593,91 @@ def dispatch(ctx: click.Context, goal: str, model: Optional[str],
     sys.exit(rc)
 
 
+@cli.command(name="do")
+@click.argument("goal", nargs=-1, required=True)
+@click.option("--yes", "-y", is_flag=True, help="Skip clarification/confirmation prompts.")
+@click.option("--model", default=None, help="Override the model.")
+@click.pass_context
+def do_(ctx: click.Context, goal: tuple, yes: bool, model: Optional[str]) -> None:
+    """Do a GOAL — the one front door. Just say what you want.
+
+    Roost classifies the request, asks a question only if it's genuinely ambiguous,
+    confirms before anything destructive, then routes it: a single task runs on the
+    best-fit node (verified); a multi-part goal goes to the captain to split across
+    nodes. You never pick a kind, write a spec, or choose a worker.
+
+      roost do "report the GPU model and free VRAM on a GPU box"
+      roost do "run the test suite on a GPU box and lint the repo on a CPU box, then summarize"
+    """
+    goal_str = " ".join(goal)
+    plan = _classify_goal(goal_str)
+
+    if not yes and plan["ambiguous"] and plan["clarifying_question"]:
+        ans = click.prompt(f"❓ {plan['clarifying_question']}\n  your answer")
+        goal_str = f"{goal_str}\n\n(clarification: {ans})"
+    if not yes and plan["destructive"]:
+        click.echo(f"⚠️  This looks destructive: {plan['restated']}")
+        if not click.confirm("  proceed?", default=False):
+            raise click.Abort()
+
+    if plan["mode"] == "multi":
+        click.echo("[roost] multi-step goal → captain (splitting across the fleet)")
+        ctx.invoke(dispatch, goal=goal_str, model=model, max_tokens=None)
+    else:
+        # Mostly Sonnet (reliable). Drop to Haiku ONLY for tasks flagged trivial, and
+        # only when the user didn't pin a model. The verifier/fix stay Sonnet regardless.
+        chosen = model
+        if not model and plan["simple"]:
+            chosen = _HAIKU_MODEL
+            click.echo("[roost] trivial task → best-fit node, fast model (still Sonnet-verified)")
+        else:
+            click.echo("[roost] single task → best-fit node (Sonnet, verified)")
+        ctx.invoke(run, task=(goal_str,), follow=True, model=chosen,
+                   wallclock_min=15, verify=True, as_json=False)
+
+
+@cli.command()
+@click.pass_context
+def capabilities(ctx: click.Context) -> None:
+    """Describe what this fleet can do, in plain language, with examples (discovery)."""
+    with _ctx_client(ctx) as c:
+        try:
+            workers = c.get("/workers").json()
+        except httpx.HTTPError as e:
+            raise click.ClickException(f"cannot reach control plane: {e}")
+    live = [w for w in workers if w.get("status") in ("idle", "busy")]
+    if not live:
+        click.echo("No online workers. Start one with `roost worker`, or add nodes with /roost-onboard.")
+        return
+    cores = sum((w["capabilities"].get("cpus") or 0) for w in live)
+    gpus = []
+    for w in live:
+        cp = w["capabilities"]
+        n = cp.get("gpu_count") or 0
+        if n:
+            name = (cp.get("gpu") or ["GPU"])[0].replace("NVIDIA ", "")
+            gpus.append(f"{w['name']}: {n}× {name}"
+                        + (f" ({cp.get('gpu_vram_gb')}GB)" if cp.get("gpu_vram_gb") else ""))
+    has_docker = any(w["capabilities"].get("docker") for w in live)
+    click.echo(f"\033[1mYour Roost fleet\033[0m — {len(live)} nodes · {cores} CPU cores · "
+               f"{len(gpus)} GPU node(s)")
+    if gpus:
+        click.echo("GPUs:")
+        for g in gpus:
+            click.echo(f"  • {g}")
+    click.echo("\n\033[1mWhat it can do\033[0m")
+    click.echo("  • Run anything you can say in plain language — it picks the best node and verifies the result.")
+    click.echo("  • CPU work, agent tasks, and (on the GPU nodes) GPU / training jobs"
+               + (" in isolated containers." if has_docker else "."))
+    click.echo("\n\033[1mJust say what you want\033[0m")
+    click.echo('  roost do "tell me the OS and free memory on a CPU box"')
+    if gpus:
+        click.echo('  roost do "report the GPU model and free VRAM on a GPU box"')
+    click.echo('  roost do "run the test suite somewhere and tell me if it passes"')
+    click.echo("\nMore: `roost workers` (the fleet) · `roost jobs` (recent runs) · "
+               "`roost do --help`")
+
+
 # ---------- jobs ----------
 
 
@@ -562,6 +704,62 @@ def submit(ctx: click.Context, spec: str, follow: bool, as_json: bool) -> None:
     if not follow:
         return
     rc = _stream(url, token, job["id"])
+    sys.exit(rc)
+
+
+@cli.command()
+@click.argument("task", nargs=-1, required=True)
+@click.option("--follow/--detach", default=True,
+              help="Stream until the task finishes (default) or return immediately.")
+@click.option("--model", default=None,
+              help="Override the triage/exec model (default: Sonnet).")
+@click.option("--wallclock-min", default=10, type=int, show_default=True,
+              help="Hard wall-clock cap.")
+@click.option("--verify/--no-verify", default=True, show_default=True,
+              help="Independently verify the result was actually achieved (the trust loop).")
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON on submit.")
+@click.pass_context
+def run(ctx: click.Context, task: tuple, follow: bool, model: Optional[str],
+        wallclock_min: int, verify: bool, as_json: bool) -> None:
+    """Run a plain-language TASK on whatever node fits best — no spec needed.
+
+    The task is handed to a free worker whose own agent self-assesses fit and either
+    does it or declines so it routes to a better-suited node (kind: auto). This is the
+    zero-ceremony front door; use `submit` for precise control (requires/kind/docker)
+    or `dispatch` to split a multi-part goal across nodes.
+
+      roost run "report the GPU model and free VRAM"
+      roost run "lint the repo and summarize the issues"
+    """
+    body = {"kind": "auto", "task": " ".join(task), "verify": verify,
+            "budget": {"max_wallclock_min": wallclock_min, "max_tokens": 200000}}
+    if model:
+        body["model"] = model
+    url, token, _ = _resolve(ctx)
+    with _client(url, token) as c:
+        r = c.post("/jobs", json=body)
+        if r.status_code >= 400:
+            raise click.ClickException(f"run failed: HTTP {r.status_code}: {r.text}")
+        job = r.json()
+    if as_json:
+        click.echo(json.dumps(job, indent=2))
+        return
+    click.echo(f"running: {job['id']} (kind=auto) — a worker will self-select")
+    if not follow:
+        return
+    rc = _stream(url, token, job["id"])
+    # Trust loop: surface the verifier's verdict + evidence (the human reads this, not logs).
+    try:
+        with _client(url, token) as c:
+            final = c.get(f"/jobs/{job['id']}").json()
+        res = final.get("result")
+        if isinstance(res, dict) and "verified" in res:
+            mark = "✓ verified" if res.get("verified") else "✗ NOT verified"
+            click.echo(f"\n{mark} — {res.get('evidence', '')}")
+            if res.get("output"):
+                click.echo(f"result: {res['output']}")
+    except Exception:  # noqa: BLE001 — best-effort summary
+        pass
     sys.exit(rc)
 
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import sqlite3
 
-CURRENT_VERSION = 5
+CURRENT_VERSION = 6
 
 # Full V1 schema for fresh installs.
 SCHEMA_V1 = """
@@ -58,7 +58,10 @@ CREATE TABLE IF NOT EXISTS jobs (
     subagent_model      TEXT,
     -- liveness / observability (V4)
     last_activity_at    REAL,                            -- last sign of life from the job
-    last_activity       TEXT                             -- compact "what it's doing now"
+    last_activity       TEXT,                            -- compact "what it's doing now"
+    -- bare-worker self-selection (V6)
+    decline_count       INTEGER NOT NULL DEFAULT 0,      -- times a worker self-declined (kind: auto)
+    declined_by         TEXT                             -- last worker that declined; it skips on its next poll
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_state       ON jobs(state);
 CREATE INDEX IF NOT EXISTS idx_jobs_created     ON jobs(created_at);
@@ -122,6 +125,11 @@ _JOB_V4_ADDS = [
     ("last_activity_at", "last_activity_at REAL"),
     ("last_activity",    "last_activity TEXT"),
 ]
+# V5 → V6 (bare-worker self-selection: kind: auto decline/requeue).
+_JOB_V6_ADDS = [
+    ("decline_count", "decline_count INTEGER NOT NULL DEFAULT 0"),
+    ("declined_by",   "declined_by TEXT"),
+]
 
 
 def migrate(conn: sqlite3.Connection) -> int:
@@ -165,6 +173,10 @@ def migrate(conn: sqlite3.Connection) -> int:
     if version < 5:
         # V4 → V5: permanent revocation flag.
         _add_missing("workers", _WORKER_V5_ADDS)
+
+    if version < 6:
+        # V5 → V6: bare-worker self-selection (kind: auto decline/requeue).
+        _add_missing("jobs", _JOB_V6_ADDS)
 
     conn.execute(f"PRAGMA user_version = {CURRENT_VERSION}")
     return CURRENT_VERSION

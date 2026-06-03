@@ -114,11 +114,17 @@ TOKEN=$(roost enroll-token --label local --no-curl | grep -oE 'token: \S+' | awk
 roost enroll "$TOKEN" --url "$ROOST_URL" --name local
 roost worker &                                     # (or: roost service install --start)
 
-# 3. Run something
-roost submit examples/echo.yaml                    # a trivial command job
-roost dispatch "print the OS and CPU count on a worker, then summarize"
+# 3. Just say what you want — the one front door
+roost do "report the OS and free memory on a worker"
+roost capabilities                                 # what can this fleet do?
 roost workers                                       # see the fleet
 ```
+
+`roost do "<goal>"` is the zero-ceremony path: a router classifies the request, asks a
+question only if it's genuinely ambiguous, confirms before anything destructive, then runs
+it on the best-fit node — and an **independent verifier** checks the goal was actually
+achieved before reporting success (it'll even self-heal a wrong result). You never pick a
+node, a job kind, or write a spec. Use `submit` (below) only when you want precise control.
 
 Dashboards: `scripts/fleet` (terminal) and a live web panel at
 `http://<host>:8787/panel?token=<admin-token>` — one card per node, busy nodes show the
