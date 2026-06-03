@@ -33,21 +33,28 @@ if [ ! -x "$HOME/.roost/panel-venv/bin/python" ]; then
   fi
 fi
 
-# --- Claude console dir (so claude in the terminal knows the fleet) ---
+# --- Claude console dir: connect the Roost MCP server so you just TALK to the fleet ---
 mkdir -p "$HOME/roost-console"
+cat > "$HOME/roost-console/.mcp.json" <<MCP
+{ "mcpServers": { "roost": { "command": "roost", "args": ["mcp"],
+  "env": { "ROOST_URL": "$CP_URL", "ROOST_TOKEN": "$TOKEN" } } } }
+MCP
 cat > "$HOME/roost-console/CLAUDE.md" <<'MD'
 # Roost fleet console
-You drive a live fleet of remote machines through the `roost` CLI (already on PATH,
-configured via ROOST_URL/ROOST_TOKEN in this shell). The floating panel beside this
-terminal shows which node is doing what in real time.
+You drive a live fleet of remote machines by talking. The `roost` MCP server is
+connected — prefer its tools over raw CLI. The floating panel beside this terminal
+shows which node is doing what in real time.
 
-- See the fleet: `roost workers`  ·  recent jobs: `roost jobs`
-- Run work in plain language: `roost dispatch "<goal>"` — a captain agent splits it
-  and places each piece on the best node (GPU work → GPU boxes; bulk → CPU boxes).
-  It returns a merged result.
-- Direct: `roost submit <spec.yaml>` (kinds: command / claude / docker GPU).
-- Watch a run: `roost tree <root-id> --health` ; cancel: `roost cancel <id> [--tree]`.
-Run `roost workers` to see what's in your fleet. Just tell me a goal and I'll dispatch it.
+- **roost_do("<goal>")** — THE tool. Do anything the user asks in plain language; a
+  worker self-selects the best node, runs it, and an independent verifier checks it was
+  actually achieved. Returns a run_id.
+- **roost_result(run_id)** — wait for the verified outcome + evidence; report THAT to the
+  user (proof, not just "it ran").
+- **roost_runs()** — the inbox: what's running / how it went / why it failed.
+- **roost_capabilities()** — what this fleet can do.
+
+Hold the thread across turns: "run the tests" → "now on a GPU box too" → "why did that
+fail?". Just tell me a goal and I'll do it and show you the proof.
 MD
 
 # --- assemble the .app ---

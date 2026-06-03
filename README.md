@@ -229,6 +229,14 @@ Claude Code wired to the fleet:
 mac-app/build.sh http://<control-plane-host>:8787 "<admin-token>"
 ```
 
+The console connects the **Roost MCP server** (`roost mcp`), so you drive the fleet by
+talking: *"run the tests on a GPU box"*, *"what's running?"*, *"why did that fail?"*. Add it
+to any Claude Code project with a `.mcp.json`:
+
+```json
+{ "mcpServers": { "roost": { "command": "roost", "args": ["mcp"] } } }
+```
+
 ---
 
 ## Architecture

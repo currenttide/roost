@@ -678,6 +678,22 @@ def capabilities(ctx: click.Context) -> None:
                "`roost do --help`")
 
 
+@cli.command()
+@click.pass_context
+def mcp(ctx: click.Context) -> None:
+    """Run the Roost MCP server (stdio) — lets a Claude console drive the fleet by talking.
+
+    Add to a Claude Code project's .mcp.json:
+      {"mcpServers": {"roost": {"command": "roost", "args": ["mcp"]}}}
+    Then just talk: "run the tests on a GPU box", "what's running?", "why did that fail?".
+    """
+    from . import mcp as _mcp
+    url, token, _ = _resolve(ctx)
+    os.environ["ROOST_URL"] = url
+    os.environ["ROOST_TOKEN"] = token or ""
+    _mcp.main()
+
+
 # ---------- jobs ----------
 
 

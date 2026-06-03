@@ -38,6 +38,60 @@ def _parent_id() -> Optional[str]:
 
 TOOLS: list[dict[str, Any]] = [
     {
+        "name": "roost_do",
+        "description": (
+            "THE main tool: do a plain-language GOAL on the fleet. A worker self-selects "
+            "the best-fit node, runs it, and an INDEPENDENT verifier checks the goal was "
+            "actually achieved (and self-heals a wrong result). Returns {run_id, state} "
+            "immediately — call roost_result to get the verified outcome + evidence. Use "
+            "this for almost everything; you never pick a node, kind, or write a spec."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "goal": {"type": "string", "description": "What you want done, in plain language."},
+                "verify": {"type": "boolean", "default": True,
+                           "description": "Independently verify the result (default true)."},
+                "model": {"type": "string", "description": "Optional model override."},
+                "wallclock_min": {"type": "number", "default": 15},
+            },
+            "required": ["goal"],
+        },
+    },
+    {
+        "name": "roost_runs",
+        "description": (
+            "The inbox: recent + in-flight goals with their phase (running / verifying / "
+            "self-healing / done), whether they were verified, and the one-line result. "
+            "Use to answer 'what's running?' / 'how did that go?' / 'why did it fail?'."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"limit": {"type": "integer", "default": 15}},
+        },
+    },
+    {
+        "name": "roost_result",
+        "description": (
+            "Wait for a run to finish and return its verified outcome: {state, verified, "
+            "evidence, output}. Block up to timeout_sec. This is how you report back to "
+            "the user with proof, not just 'it ran'."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "run_id": {"type": "string"},
+                "timeout_sec": {"type": "number", "default": 900},
+            },
+            "required": ["run_id"],
+        },
+    },
+    {
+        "name": "roost_capabilities",
+        "description": "Describe what this fleet can do (nodes, cores, GPUs) in plain language.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
         "name": "roost_submit",
         "description": (
             "Submit a sub-job to the Roost fleet. Returns immediately with "
@@ -155,6 +209,101 @@ TOOLS: list[dict[str, Any]] = [
 # ---------- tool implementations ----------
 
 
+def _goal_of(job: dict) -> str:
+    spec = job.get("spec") or {}
+    g = spec.get("task") or spec.get("intent") or spec.get("command") or ""
+    return (g if isinstance(g, str) else " ".join(g))[:120]
+
+
+def _phase_of(job: dict) -> str:
+    state = job.get("state", "?")
+    if state in ("succeeded", "failed", "cancelled"):
+        return state
+    act = job.get("last_activity") or ""
+    if "verifying" in act:
+        return "verifying"
+    if "self-healing" in act:
+        return "self-healing"
+    return state
+
+
+def _run_summary(job: dict) -> dict:
+    res = job.get("result") if isinstance(job.get("result"), dict) else {}
+    return {
+        "run_id": job.get("id"),
+        "goal": _goal_of(job),
+        "phase": _phase_of(job),
+        "verified": res.get("verified"),
+        "result": (res.get("output") or res.get("evidence") or job.get("error") or "")[:200],
+        "worker": job.get("worker_id"),
+    }
+
+
+def tool_roost_do(args: dict) -> dict:
+    body: dict[str, Any] = {
+        "kind": "auto",
+        "task": args["goal"],
+        "verify": args.get("verify", True),
+        "budget": {"max_wallclock_min": args.get("wallclock_min", 15), "max_tokens": 200000},
+    }
+    if args.get("model"):
+        body["model"] = args["model"]
+    parent = _parent_id()
+    if parent:
+        body["parent_job_id"] = parent
+    with _client() as c:
+        r = c.post("/jobs", json=body)
+        r.raise_for_status()
+        j = r.json()
+    return {"run_id": j.get("id"), "state": j.get("state"),
+            "note": "started — call roost_result(run_id) to get the verified outcome."}
+
+
+def tool_roost_runs(args: dict) -> dict:
+    limit = int(args.get("limit", 15))
+    with _client() as c:
+        r = c.get("/jobs", params={"limit": limit})
+        r.raise_for_status()
+        jobs = r.json()
+    return {"runs": [_run_summary(j) for j in jobs]}
+
+
+def tool_roost_result(args: dict) -> dict:
+    final = tool_roost_wait({"job_id": args["run_id"],
+                             "timeout_sec": args.get("timeout_sec", 900)})
+    res = final.get("result") if isinstance(final.get("result"), dict) else {}
+    return {
+        "run_id": final.get("id"),
+        "state": final.get("state"),
+        "verified": res.get("verified"),
+        "evidence": res.get("evidence"),
+        "output": res.get("output") or (final.get("result") if not res else None),
+        "error": final.get("error"),
+        "tokens_used": final.get("tokens_used"),
+        "timed_out_waiting": final.get("timed_out_waiting"),
+    }
+
+
+def tool_roost_capabilities(_args: dict) -> dict:
+    with _client() as c:
+        r = c.get("/workers")
+        r.raise_for_status()
+        workers = r.json()
+    live = [w for w in workers if w.get("status") in ("idle", "busy")]
+    cores = sum((w["capabilities"].get("cpus") or 0) for w in live)
+    gpus = []
+    for w in live:
+        cp = w["capabilities"]
+        n = cp.get("gpu_count") or 0
+        if n:
+            gpus.append({"node": w["name"], "count": n,
+                         "gpu": (cp.get("gpu") or ["GPU"])[0], "vram_gb": cp.get("gpu_vram_gb")})
+    return {"nodes": len(live), "cpu_cores": cores, "gpu_nodes": gpus,
+            "can": "Run anything stated in plain language via roost_do; it picks the best "
+                   "node and verifies the result. CPU work, agent tasks, and GPU/training "
+                   "jobs on the GPU nodes."}
+
+
 def tool_roost_submit(args: dict) -> dict:
     body = dict(args)
     parent = _parent_id()
@@ -225,6 +374,10 @@ def tool_roost_workers(_args: dict) -> dict:
 
 
 TOOL_IMPL = {
+    "roost_do":           tool_roost_do,
+    "roost_runs":         tool_roost_runs,
+    "roost_result":       tool_roost_result,
+    "roost_capabilities": tool_roost_capabilities,
     "roost_submit":  tool_roost_submit,
     "roost_status":  tool_roost_status,
     "roost_wait":    tool_roost_wait,
