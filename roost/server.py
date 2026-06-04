@@ -300,7 +300,8 @@ def _annotate_liveness(db_path: Path, jobs: list[dict]) -> list[dict]:
 
 STUCK_AFTER = 150.0          # a running job idle this long is a stuck-suspect
 WAITING_AFTER = 90.0         # a queued (but placeable) job waiting this long
-COST_PER_MTOK_USD = 10.0     # rough blended marginal $/Mtok on tokens_used (approximate)
+AGENT_SESSION_BASE_USD = 0.018   # ~fixed per-agent-session floor (cached system prompt)
+COST_PER_MTOK_USD = 6.0          # rough marginal $/Mtok on fresh tokens_used (approximate)
 
 
 def _goal_text(job: dict) -> str:
@@ -355,8 +356,12 @@ def _job_health(job: dict) -> dict:
 
 def _job_cost(job: dict) -> dict:
     tok = int(job.get("tokens_used") or 0)
-    out: dict[str, Any] = {"tokens_used": tok,
-                           "cost_est_usd": round(tok / 1_000_000 * COST_PER_MTOK_USD, 4)}
+    # Rough $ estimate. tokens_used counts only fresh input+output (not the large
+    # cached system-prompt reads that actually dominate an agent session's bill), so
+    # a near-fixed per-session floor + a small marginal tracks reality far better than
+    # a flat per-token rate. Measured ~$0.02 trivial → ~$0.05 multi-step on Sonnet.
+    est = round(AGENT_SESSION_BASE_USD + tok / 1_000_000 * COST_PER_MTOK_USD, 4) if tok else 0.0
+    out: dict[str, Any] = {"tokens_used": tok, "cost_est_usd": est}
     tb = job.get("tree_budget_tokens")
     if tb:
         out["budget_pct"] = round(100 * (job.get("tree_budget_spent") or 0) / tb, 1)
@@ -392,10 +397,24 @@ def _derive_run(job: dict) -> dict:
     }
 
 
-def _fleet_verdict(workers: list[dict], runs: list[dict]) -> dict:
+FAILURE_RECENT_SEC = 600.0  # a terminal failure older than this is history, not an alert
+
+
+def _fleet_verdict(workers: list[dict], runs: list[dict], now: Optional[float] = None) -> dict:
+    now = now if now is not None else time.time()
     live = [w for w in workers if w.get("status") in ("idle", "busy")]
-    bad = [r for r in runs if r["health"]["status"] in
-           ("unplaceable", "stuck?", "failed", "unverified")]
+    # "needs attention" = active problems (a queued job that can't place, a running job
+    # that looks stuck) OR a RECENT terminal failure. Ancient failures in history must
+    # not keep the fleet perpetually red.
+    bad = []
+    for r in runs:
+        st = r["health"]["status"]
+        if st in ("unplaceable", "stuck?"):
+            bad.append(r)
+        elif st in ("failed", "unverified"):
+            fin = r.get("finished_at")
+            if not fin or (now - float(fin)) <= FAILURE_RECENT_SEC:
+                bad.append(r)
     active = [r for r in runs if r["state"] in ("running", "assigned")]
     verifying = [r for r in runs if r["phase"] in ("verifying", "self-healing")]
     if bad:

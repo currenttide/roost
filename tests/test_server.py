@@ -750,3 +750,21 @@ def test_child_cannot_raise_max_depth_above_parent(tmp_path: Path):
     child = server._insert_job(
         db, {"command": "true", "hierarchy": {"max_depth": 1000, "can_dispatch": True}}, parent=root)
     assert child["max_depth"] == 2
+
+
+def test_fleet_verdict_ignores_ancient_failures_but_flags_recent(monkeypatch):
+    import time as _t
+    now = 1_000_000.0
+    workers = [{"status": "idle"}]
+    old_fail = server._derive_run({"id": "o", "state": "failed", "error": "x",
+                                   "spec": {"task": "old"}, "finished_at": now - 99999})
+    recent_fail = server._derive_run({"id": "r", "state": "failed", "error": "x",
+                                      "spec": {"task": "recent"}, "finished_at": now - 60})
+    # Ancient failure alone → ok (history, not an alert).
+    assert server._fleet_verdict(workers, [old_fail], now=now)["level"] == "ok"
+    # A recent failure → alert.
+    assert server._fleet_verdict(workers, [old_fail, recent_fail], now=now)["level"] == "alert"
+    # An active unplaceable is always an alert regardless of age.
+    unplace = server._derive_run({"id": "u", "state": "queued", "capable_workers": 0,
+                                  "spec": {"task": "needs gpu"}})
+    assert server._fleet_verdict(workers, [unplace], now=now)["level"] == "alert"
