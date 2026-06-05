@@ -877,6 +877,42 @@ def revoke(ctx: click.Context, worker_id: str) -> None:
     click.echo(f"revoked {worker_id}")
 
 
+@cli.command("prune-workers")
+@click.option("--days", "days", default=7.0, type=float, show_default=True,
+              help="Delete worker rows not seen in this many days.")
+@click.option("--yes", "-y", "yes", is_flag=True, help="Skip the confirmation prompt.")
+@click.pass_context
+def prune_workers_cmd(ctx: click.Context, days: float, yes: bool) -> None:
+    """(Admin) Delete ghost/duplicate worker rows not seen in --days days.
+
+    Clears the dead rows a node leaves behind when it re-enrolls, so the fleet
+    view stops accumulating duplicates. Live and recently-seen nodes are never
+    touched; a worker still running a job is always spared.
+    """
+    with _ctx_client(ctx) as c:
+        r = c.get("/workers")
+        r.raise_for_status()
+        now = time.time()
+        cutoff = now - days * 86400.0
+        victims = [w for w in r.json() if (w.get("last_seen") or 0) < cutoff]
+        if not victims:
+            click.echo(f"nothing to prune — no worker unseen for {days:g} day(s)")
+            return
+        click.echo(f"will prune {len(victims)} worker row(s) not seen in {days:g} day(s):")
+        for w in victims:
+            age_d = (now - (w.get("last_seen") or 0)) / 86400.0
+            click.echo(f"  {w['name']:<20} {w['id']}  {w.get('status','?'):<7} seen {age_d:.1f}d ago")
+        if not yes:
+            click.confirm("proceed?", abort=True)
+        r = c.post("/workers/prune", params={"older_than_days": days})
+        if r.status_code == 403:
+            raise click.ClickException("admin auth required (use the shared --token/ROOST_TOKEN)")
+        r.raise_for_status()
+        res = r.json()
+        names = ", ".join(res.get("names", []))
+        click.echo(f"pruned {res.get('pruned', 0)} worker(s)" + (f": {names}" if names else ""))
+
+
 # ---------- worker daemon ----------
 
 

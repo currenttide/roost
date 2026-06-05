@@ -652,6 +652,38 @@ def _revoke_worker(db_path: Path, worker_id: str) -> bool:
         return cur.rowcount > 0
 
 
+def _prune_workers(db_path: Path, older_than_sec: float) -> dict:
+    """Explicit admin cleanup: delete worker rows not seen in `older_than_sec`.
+
+    More aggressive than the sweeper's automatic prune (which only drops
+    credential-less, non-revoked orphans): this removes any long-dead row by
+    age — including enrolled or revoked duplicates left behind when a node
+    re-enrols — so the fleet view stops accumulating ghosts. A live node is
+    never touched (its last_seen is recent), and a worker that still owns an
+    in-flight (assigned/running) job is always spared.
+    """
+    now = time.time()
+    cutoff = now - older_than_sec
+    with _connect(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            rows = conn.execute(
+                "SELECT id, name FROM workers WHERE last_seen < ? "
+                "AND id NOT IN (SELECT worker_id FROM jobs "
+                "  WHERE state IN ('assigned','running') AND worker_id IS NOT NULL)",
+                (cutoff,),
+            ).fetchall()
+            names = [r["name"] for r in rows]
+            for r in rows:
+                conn.execute("DELETE FROM workers WHERE id=?", (r["id"],))
+            conn.execute("COMMIT")
+        except Exception:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+    return {"pruned": len(names), "names": names}
+
+
 def _list_workers(db_path: Path) -> list[dict]:
     with _connect(db_path) as conn:
         cur = conn.execute("SELECT * FROM workers ORDER BY registered_at DESC")
@@ -1748,6 +1780,13 @@ def create_app(
         if not ok:
             raise HTTPException(404, "worker not found")
         return {"revoked": True}
+
+    @app.post("/workers/prune", dependencies=[Depends(require_admin)])
+    async def prune_workers_endpoint(older_than_days: float = Query(7.0, ge=0)):
+        res = await asyncio.to_thread(
+            _prune_workers, db, older_than_days * 86400.0
+        )
+        return res
 
     @app.post("/workers/{worker_id}/heartbeat", dependencies=[Depends(require_matching_worker)])
     async def heartbeat(worker_id: str, payload: HeartbeatPayload):

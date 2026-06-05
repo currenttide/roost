@@ -8,6 +8,7 @@ relies on.
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pytest
@@ -1011,3 +1012,49 @@ def test_heartbeat_renews_all_inflight_leases(tmp_path: Path):
     assert len(rows) == 2
     for r in rows:
         assert r["lease_expires_at"] > now  # both leases renewed into the future
+
+
+# ---------- worker prune (explicit admin cleanup of ghost rows) ----------
+
+def _set_last_seen(db: Path, worker_id: str, ts: float) -> None:
+    with server._connect(db) as conn:
+        conn.execute("UPDATE workers SET last_seen=? WHERE id=?", (ts, worker_id))
+
+
+def test_prune_workers_deletes_stale_keeps_recent(tmp_path: Path):
+    db = tmp_path / "roost.db"
+    server._init_db(db)
+    old = server._register_worker(db, "ghost", {"tools": ["python3"]})
+    fresh = server._register_worker(db, "live", {"tools": ["python3"]})
+    now = time.time()
+    _set_last_seen(db, old["id"], now - 5 * 86400)   # 5 days ago
+    _set_last_seen(db, fresh["id"], now - 10)        # seen 10s ago
+    res = server._prune_workers(db, older_than_sec=86400)  # older than 1 day
+    assert res["pruned"] == 1 and res["names"] == ["ghost"]
+    remaining = {w["id"] for w in server._list_workers(db)}
+    assert remaining == {fresh["id"]}
+
+
+def test_prune_workers_spares_inflight_owner(tmp_path: Path):
+    db = tmp_path / "roost.db"
+    server._init_db(db)
+    w = server._register_worker(db, "busy-old", {"tools": ["python3"]})
+    server._insert_job(db, {"command": "true", "requires": {"tools": ["python3"]}})
+    assigned = server._try_assign_one(db, w["id"])   # job now 'assigned' to w
+    assert assigned is not None
+    _set_last_seen(db, w["id"], time.time() - 30 * 86400)  # ancient, but in-flight
+    res = server._prune_workers(db, older_than_sec=86400)
+    assert res["pruned"] == 0
+    assert {x["id"] for x in server._list_workers(db)} == {w["id"]}
+
+
+def test_prune_endpoint_requires_admin(client: TestClient):
+    # A worker credential is not admin → 403.
+    wid, cred = _enroll_worker(client, {"tools": ["python3"]})
+    r = client.post("/workers/prune", params={"older_than_days": 1},
+                    headers={"Authorization": f"Bearer {cred}"})
+    assert r.status_code == 403
+    # The shared admin token works.
+    r = client.post("/workers/prune", params={"older_than_days": 1})
+    assert r.status_code == 200, r.text
+    assert "pruned" in r.json()
