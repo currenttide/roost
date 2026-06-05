@@ -129,6 +129,8 @@
   .npill.idle { color:var(--faint); border:1px solid #2a3346; }
   .npill.busy { color:#1c0b0d; background:var(--warn); animation:pulse 1.6s infinite; }
   .npill.stale { color:#9fb0c9; border:1px solid #3a2a2a; background:#1f1416; }
+  .npill.offline { color:#7f8aa0; border:1px solid #2a3346; background:#141821; }
+  .node.offline { opacity:.55; }
   .meta { color:var(--dim); font-size:10.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .meta .sep { color:#374152; margin:0 5px; }
   .ntask { color:#e8c98b; font-size:10.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
@@ -143,6 +145,7 @@
   footer { color:var(--faint); font-size:10px; padding:10px 14px 14px; text-align:center;
            font-variant-numeric:tabular-nums; }
   footer .dot { color:var(--ok); }
+  footer.stale { color:var(--warn); }
 </style>
 </head>
 <body>
@@ -173,8 +176,14 @@ const params = new URLSearchParams(location.search);
 const TOKEN = params.get("token") || "";
 const H = TOKEN ? { Authorization: "Bearer " + TOKEN } : {};
 const FRESH = 45;
+const OFFLINE_SHOW = 2 * 86400;   // still show a node that went offline within ~2 days
 const ACTIVE = new Set(["running","assigned","queued","verifying","self-healing"]);
 const BAD = new Set(["unplaceable","failed","unverified","stuck?","stuck"]);
+
+// self-heal state: a stale frame (sleep/wake, dropped CP) should recover on its own
+let fails = 0, lastOk = Date.now();
+const STALE_MS = 12000;   // surface a staleness warning after this long with no fresh data
+const RELOAD_MS = 60000;  // hard self-heal: reload the page after this long stuck
 
 const $ = (id) => document.getElementById(id);
 
@@ -241,6 +250,10 @@ async function tick() {
     // header counts (live = recently-seen or currently busy)
     const now = Date.now() / 1000;
     const live = workers.filter((w) => (now - (w.last_seen || 0)) < FRESH || w.status === "busy");
+    // expected-but-offline nodes (seen recently enough to still matter) — surfaced
+    // for attention rather than silently dropped
+    const offline = workers.filter(
+      (w) => !live.includes(w) && (now - (w.last_seen || 0)) < OFFLINE_SHOW);
     let cores = 0, gpus = 0, busy = 0;
     live.forEach((w) => {
       const c = w.capabilities || {};
@@ -327,9 +340,7 @@ async function tick() {
     });
 
     const grid = $("grid");
-    if (!live.length) {
-      grid.innerHTML = '<div class="empty">no workers reachable</div>';
-    } else {
+    {
       let html = "";
       for (const w of live) {
         const c = w.capabilities || {};
@@ -367,13 +378,31 @@ async function tick() {
             '</div>' + detail +
           '</div>';
       }
-      grid.innerHTML = html;
+      for (const w of offline) {
+        const c = w.capabilities || {};
+        const gl = gpuLabel(c);
+        html +=
+          '<div class="node offline">' +
+            '<div class="row1">' +
+              '<span class="name">' + esc(w.name) + '</span>' +
+              '<span class="badge ' + (c.gpu_count || c.docker_gpu ? "gpu" : "") + '">' +
+                esc(gl || (c.cpus || 0) + "c") + '</span>' +
+              '<span class="npill offline">offline</span>' +
+            '</div>' +
+            '<div class="meta">last seen ' + esc(ago(w.last_seen)) + '</div>' +
+          '</div>';
+      }
+      grid.innerHTML = html || '<div class="empty">no workers reachable</div>';
     }
 
+    fails = 0; lastOk = Date.now();
     const gen = d.generated_at ? ago(d.generated_at) : "just now";
-    $("foot").innerHTML = '<span class="dot">●</span> live · updated ' +
+    const foot = $("foot");
+    foot.classList.remove("stale");
+    foot.innerHTML = '<span class="dot">●</span> live · updated ' +
       new Date().toLocaleTimeString() + " · data " + esc(gen);
   } catch (e) {
+    fails++;
     const vb = $("verdict");
     vb.className = "alert";
     $("vtext").textContent = "control plane unreachable — " + esc(e.message || e);
@@ -383,6 +412,22 @@ async function tick() {
 }
 tick();
 setInterval(tick, 1500);
+
+// self-heal watchdog: if no fresh data for a while (sleep/wake, dropped CP, a
+// wedged frame), show a staleness warning, then hard-reload to recover.
+setInterval(() => {
+  const age = Date.now() - lastOk;
+  if (age > RELOAD_MS) { location.reload(); return; }
+  if (age > STALE_MS) {
+    const foot = $("foot");
+    foot.classList.add("stale");
+    foot.textContent = "⚠ data " + Math.floor(age / 1000) + "s old · reconnecting…";
+  }
+}, 1000);
+// recover immediately when the window is shown again (the interval is throttled
+// while hidden, so the visible frame can be stale on wake)
+document.addEventListener("visibilitychange", () => { if (!document.hidden) tick(); });
+window.addEventListener("focus", tick);
 </script>
 </body>
 </html>
