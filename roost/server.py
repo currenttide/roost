@@ -61,6 +61,12 @@ MAX_DECLINES = 10
 LOG_PRUNE_INTERVAL = 1800.0   # seconds between prune passes (~30 min)
 LOG_MAX_AGE_SEC = 24 * 3600.0  # drop log rows older than 24h
 LOG_MAX_ROWS_PER_JOB = 5000   # and cap rows per job
+# Hygiene: prune worker rows that have been offline/unseen this long AND own no
+# in-flight job. Non-enrolled workers that reconnect after an outage leave orphan
+# rows that age to 'offline' but are never deleted, so /derived + the panel
+# accumulate stale rows. Generous so a briefly-down node is never deleted — only
+# stale, credential-less (shared-token/LAN) duplicate rows are removed.
+WORKER_PRUNE_TTL = 6 * 3600.0  # 6 hours since last_seen
 ENROLL_TOKEN_TTL = 900.0  # 15 minutes
 ENROLL_PREFIX = "rst-enr-"
 WORKER_CRED_PREFIX = "rst-wkr-"
@@ -381,6 +387,7 @@ def _derive_run(job: dict) -> dict:
         "verified": res.get("verified"),
         "evidence": res.get("evidence"),
         "result": (res.get("output") or job.get("error") or "")[:240],
+        "diagnosis": job.get("diagnosis"),
         "last_activity": job.get("last_activity"),
         "idle_sec": job.get("idle_sec"),
         "queued_sec": job.get("queued_sec"),
@@ -479,19 +486,18 @@ def _cancel_job(db_path: Path, job_id: str, cascade: bool) -> int:
                 [now, *ids],
             )
             count = cur.rowcount
-            # Free a worker ONLY if a job we JUST cancelled (finished_at=now) was
-            # its work AND it has no other in-flight job. Otherwise a cascade that
-            # sweeps an already-finished child would wrongly idle the worker that
-            # child's old owner has since moved on to a different job — letting it
-            # be assigned a second concurrent job.
-            conn.execute(
-                f"UPDATE workers SET status='idle' "
-                f"WHERE id IN (SELECT worker_id FROM jobs WHERE id IN ({placeholders}) "
-                f"            AND state='cancelled' AND finished_at=? AND worker_id IS NOT NULL) "
-                f"AND id NOT IN (SELECT worker_id FROM jobs "
-                f"               WHERE state IN ('assigned','running') AND worker_id IS NOT NULL)",
+            # Recompute status for each worker that owned a job we JUST cancelled
+            # (finished_at=now): a freed slot may flip it from saturated 'busy'
+            # back to assignable 'idle'. We only consider jobs cancelled in THIS
+            # call — a cascade that sweeps an already-finished child must not
+            # touch the worker its old owner has since moved on from.
+            freed = conn.execute(
+                f"SELECT DISTINCT worker_id FROM jobs WHERE id IN ({placeholders}) "
+                f"AND state='cancelled' AND finished_at=? AND worker_id IS NOT NULL",
                 [*ids, now],
-            )
+            ).fetchall()
+            for fr in freed:
+                _refresh_worker_status(conn, fr["worker_id"])
             for jid in ids:
                 conn.execute(
                     "INSERT INTO job_logs(job_id, seq, stream, data, ts) "
@@ -596,11 +602,28 @@ def _heartbeat_worker(
         # never heartbeat its way back in, even in no-auth mode).
         recover = ("status = CASE WHEN status IN ('stale','offline') "
                    "AND revoked = 0 THEN 'idle' ELSE status END")
+        # Persist the worker-reported concurrency limit from load.capacity (the
+        # pinned wire contract). Only write `capacity` when a heartbeat actually
+        # carries a valid load.capacity — otherwise preserve the stored value, so
+        # a heartbeat that includes capabilities but omits load/load.capacity
+        # doesn't clobber a previously-pinned capacity (e.g. 4) back to 1.
         if capabilities is not None:
-            cur = conn.execute(
-                f"UPDATE workers SET last_seen=?, capabilities=?, {recover} WHERE id=?",
-                (now, json.dumps(capabilities), worker_id),
-            )
+            capacity = None
+            load = capabilities.get("load")
+            if isinstance(load, dict):
+                cap = load.get("capacity")
+                if isinstance(cap, (int, float)) and not isinstance(cap, bool) and cap >= 1:
+                    capacity = int(cap)
+            if capacity is not None:
+                cur = conn.execute(
+                    f"UPDATE workers SET last_seen=?, capabilities=?, capacity=?, {recover} WHERE id=?",
+                    (now, json.dumps(capabilities), capacity, worker_id),
+                )
+            else:
+                cur = conn.execute(
+                    f"UPDATE workers SET last_seen=?, capabilities=?, {recover} WHERE id=?",
+                    (now, json.dumps(capabilities), worker_id),
+                )
         else:
             cur = conn.execute(
                 f"UPDATE workers SET last_seen=?, {recover} WHERE id=?", (now, worker_id)
@@ -613,15 +636,10 @@ def _heartbeat_worker(
             "WHERE worker_id=? AND state IN ('assigned', 'running')",
             (now + LEASE_TTL, worker_id),
         )
-        # If the sweeper had marked a BUSY worker 'stale' and the recover-CASE
-        # just flipped it to 'idle' while it still owns an in-flight job, correct
-        # it back to 'busy' — otherwise it could be assigned a second job.
-        conn.execute(
-            "UPDATE workers SET status='busy' WHERE id=? AND status='idle' "
-            "AND EXISTS (SELECT 1 FROM jobs WHERE worker_id=? "
-            "            AND state IN ('assigned','running'))",
-            (worker_id, worker_id),
-        )
+        # Recompute display status from in-flight load vs (now-current) capacity:
+        # a recovered worker that still owns work and is saturated must read
+        # 'busy', a partially-loaded one stays 'idle' and keeps competing.
+        _refresh_worker_status(conn, worker_id)
         return True
 
 
@@ -638,8 +656,21 @@ def _list_workers(db_path: Path) -> list[dict]:
     with _connect(db_path) as conn:
         cur = conn.execute("SELECT * FROM workers ORDER BY registered_at DESC")
         rows = [_row_to_worker(r) for r in cur.fetchall()]
+        # In-flight (running/assigned) job count per worker, so the dashboard can
+        # render "2/4 running" against capacity.
+        inflight = {
+            r["worker_id"]: r["n"]
+            for r in conn.execute(
+                "SELECT worker_id, COUNT(*) AS n FROM jobs "
+                "WHERE worker_id IS NOT NULL AND state IN ('assigned','running') "
+                "GROUP BY worker_id"
+            ).fetchall()
+        }
     now = time.time()
     for r in rows:
+        # Surface capacity + live in-flight count for the panel/MCP/scripts.
+        r["capacity"] = r.get("capacity") or 1
+        r["running"] = int(inflight.get(r["id"], 0))
         if r["status"] == "offline":
             continue
         gap = now - r["last_seen"]
@@ -672,9 +703,42 @@ def _score_worker_row(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "id": row["id"],
         "status": row["status"],
+        "capacity": row["capacity"],
         "capabilities": json.loads(row["capabilities"]),
         "last_assigned_at": row["last_assigned_at"],
     }
+
+
+def _inflight_count(conn: sqlite3.Connection, worker_id: str) -> int:
+    """Number of non-terminal jobs currently owned by this worker
+    (assigned/running/leased — i.e. ACTIVE_STATES). This is the work in flight
+    that gates capacity-based assignment."""
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM jobs "
+        "WHERE worker_id=? AND state IN ('assigned','running')",
+        (worker_id,),
+    ).fetchone()
+    return int(row["n"] or 0)
+
+
+def _refresh_worker_status(conn: sqlite3.Connection, worker_id: str) -> None:
+    """Recompute the DISPLAY status of a worker from its in-flight load vs its
+    reported capacity. 'busy' means SATURATED (in-flight >= capacity); a
+    partially-loaded worker (running < capacity) stays 'idle' so it remains
+    assignable. Never disturbs 'stale'/'offline'/revoked rows — those are owned
+    by the liveness sweeper and revocation."""
+    row = conn.execute(
+        "SELECT status, capacity FROM workers WHERE id=?", (worker_id,)
+    ).fetchone()
+    if row is None or row["status"] in ("stale", "offline"):
+        return
+    capacity = row["capacity"] or 1
+    inflight = _inflight_count(conn, worker_id)
+    new_status = "busy" if inflight >= capacity else "idle"
+    if new_status != row["status"]:
+        conn.execute(
+            "UPDATE workers SET status=? WHERE id=?", (new_status, worker_id)
+        )
 
 
 def _try_assign_one(db_path: Path, worker_id: str) -> Optional[dict]:
@@ -682,32 +746,57 @@ def _try_assign_one(db_path: Path, worker_id: str) -> Optional[dict]:
     queued job *now*, or leave it for a better-fit worker (Decision V2-2/V2-4).
 
     For each queued job the polling worker is capable of (oldest first), score
-    all currently-idle capable workers; the polling worker takes the job iff it
-    is the (tied) best fit OR the job has already waited past PLACEMENT_GRACE.
+    all currently-assignable capable workers; the polling worker takes the job
+    iff it is the (tied) best fit OR the job has already waited past
+    PLACEMENT_GRACE. A worker is assignable while it has a free concurrency slot
+    (in-flight job count < its reported capacity), not merely when fully idle.
     """
     with _connect(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         try:
             now = time.time()
             me_row = conn.execute(
-                "SELECT id, status, capabilities, last_assigned_at FROM workers WHERE id=?",
+                "SELECT id, status, capacity, capabilities, last_assigned_at "
+                "FROM workers WHERE id=?",
                 (worker_id,),
             ).fetchone()
             if not me_row:
                 conn.execute("ROLLBACK")
                 return None
-            if me_row["status"] == "busy":
+            # Capacity gate: refuse only when SATURATED (no free slot). A worker
+            # the sweeper marked stale/offline is not assignable either.
+            if me_row["status"] in ("stale", "offline"):
+                conn.execute("ROLLBACK")
+                return None
+            my_capacity = me_row["capacity"] or 1
+            if _inflight_count(conn, worker_id) >= my_capacity:
                 conn.execute("ROLLBACK")
                 return None
             me = _score_worker_row(me_row)
+            # Reflect this worker's live free slots so placement_score spreads load.
+            me["capabilities"].setdefault("load", {})
+            me["capabilities"]["load"]["running"] = _inflight_count(conn, worker_id)
+            me["capabilities"]["load"]["capacity"] = my_capacity
 
-            # Other idle, recently-seen workers that might out-compete us.
+            # Other recently-seen workers with a free slot that might out-compete
+            # us (idle, or busy-but-not-saturated). Saturated workers carry
+            # status='busy' and are excluded.
             other_rows = conn.execute(
-                "SELECT id, status, capabilities, last_assigned_at FROM workers "
+                "SELECT id, status, capacity, capabilities, last_assigned_at FROM workers "
                 "WHERE id != ? AND status='idle' AND last_seen >= ?",
                 (worker_id, now - STALE_AFTER),
             ).fetchall()
-            others = [_score_worker_row(r) for r in other_rows]
+            others = []
+            for r in other_rows:
+                w = _score_worker_row(r)
+                w_inflight = _inflight_count(conn, r["id"])
+                w_cap = r["capacity"] or 1
+                if w_inflight >= w_cap:
+                    continue  # saturated despite a stale 'idle' label
+                w["capabilities"].setdefault("load", {})
+                w["capabilities"]["load"]["running"] = w_inflight
+                w["capabilities"]["load"]["capacity"] = w_cap
+                others.append(w)
 
             rows = conn.execute(
                 "SELECT * FROM jobs WHERE state='queued' ORDER BY created_at ASC"
@@ -752,9 +841,12 @@ def _try_assign_one(db_path: Path, worker_id: str) -> Optional[dict]:
                 (worker_id, now, now + LEASE_TTL, new_attempt, chosen["id"]),
             )
             conn.execute(
-                "UPDATE workers SET status='busy', last_seen=?, last_assigned_at=? WHERE id=?",
+                "UPDATE workers SET last_seen=?, last_assigned_at=? WHERE id=?",
                 (now, now, worker_id),
             )
+            # 'busy' only when this assignment SATURATES the worker; a worker with
+            # spare capacity stays 'idle' and keeps competing for more work.
+            _refresh_worker_status(conn, worker_id)
             conn.execute("COMMIT")
             return _row_to_job(
                 conn.execute(
@@ -890,10 +982,17 @@ def _apply_event(
                 )
             elif etype in ("succeeded", "failed"):
                 tokens_used = int(event.get("tokens_used") or 0)
+                # On FAILED, persist the worker's agentic root-cause diagnosis
+                # (pinned wire contract). Absent (older workers) → store NULL.
+                diagnosis = None
+                if etype == "failed":
+                    raw_diag = event.get("diagnosis")
+                    if raw_diag is not None:
+                        diagnosis = str(raw_diag)[:300]
                 conn.execute(
                     "UPDATE jobs SET state=?, finished_at=?, exit_code=?, "
-                    "result=?, error=?, lease_expires_at=NULL, tokens_used=? "
-                    "WHERE id=?",
+                    "result=?, error=?, lease_expires_at=NULL, tokens_used=?, "
+                    "diagnosis=? WHERE id=?",
                     (
                         etype,
                         now,
@@ -901,6 +1000,7 @@ def _apply_event(
                         json.dumps(event.get("result")) if event.get("result") is not None else None,
                         event.get("error"),
                         tokens_used,
+                        diagnosis,
                         job_id,
                     ),
                 )
@@ -911,9 +1011,10 @@ def _apply_event(
                         (tokens_used, row["root_job_id"] or job_id),
                     )
                 conn.execute(
-                    "UPDATE workers SET status='idle', last_seen=? WHERE id=?",
-                    (now, worker_id),
+                    "UPDATE workers SET last_seen=? WHERE id=?", (now, worker_id)
                 )
+                # Freed a slot — may flip the worker from saturated 'busy' to 'idle'.
+                _refresh_worker_status(conn, worker_id)
             elif etype == "declined":
                 # Bare-worker self-selection: this worker judged itself a poor fit.
                 # Record it in the decliner set and requeue for a capable node. Escalate
@@ -955,9 +1056,11 @@ def _apply_event(
                          f"declined by {worker_id}: {reason}", job_id),
                     )
                 conn.execute(
-                    "UPDATE workers SET status='idle', last_seen=? WHERE id=?",
-                    (now, worker_id),
+                    "UPDATE workers SET last_seen=? WHERE id=?", (now, worker_id)
                 )
+                # The declined job no longer counts against this worker — a freed
+                # slot may flip it from saturated 'busy' back to 'idle'.
+                _refresh_worker_status(conn, worker_id)
             elif etype == "progress":
                 # token-meter + liveness checkpoint mid-run
                 activity = event.get("activity")
@@ -991,7 +1094,7 @@ def _apply_event(
 def _sweep(db_path: Path) -> dict[str, int]:
     """Mark stale/offline workers; requeue jobs whose leases expired."""
     now = time.time()
-    counts = {"requeued": 0, "failed_attempts": 0, "stale": 0, "offline": 0}
+    counts = {"requeued": 0, "failed_attempts": 0, "stale": 0, "offline": 0, "pruned": 0}
     with _connect(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         try:
@@ -1015,15 +1118,14 @@ def _sweep(db_path: Path) -> dict[str, int]:
                 "AND lease_expires_at < ?",
                 (now,),
             ).fetchall()
+            freed_workers: set[str] = set()
             for row in expired:
                 # Free the worker that held the expired lease (it's presumed
-                # gone); otherwise it stays 'busy' and never picks up the
-                # requeued job or anything else.
+                # gone): the job leaves its in-flight set below, then we
+                # recompute status so a now-unsaturated worker can pick up the
+                # requeued job (or anything else) instead of staying 'busy'.
                 if row["worker_id"]:
-                    conn.execute(
-                        "UPDATE workers SET status='idle' WHERE id=? AND status='busy'",
-                        (row["worker_id"],),
-                    )
+                    freed_workers.add(row["worker_id"])
                 if row["attempt"] >= row["max_attempts"]:
                     conn.execute(
                         "UPDATE jobs SET state='failed', finished_at=?, "
@@ -1049,6 +1151,28 @@ def _sweep(db_path: Path) -> dict[str, int]:
                         now,
                     ),
                 )
+            for wid in freed_workers:
+                _refresh_worker_status(conn, wid)
+            # Hygiene: prune long-dead orphan worker rows. A non-enrolled worker
+            # that reconnects after an outage registers a fresh row and abandons
+            # the old one, which ages to 'offline' but is never deleted — so
+            # /derived and the panel accumulate stale rows. Conservatively delete
+            # ONLY stale, credential-less (shared-token/LAN) duplicate rows:
+            #   - offline and unseen past WORKER_PRUNE_TTL (a briefly-down node is
+            #     never pruned),
+            #   - owns no in-flight (assigned/running) job,
+            #   - has no credential (cred_hash IS NULL): an enrolled/credentialed
+            #     node that's merely powered off must keep its row so reconnect
+            #     re-authenticates instead of failing 401 → forced re-enroll,
+            #   - is not revoked (preserve the revocation audit record).
+            cur = conn.execute(
+                "DELETE FROM workers WHERE status='offline' AND last_seen < ? "
+                "AND cred_hash IS NULL AND revoked = 0 "
+                "AND id NOT IN (SELECT worker_id FROM jobs "
+                "               WHERE state IN ('assigned','running') AND worker_id IS NOT NULL)",
+                (now - WORKER_PRUNE_TTL,),
+            )
+            counts["pruned"] = cur.rowcount
             conn.execute("COMMIT")
         except Exception:
             # Inner error paths may have already rolled back; guard so we
@@ -1203,6 +1327,7 @@ class JobEvent(BaseModel):
     error: Optional[str] = None
     tokens_used: Optional[int] = None
     activity: Optional[str] = None  # compact "what it's doing now" (liveness)
+    diagnosis: Optional[str] = None  # root-cause on FAILED (≤~300 chars)
 
 
 # ---------- App factory ----------

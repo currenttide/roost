@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import sqlite3
 
-CURRENT_VERSION = 7
+CURRENT_VERSION = 8
 
 # Full V1 schema for fresh installs.
 SCHEMA_V1 = """
@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS workers (
     cred_hash       TEXT,                           -- sha256 of the per-worker credential
     policy_json     TEXT NOT NULL DEFAULT '{}',     -- {trust_skip_perms, allow_paths, allow_commands, max_perm}
     last_assigned_at REAL,                          -- last time a job was assigned here (placement spread)
-    revoked         INTEGER NOT NULL DEFAULT 0      -- 1 = admin-revoked; never recovers/assigns (V5)
+    revoked         INTEGER NOT NULL DEFAULT 0,     -- 1 = admin-revoked; never recovers/assigns (V5)
+    capacity        INTEGER NOT NULL DEFAULT 1      -- max concurrent jobs the worker reports (V8)
 );
 
 CREATE TABLE IF NOT EXISTS jobs (
@@ -66,7 +67,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     narration           TEXT,                            -- one-sentence human "what it's doing"
     narrated_at         REAL,                            -- when narration was last refreshed
     progress            INTEGER,                         -- rough 0-100, or NULL
-    eta_sec             INTEGER                          -- rough seconds remaining, or NULL
+    eta_sec             INTEGER,                         -- rough seconds remaining, or NULL
+    -- agentic failure root-cause (V8) — worker-reported diagnosis on FAILED
+    diagnosis           TEXT                             -- root-cause string on a failed job, or NULL
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_state       ON jobs(state);
 CREATE INDEX IF NOT EXISTS idx_jobs_created     ON jobs(created_at);
@@ -142,6 +145,13 @@ _JOB_V7_ADDS = [
     ("progress",    "progress INTEGER"),
     ("eta_sec",     "eta_sec INTEGER"),
 ]
+# V7 → V8 (capacity-based concurrency + agentic failure diagnosis).
+_WORKER_V8_ADDS = [
+    ("capacity", "capacity INTEGER NOT NULL DEFAULT 1"),
+]
+_JOB_V8_ADDS = [
+    ("diagnosis", "diagnosis TEXT"),
+]
 
 
 def migrate(conn: sqlite3.Connection) -> int:
@@ -193,6 +203,11 @@ def migrate(conn: sqlite3.Connection) -> int:
     if version < 7:
         # V6 → V7: agentic narration cache (D2 dashboard).
         _add_missing("jobs", _JOB_V7_ADDS)
+
+    if version < 8:
+        # V7 → V8: capacity-based concurrency + agentic failure diagnosis.
+        _add_missing("workers", _WORKER_V8_ADDS)
+        _add_missing("jobs", _JOB_V8_ADDS)
 
     conn.execute(f"PRAGMA user_version = {CURRENT_VERSION}")
     return CURRENT_VERSION

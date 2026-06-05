@@ -25,6 +25,10 @@ from typing import Any, Optional
 # The six roost-mcp tools the captain is allowed to call. Restricting to these
 # (no Bash, no local file tools) forces the captain to *dispatch* work rather
 # than do it locally.
+# "Sonnet by default everywhere": when no explicit model is passed the captain
+# runs on Sonnet rather than Claude Code's ambient default.
+DEFAULT_MODEL = "claude-sonnet-4-6"
+
 ALLOWED_TOOLS = [
     "mcp__roost__roost_submit",
     "mcp__roost__roost_wait",
@@ -195,8 +199,9 @@ def build_argv(prompt: str, mcp_config: Path, model: Optional[str]) -> list[str]
         "--allowedTools", ",".join(ALLOWED_TOOLS),
         "--verbose",
     ]
-    if model:
-        argv += ["--model", model]
+    # Default to Sonnet when the caller didn't pin a model; an explicit --model
+    # override still wins.
+    argv += ["--model", model or DEFAULT_MODEL]
     return argv
 
 

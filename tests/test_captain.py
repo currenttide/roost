@@ -62,6 +62,23 @@ def test_build_argv_restricts_tools_and_uses_mcp_config(tmp_path: Path):
     assert all(t.startswith("mcp__roost__") for t in allowed.split(","))
 
 
+def test_build_argv_defaults_to_sonnet_when_no_model(tmp_path: Path):
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text("{}")
+    argv = captain.build_argv("prompt text", cfg, model=None)
+    # "Sonnet by default everywhere": no explicit model → Sonnet, not Claude Code's
+    # ambient default.
+    assert "--model" in argv
+    assert argv[argv.index("--model") + 1] == captain.DEFAULT_MODEL == "claude-sonnet-4-6"
+
+
+def test_build_argv_explicit_model_overrides_default(tmp_path: Path):
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text("{}")
+    argv = captain.build_argv("prompt text", cfg, model="claude-opus-4-1")
+    assert argv[argv.index("--model") + 1] == "claude-opus-4-1"
+
+
 def test_write_mcp_config_points_at_roost_mcp_without_parent():
     path = captain.write_mcp_config("http://cp:8787", "tok-123")
     try:
