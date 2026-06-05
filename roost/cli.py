@@ -1,5 +1,15 @@
 """Unified CLI for Roost.
 
+The trust loop (the front door — just say what you want):
+
+    roost do <goal>          classify → ask only if ambiguous, confirm if
+                             destructive, then run (single) or dispatch (multi)
+    roost run <task>         run one plain-language task on the best-fit node
+    roost up                 zero to a running single-node fleet on this machine
+    roost dispatch <goal>    hand a multi-part goal to the captain (splits it)
+    roost mcp                run the Roost MCP server (drive the fleet by talking)
+    roost capabilities       what this fleet can do, in plain language
+
 Control plane / fleet:
 
     roost serve              run the control plane
@@ -62,6 +72,7 @@ def _ctx_client(ctx: click.Context) -> httpx.Client:
 
 
 _HAIKU_MODEL = "claude-haiku-4-5-20251001"  # only for tasks the router flags trivial
+_CAPTAIN_MODEL = "claude-sonnet-4-6"  # captain default — "Sonnet by default everywhere"
 
 _CLASSIFY_PROMPT = (
     "You route requests for a fleet orchestrator. Read the GOAL and respond with ONLY a "
@@ -78,16 +89,65 @@ _CLASSIFY_PROMPT = (
 )
 
 
+def _extract_json_object(text: str) -> Optional[dict]:
+    """Pull the first plausible JSON object out of arbitrary model output.
+
+    Tolerant of clean JSON, JSON inside ``` fences, and JSON embedded in prose.
+    Returns the parsed dict, or None if nothing parseable is found. Never raises.
+    Mirrors `roost.watcher._extract_json_object` (balanced-brace scan) rather than
+    a fragile greedy `{.*}` regex.
+    """
+    if not text:
+        return None
+    s = text.strip()
+    try:
+        obj = json.loads(s)
+        if isinstance(obj, dict):
+            return obj
+    except (json.JSONDecodeError, TypeError):
+        pass
+    for start in range(len(text)):
+        if text[start] != "{":
+            continue
+        depth = 0
+        in_str = False
+        esc = False
+        for i in range(start, len(text)):
+            c = text[i]
+            if in_str:
+                if esc:
+                    esc = False
+                elif c == "\\":
+                    esc = True
+                elif c == '"':
+                    in_str = False
+                continue
+            if c == '"':
+                in_str = True
+            elif c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    candidate = text[start : i + 1]
+                    try:
+                        obj = json.loads(candidate)
+                        if isinstance(obj, dict):
+                            return obj
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                    break
+    return None
+
+
 def _parse_classification(result_text: str, goal: str) -> dict:
     """Pure: extract the router's JSON verdict from the model's result text, with a
-    safe default (treat as a single, non-destructive task) if anything is off."""
-    import re
+    safe default (treat as a single, non-destructive task) if no JSON is present."""
     default = {"mode": "single", "ambiguous": False, "clarifying_question": None,
-               "destructive": False, "simple": False, "restated": goal}
-    try:
-        m = re.search(r"\{.*\}", result_text or "", re.S)
-        d = json.loads(m.group(0)) if m else {}
-    except (json.JSONDecodeError, TypeError):
+               "destructive": False, "simple": False, "restated": goal,
+               "classify_failed": False}
+    d = _extract_json_object(result_text or "")
+    if d is None:
         return default
     return {
         "mode": "multi" if str(d.get("mode")).lower() == "multi" else "single",
@@ -96,26 +156,62 @@ def _parse_classification(result_text: str, goal: str) -> dict:
         "destructive": bool(d.get("destructive")),
         "simple": bool(d.get("simple")),
         "restated": d.get("restated") or goal,
+        "classify_failed": False,
     }
 
 
+def _classify_failed(goal: str) -> dict:
+    """Fail-CLOSED classification: when the classifier is unavailable or its output
+    can't be trusted, we MUST NOT silently treat the goal as safe. Mark it so the
+    `do`/MCP flows demand explicit human confirmation before running anything."""
+    return {"mode": "single", "ambiguous": False, "clarifying_question": None,
+            "destructive": True, "simple": False, "restated": goal,
+            "classify_failed": True}
+
+
+def _needs_confirm(plan: dict) -> bool:
+    """Does this verdict require an explicit human OK before we run? True when the
+    classifier flagged it destructive OR couldn't classify it at all (fail-closed)."""
+    return bool(plan.get("destructive") or plan.get("classify_failed"))
+
+
 def _classify_goal(goal: str) -> dict:
-    """Run a quick local classifier (Sonnet) to route + flag ambiguity/risk. Falls back
-    to 'single, non-destructive' if claude isn't available or the call fails."""
+    """Run a quick local classifier (Sonnet) to route + flag ambiguity/risk.
+
+    Security: this FAILS CLOSED. If claude is missing, the call errors/times out,
+    or the output isn't valid JSON we can parse, we return a needs-confirmation
+    verdict (not a safe default) and warn on stderr — so a destructive goal can't
+    slip through unconfirmed just because the classifier was unavailable."""
     import shutil
     import subprocess
     if not shutil.which("claude"):
-        return _parse_classification("", goal)
+        click.echo("⚠ could not classify goal (classifier unavailable: `claude` not "
+                   "found) — treating as needs-confirmation", err=True)
+        return _classify_failed(goal)
     try:
         p = subprocess.run(
             ["claude", "-p", _CLASSIFY_PROMPT + goal,
-             "--model", "claude-sonnet-4-6", "--output-format", "json"],
+             "--model", _CAPTAIN_MODEL, "--output-format", "json"],
             capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL,
         )
         obj = json.loads(p.stdout or "{}")
-        return _parse_classification(obj.get("result", ""), goal)
-    except (subprocess.SubprocessError, json.JSONDecodeError, OSError):
-        return _parse_classification("", goal)
+    except (subprocess.SubprocessError, json.JSONDecodeError, OSError) as e:
+        click.echo(f"⚠ could not classify goal (classifier unavailable: "
+                   f"{type(e).__name__}) — treating as needs-confirmation", err=True)
+        return _classify_failed(goal)
+    result_text = obj.get("result", "")
+    verdict = _extract_json_object(result_text)
+    # Fail closed on no JSON at all, AND on JSON that lacks the verdict shape: a
+    # parseable object like {"note":"ok"} (no `mode`/`destructive`/`ambiguous`)
+    # must NOT be treated as a safe verdict — otherwise a destructive goal could
+    # run unconfirmed just because the classifier returned the wrong shape.
+    _verdict_keys = ("mode", "destructive", "ambiguous", "clarifying_question",
+                     "simple", "restated")
+    if verdict is None or not any(k in verdict for k in _verdict_keys):
+        click.echo("⚠ could not classify goal (classifier returned no verdict) — "
+                   "treating as needs-confirmation", err=True)
+        return _classify_failed(goal)
+    return _parse_classification(result_text, goal)
 
 
 def _load_spec(path: str) -> dict[str, Any]:
@@ -885,10 +981,69 @@ def service_logs(follow: bool) -> None:
 # ---------- captain (intelligent dispatch) ----------
 
 
+def dispatch_goal(url: str, token: str, goal: str, *, model: Optional[str] = None,
+                  max_tokens: Optional[int] = None,
+                  echo: Optional[Any] = None) -> tuple[Optional[str], int]:
+    """Run the captain over GOAL: snapshot the fleet, anchor a captain-root job,
+    launch the captain agent, finalize the root. Returns (root_job_id, rc).
+
+    Shared by the `dispatch` CLI command and the MCP `roost_do` multi path so both
+    take the SAME captain route. `echo` is an optional callback for human-facing
+    notes (the CLI passes click.echo); pass None to stay quiet (MCP)."""
+    from . import captain as _captain
+
+    def _note(msg: str) -> None:
+        if echo is not None:
+            echo(msg)
+
+    with _client(url, token) as c:
+        r = c.get("/workers")
+        r.raise_for_status()
+        workers = r.json()
+        live = [w for w in workers if w.get("status") in ("idle", "busy")]
+        if not live:
+            _note("[roost] WARNING: no online workers; the captain has nowhere to "
+                  "dispatch. Start one with `roost worker`.")
+        root_spec: dict[str, Any] = {
+            "intent": goal,
+            "kind": "captain",
+            "captain_root": True,
+            "hierarchy": {"can_dispatch": True, "max_depth": 3},
+        }
+        if max_tokens:
+            root_spec["budget"] = {"max_tokens": max_tokens}
+        rr = c.post("/jobs", json=root_spec)
+        if rr.status_code >= 400:
+            raise RuntimeError(
+                f"could not create captain-root job: HTTP {rr.status_code}: {rr.text}")
+        root_id = rr.json()["id"]
+        _note(f"[roost] captain-root {root_id} (track the plan: roost tree {root_id})")
+
+    budget_note = None
+    if max_tokens:
+        budget_note = (f"Keep total token spend across all sub-jobs under "
+                       f"{max_tokens} tokens. Set per-job max_tokens accordingly. "
+                       f"The tree budget is enforced: a sub-job that would exceed "
+                       f"the remaining budget is refused.")
+
+    rc = 1
+    try:
+        rc = _captain.run(url, token, goal, workers, model=model,
+                          budget_note=budget_note, parent_job_id=root_id)
+    finally:
+        final_state = "succeeded" if rc == 0 else "failed"
+        with _client(url, token) as c:
+            try:
+                c.post(f"/jobs/{root_id}/finalize", json={"state": final_state})
+            except httpx.HTTPError:
+                pass
+    return root_id, rc
+
+
 @cli.command()
 @click.argument("goal")
 @click.option("--model", default=None,
-              help="Model for the captain agent (default: Claude Code's default)")
+              help="Model for the captain agent (default: Sonnet — claude-sonnet-4-6)")
 @click.option("--budget", "max_tokens", default=None, type=int,
               help="Soft overall token budget the captain should stay within")
 @click.pass_context
@@ -902,62 +1057,16 @@ def dispatch(ctx: click.Context, goal: str, model: Optional[str],
     Example:
       roost dispatch "run the eval on a GPU box and lint on any CPU box, then summarize"
     """
-    from . import captain as _captain
-
     url, token, _ = _resolve(ctx)
-    with _client(url, token) as c:
-        try:
-            r = c.get("/workers")
-        except httpx.HTTPError as e:
-            raise click.ClickException(f"cannot reach control plane at {url}: {e}")
-        if r.status_code >= 400:
-            raise click.ClickException(f"control plane error: HTTP {r.status_code}: {r.text}")
-        workers = r.json()
-
-        live = [w for w in workers if w.get("status") in ("idle", "busy")]
-        if not live:
-            click.echo("[roost] WARNING: no online workers; the captain has nowhere to "
-                       "dispatch. Start one with `roost worker`.", err=True)
-
-        # Anchor a captain-root so the whole plan shares one lineage tree and
-        # one tree budget (V2-1). Sub-jobs attach to it via ROOST_PARENT_JOB_ID.
-        root_spec: dict[str, Any] = {
-            "intent": goal,
-            "kind": "captain",
-            "captain_root": True,
-            "hierarchy": {"can_dispatch": True, "max_depth": 3},
-        }
-        if max_tokens:
-            root_spec["budget"] = {"max_tokens": max_tokens}
-        rr = c.post("/jobs", json=root_spec)
-        if rr.status_code >= 400:
-            raise click.ClickException(
-                f"could not create captain-root job: HTTP {rr.status_code}: {rr.text}")
-        root = rr.json()
-        root_id = root["id"]
-        click.echo(f"[roost] captain-root {root_id} (track the plan: roost tree {root_id})")
-
-    budget_note = None
-    if max_tokens:
-        budget_note = (f"Keep total token spend across all sub-jobs under "
-                       f"{max_tokens} tokens. Set per-job max_tokens accordingly. "
-                       f"The tree budget is enforced: a sub-job that would exceed "
-                       f"the remaining budget is refused.")
-
-    rc = 1
     try:
-        rc = _captain.run(url, token, goal, workers, model=model,
-                          budget_note=budget_note, parent_job_id=root_id)
+        _, rc = dispatch_goal(url, token, goal, model=model, max_tokens=max_tokens,
+                              echo=lambda m: click.echo(m, err=m.startswith("[roost] WARNING")))
+    except httpx.HTTPError as e:
+        raise click.ClickException(f"cannot reach control plane at {url}: {e}")
     except FileNotFoundError as e:
         raise click.ClickException(str(e))
-    finally:
-        # Close out the plan anchor whatever happened to the captain process.
-        final_state = "succeeded" if rc == 0 else "failed"
-        with _client(url, token) as c:
-            try:
-                c.post(f"/jobs/{root_id}/finalize", json={"state": final_state})
-            except httpx.HTTPError:
-                pass
+    except RuntimeError as e:
+        raise click.ClickException(str(e))
     sys.exit(rc)
 
 
@@ -979,14 +1088,34 @@ def do_(ctx: click.Context, goal: tuple, yes: bool, model: Optional[str]) -> Non
     """
     goal_str = " ".join(goal)
     plan = _classify_goal(goal_str)
+    interactive = sys.stdin.isatty()
 
     if not yes and plan["ambiguous"] and plan["clarifying_question"]:
+        if not interactive:
+            # Can't prompt in automation — abort with the question so the caller
+            # can refine and re-run (with the answer baked in, or --yes).
+            raise click.ClickException(
+                f"clarification needed: {plan['clarifying_question']}\n"
+                "Re-run with the answer in the goal, or pass --yes to proceed as-is "
+                "(requires an interactive terminal otherwise).")
         ans = click.prompt(f"❓ {plan['clarifying_question']}\n  your answer")
         goal_str = f"{goal_str}\n\n(clarification: {ans})"
-    if not yes and plan["destructive"]:
-        click.echo(f"⚠️  This looks destructive: {plan['restated']}")
-        if not click.confirm("  proceed?", default=False):
-            raise click.Abort()
+    if _needs_confirm(plan):
+        reason = ("could not classify (fail-closed)" if plan.get("classify_failed")
+                  else "looks destructive")
+        # Always WARN (even under --yes): a destructive/unclassifiable goal must
+        # never run silently. --yes only skips the interactive confirmation prompt,
+        # not the warning itself.
+        click.echo(f"⚠️  This {reason}: {plan['restated']}", err=True)
+        if not yes:
+            if not interactive:
+                # Never block on a prompt in automation — fail clearly instead of hanging.
+                raise click.ClickException(
+                    "this goal needs confirmation before running, but no interactive "
+                    "terminal is attached. Re-run with --yes to proceed, or run it in "
+                    "an interactive shell.")
+            if not click.confirm("  proceed?", default=False):
+                raise click.Abort()
 
     if plan["mode"] == "multi":
         click.echo("[roost] multi-step goal → captain (splitting across the fleet)")

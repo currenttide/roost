@@ -97,6 +97,7 @@ def matches(capabilities: dict[str, Any], requires: dict[str, Any] | None) -> bo
 # Score weights, largest first so each tier dominates the next.
 _W_PREFER = 1000.0   # captain named this exact worker
 _W_IDLE = 100.0      # no job currently running on it
+_W_FREESLOT = 20.0   # added * fraction of capacity that is free: spread load
 _W_LOADAVG = 10.0    # subtracted per unit of 1-min loadavg
 _W_VRAM = 0.1        # added per GB of free VRAM
 _W_RECENCY = 5.0     # added per second since last assigned (spread)
@@ -130,6 +131,20 @@ def placement_score(
         running = 0 if worker.get("status") == "idle" else 1
     if running == 0:
         score += _W_IDLE
+
+    # Favor the LEAST-utilized worker so load spreads across the fleet rather
+    # than stacking onto one high-capacity box. Score on the *fraction* of
+    # capacity that is free, not the absolute free-slot count: an idle small box
+    # ties an idle big box on this term, and an already-loaded big box stops
+    # hoovering jobs. `capacity` defaults to 1 for older workers that don't
+    # report it.
+    capacity = load.get("capacity")
+    if capacity is None:
+        capacity = worker.get("capacity")
+    if not isinstance(capacity, (int, float)) or capacity < 1:
+        capacity = 1
+    free_slots = max(0.0, float(capacity) - float(running))
+    score += _W_FREESLOT * (free_slots / float(capacity))
 
     loadavg = load.get("loadavg1")
     if isinstance(loadavg, (int, float)):

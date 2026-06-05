@@ -306,6 +306,11 @@ async function tick() {
                     : '<span class="narr"></span>') +
               (t.created_at ? '<span class="ago">' + esc(ago(t.created_at)) + '</span>' : '') +
             '</div>' +
+            // agentic root-cause on a failed job (worker-reported diagnosis)
+            (isBad && t.diagnosis
+              ? '<div class="trow"><span class="narr err">why: ' +
+                esc(clip(t.diagnosis, 300)) + '</span></div>'
+              : '') +
           '</div>';
       }
       tb.innerHTML = html;
@@ -345,15 +350,20 @@ async function tick() {
           detail = '<div class="meta">' + bits.join('<span class="sep">·</span>') + '</div>';
         }
 
+        // Capacity-aware status: a multi-slot worker shows "N/M" running so a
+        // partially-loaded (still-assignable) node reads as available, not idle.
+        const cap = w.capacity || 1;
+        const running = w.running != null ? w.running : (isBusy ? cap : 0);
         const pillCls = isBusy ? "busy" : stale ? "stale" : "idle";
-        const pillTxt = isBusy ? "BUSY" : stale ? "STALE" : "idle";
+        let pillTxt = isBusy ? "BUSY" : stale ? "STALE" : "idle";
+        if (cap > 1) pillTxt = running + "/" + cap;
         html +=
           '<div class="node' + (isBusy ? " busy" : "") + '">' +
             '<div class="row1">' +
               '<span class="name">' + esc(w.name) + '</span>' +
               '<span class="badge ' + (c.gpu_count || c.docker_gpu ? "gpu" : "") + '">' +
                 esc(gl || (c.cpus || 0) + "c") + '</span>' +
-              '<span class="npill ' + pillCls + '">' + pillTxt + '</span>' +
+              '<span class="npill ' + pillCls + '">' + esc(pillTxt) + '</span>' +
             '</div>' + detail +
           '</div>';
       }

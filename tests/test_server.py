@@ -768,3 +768,246 @@ def test_fleet_verdict_ignores_ancient_failures_but_flags_recent(monkeypatch):
     unplace = server._derive_run({"id": "u", "state": "queued", "capable_workers": 0,
                                   "spec": {"task": "needs gpu"}})
     assert server._fleet_verdict(workers, [unplace], now=now)["level"] == "alert"
+
+
+# ---------- Capacity-based concurrency (V8) ----------
+
+
+def _set_capacity(db: Path, worker_id: str, capacity: int) -> None:
+    with server._connect(db) as conn:
+        conn.execute("UPDATE workers SET capacity=? WHERE id=?", (capacity, worker_id))
+
+
+def test_capacity_2_worker_takes_two_jobs_then_saturates(tmp_path: Path):
+    # A worker reporting capacity=2 must take a SECOND job while one is in flight,
+    # then refuse a third (in-flight == capacity → saturated).
+    db = tmp_path / "roost.db"
+    server._init_db(db)
+    w = server._register_worker(db, "w", {"tools": ["python3"]})
+    _set_capacity(db, w["id"], 2)
+    for _ in range(3):
+        server._insert_job(db, {"command": "true", "requires": {"tools": ["python3"]}})
+    a = server._try_assign_one(db, w["id"])
+    assert a is not None
+    # One in flight, capacity 2 → still assignable, stays display-idle.
+    wrow = next(x for x in server._list_workers(db) if x["id"] == w["id"])
+    assert wrow["status"] == "idle" and wrow["running"] == 1 and wrow["capacity"] == 2
+    b = server._try_assign_one(db, w["id"])
+    assert b is not None and b["id"] != a["id"]
+    # Now saturated (2/2) → display-busy and refuses a third.
+    wrow = next(x for x in server._list_workers(db) if x["id"] == w["id"])
+    assert wrow["status"] == "busy" and wrow["running"] == 2
+    assert server._try_assign_one(db, w["id"]) is None
+
+
+def test_capacity_1_worker_saturates_after_one(tmp_path: Path):
+    # Default capacity 1 keeps the old binary behavior: one job → busy → no more.
+    db = tmp_path / "roost.db"
+    server._init_db(db)
+    w = server._register_worker(db, "w", {"tools": ["python3"]})
+    server._insert_job(db, {"command": "true", "requires": {"tools": ["python3"]}})
+    server._insert_job(db, {"command": "true", "requires": {"tools": ["python3"]}})
+    got = server._try_assign_one(db, w["id"])
+    assert got is not None
+    wrow = next(x for x in server._list_workers(db) if x["id"] == w["id"])
+    assert wrow["status"] == "busy" and wrow["capacity"] == 1
+    assert server._try_assign_one(db, w["id"]) is None
+
+
+def test_finishing_a_job_reopens_a_slot(tmp_path: Path):
+    # When a job finishes, a freed slot flips a saturated worker back to idle.
+    db = tmp_path / "roost.db"
+    server._init_db(db)
+    w = server._register_worker(db, "w", {"tools": ["python3"]})
+    server._insert_job(db, {"command": "true", "requires": {"tools": ["python3"]}})
+    got = server._try_assign_one(db, w["id"])
+    assert next(x for x in server._list_workers(db) if x["id"] == w["id"])["status"] == "busy"
+    server._apply_event(db, got["id"], w["id"],
+                        {"type": "succeeded", "attempt": got["attempt"], "exit_code": 0})
+    wrow = next(x for x in server._list_workers(db) if x["id"] == w["id"])
+    assert wrow["status"] == "idle" and wrow["running"] == 0
+
+
+def test_heartbeat_persists_capacity_from_load(tmp_path: Path):
+    # The pinned wire contract: heartbeat's load.capacity is persisted.
+    db = tmp_path / "roost.db"
+    server._init_db(db)
+    wid = server._register_worker(db, "w", {"tools": ["python3"]})["id"]
+    server._heartbeat_worker(db, wid, {"tools": ["python3"], "load": {"running": 0, "capacity": 4}})
+    wrow = next(x for x in server._list_workers(db) if x["id"] == wid)
+    assert wrow["capacity"] == 4
+
+
+def test_heartbeat_capacity_is_sticky_when_load_absent(tmp_path: Path):
+    # A heartbeat that carries capabilities but omits load/load.capacity must
+    # PRESERVE a previously-pinned capacity, not clobber it back to 1.
+    db = tmp_path / "roost.db"
+    server._init_db(db)
+    wid = server._register_worker(db, "w", {"tools": ["python3"]})["id"]
+    server._heartbeat_worker(db, wid, {"tools": ["python3"], "load": {"running": 0, "capacity": 4}})
+    # Heartbeat with capabilities but no load at all.
+    server._heartbeat_worker(db, wid, {"tools": ["python3"]})
+    assert next(x for x in server._list_workers(db) if x["id"] == wid)["capacity"] == 4
+    # Heartbeat with a load dict that omits capacity.
+    server._heartbeat_worker(db, wid, {"tools": ["python3"], "load": {"running": 1}})
+    assert next(x for x in server._list_workers(db) if x["id"] == wid)["capacity"] == 4
+    # An invalid capacity (bool / <1) is also ignored, preserving the stored value.
+    server._heartbeat_worker(db, wid, {"tools": ["python3"], "load": {"capacity": 0}})
+    assert next(x for x in server._list_workers(db) if x["id"] == wid)["capacity"] == 4
+
+
+def test_capacity_worker_competes_while_partially_loaded(tmp_path: Path):
+    # A capacity-2 worker with 1 job in flight still competes for placement; a
+    # second worker doesn't get the job purely because the first is "busy".
+    db = tmp_path / "roost.db"
+    server._init_db(db)
+    big = server._register_worker(db, "big", {"tools": ["python3"], "load": {"running": 0}})
+    _set_capacity(db, big["id"], 2)
+    server._insert_job(db, {"command": "true", "requires": {"tools": ["python3"]}})
+    first = server._try_assign_one(db, big["id"])
+    assert first is not None
+    # Another queued job + the partially-loaded big worker polls again: it is not
+    # saturated, so it can take the second job.
+    server._insert_job(db, {"command": "true", "requires": {"tools": ["python3"]}})
+    second = server._try_assign_one(db, big["id"])
+    assert second is not None and second["id"] != first["id"]
+
+
+def test_failed_event_persists_diagnosis(tmp_path: Path):
+    # The pinned wire contract: a FAILED event's diagnosis is stored and surfaced
+    # in /derived; a failure without one stores NULL.
+    db = tmp_path / "roost.db"
+    server._init_db(db)
+    w = server._register_worker(db, "w", {"tools": ["python3"]})
+    server._insert_job(db, {"command": "false", "requires": {"tools": ["python3"]}})
+    got = server._try_assign_one(db, w["id"])
+    server._apply_event(
+        db, got["id"], w["id"],
+        {"type": "failed", "attempt": got["attempt"], "exit_code": 1,
+         "error": "boom", "diagnosis": "OOM: model too large for 8GB VRAM"},
+    )
+    job = server._get_job(db, got["id"])
+    assert job["diagnosis"] == "OOM: model too large for 8GB VRAM"
+    assert server._derive_run(job)["diagnosis"] == "OOM: model too large for 8GB VRAM"
+
+
+def test_failed_event_without_diagnosis_stores_null(tmp_path: Path):
+    db = tmp_path / "roost.db"
+    server._init_db(db)
+    w = server._register_worker(db, "w", {"tools": ["python3"]})
+    server._insert_job(db, {"command": "false", "requires": {"tools": ["python3"]}})
+    got = server._try_assign_one(db, w["id"])
+    server._apply_event(db, got["id"], w["id"],
+                        {"type": "failed", "attempt": got["attempt"], "exit_code": 1})
+    assert server._get_job(db, got["id"])["diagnosis"] is None
+
+
+def test_sweep_prunes_dead_orphan_worker_rows(tmp_path: Path):
+    # An offline worker unseen past the prune TTL with no in-flight job is deleted.
+    db = tmp_path / "roost.db"
+    server._init_db(db)
+    dead = server._register_worker(db, "dead", {"tools": ["python3"]})["id"]
+    live = server._register_worker(db, "live", {"tools": ["python3"]})["id"]
+    import time as _t
+    old = _t.time() - server.WORKER_PRUNE_TTL - 60
+    with server._connect(db) as conn:
+        conn.execute("UPDATE workers SET status='offline', last_seen=? WHERE id=?", (old, dead))
+    counts = server._sweep(db)
+    assert counts["pruned"] == 1
+    ids = {w["id"] for w in server._list_workers(db)}
+    assert dead not in ids and live in ids
+
+
+def test_sweep_never_prunes_offline_worker_owning_inflight_job(tmp_path: Path):
+    # Conservative: an offline+old worker that still OWNS an in-flight job is kept.
+    db = tmp_path / "roost.db"
+    server._init_db(db)
+    wid = server._register_worker(db, "w", {"tools": ["python3"]})["id"]
+    import time as _t
+    old = _t.time() - server.WORKER_PRUNE_TTL - 60
+    with server._connect(db) as conn:
+        conn.execute("INSERT INTO jobs(id,spec,created_at,state,worker_id) "
+                     "VALUES('j1','{}',1.0,'running',?)", (wid,))
+        conn.execute("UPDATE workers SET status='offline', last_seen=? WHERE id=?", (old, wid))
+    counts = server._sweep(db)
+    assert counts["pruned"] == 0
+    assert wid in {w["id"] for w in server._list_workers(db)}
+
+
+def test_sweep_does_not_prune_recently_seen_or_online(tmp_path: Path):
+    # A worker seen recently (even if labeled offline) and an online worker are kept.
+    db = tmp_path / "roost.db"
+    server._init_db(db)
+    recent = server._register_worker(db, "recent", {"tools": ["python3"]})["id"]
+    online = server._register_worker(db, "online", {"tools": ["python3"]})["id"]
+    with server._connect(db) as conn:
+        # 'offline' label but last_seen is fresh → not past the prune TTL.
+        conn.execute("UPDATE workers SET status='offline' WHERE id=?", (recent,))
+    counts = server._sweep(db)
+    assert counts["pruned"] == 0
+    ids = {w["id"] for w in server._list_workers(db)}
+    assert recent in ids and online in ids
+
+
+def test_sweep_never_prunes_enrolled_credentialed_worker(tmp_path: Path):
+    # A per-worker-credentialed (cred_hash set) node that's merely powered off
+    # overnight must KEEP its row — deleting cred_hash would lock it out (401 →
+    # forced re-enroll). Only credential-less orphans are pruned.
+    db = tmp_path / "roost.db"
+    server._init_db(db)
+    enrolled = server._register_worker(db, "enrolled", {"tools": ["python3"]})["id"]
+    orphan = server._register_worker(db, "orphan", {"tools": ["python3"]})["id"]
+    import time as _t
+    old = _t.time() - server.WORKER_PRUNE_TTL - 60
+    with server._connect(db) as conn:
+        conn.execute("UPDATE workers SET status='offline', last_seen=?, cred_hash=? WHERE id=?",
+                     (old, "deadbeef", enrolled))
+        conn.execute("UPDATE workers SET status='offline', last_seen=? WHERE id=?", (old, orphan))
+    counts = server._sweep(db)
+    assert counts["pruned"] == 1  # only the credential-less orphan
+    ids = {w["id"] for w in server._list_workers(db)}
+    assert enrolled in ids and orphan not in ids
+
+
+def test_sweep_never_prunes_revoked_worker(tmp_path: Path):
+    # A revoked row is preserved as an audit record even when old + offline.
+    db = tmp_path / "roost.db"
+    server._init_db(db)
+    revoked = server._register_worker(db, "revoked", {"tools": ["python3"]})["id"]
+    import time as _t
+    old = _t.time() - server.WORKER_PRUNE_TTL - 60
+    server._revoke_worker(db, revoked)  # clears cred_hash, sets revoked=1, offline
+    with server._connect(db) as conn:
+        conn.execute("UPDATE workers SET last_seen=? WHERE id=?", (old, revoked))
+    counts = server._sweep(db)
+    assert counts["pruned"] == 0
+    assert revoked in {w["id"] for w in server._list_workers(db)}
+
+
+def test_heartbeat_renews_all_inflight_leases(tmp_path: Path):
+    # A worker running multiple jobs concurrently: one heartbeat must renew the
+    # lease on EVERY in-flight job it owns, not just one.
+    db = tmp_path / "roost.db"
+    server._init_db(db)
+    big = server._register_worker(db, "big", {"tools": ["python3"], "load": {"running": 0}})["id"]
+    _set_capacity(db, big, 2)
+    server._insert_job(db, {"command": "true", "requires": {"tools": ["python3"]}})
+    server._insert_job(db, {"command": "true", "requires": {"tools": ["python3"]}})
+    j1 = server._try_assign_one(db, big)
+    j2 = server._try_assign_one(db, big)
+    assert j1 is not None and j2 is not None and j1["id"] != j2["id"]
+    # Force both leases into the past so we can observe renewal moving them ahead.
+    import time as _t
+    past = _t.time() - 1000.0
+    with server._connect(db) as conn:
+        conn.execute("UPDATE jobs SET lease_expires_at=? WHERE worker_id=?", (past, big))
+    server._heartbeat_worker(db, big, {"tools": ["python3"], "load": {"running": 2, "capacity": 2}})
+    now = _t.time()
+    with server._connect(db) as conn:
+        rows = conn.execute(
+            "SELECT id, lease_expires_at FROM jobs WHERE worker_id=? AND state IN ('assigned','running')",
+            (big,),
+        ).fetchall()
+    assert len(rows) == 2
+    for r in rows:
+        assert r["lease_expires_at"] > now  # both leases renewed into the future

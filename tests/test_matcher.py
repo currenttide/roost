@@ -79,6 +79,48 @@ def test_lower_loadavg_and_more_vram_score_higher():
     assert light > heavy
 
 
+def test_least_utilized_worker_scores_higher():
+    # SPREAD load: among workers of the same capacity, the LESS-loaded one wins
+    # so jobs fan out rather than stacking onto one box.
+    job = {}
+    lighter = placement_score(_w("lighter", running=1, capacity=4), job, now=100.0)
+    heavier = placement_score(_w("heavier", running=3, capacity=4), job, now=100.0)
+    assert lighter > heavier
+
+
+def test_two_equally_idle_workers_tie_on_free_fraction():
+    # An idle small box competes evenly with an idle big box: both are 100% free,
+    # so the free-slot term contributes equally (no concentration onto the big
+    # box). Other terms are equal here, so the total scores tie.
+    job = {}
+    big = placement_score(_w("big", running=0, capacity=4), job, now=100.0)
+    small = placement_score(_w("small", running=0, capacity=1), job, now=100.0)
+    assert big == small
+
+
+def test_free_fraction_spreads_off_loaded_big_box():
+    # A capacity-4 worker already running 3 jobs is 25% free; a capacity-2 worker
+    # running 0 is 100% free — the less-utilized one is preferred for spread.
+    job = {}
+    loaded = placement_score(_w("loaded", running=3, capacity=4), job, now=100.0)
+    fresh = placement_score(_w("fresh", running=0, capacity=2), job, now=100.0)
+    assert fresh > loaded
+
+
+def test_capacity_defaults_to_one_when_absent():
+    # An older worker that doesn't report capacity is treated as capacity 1;
+    # idle (running=0) → fully free, no crash. Capacity falls back to the row
+    # column if present in the worker dict; a fully-idle row of any capacity is
+    # 100% free, so it ties the legacy fully-idle worker on this term.
+    job = {}
+    legacy = placement_score(_w("legacy", running=0), job, now=100.0)
+    via_row = placement_score(
+        {"id": "r", "status": "idle", "capacity": 3,
+         "capabilities": {"load": {"running": 0}}, "last_assigned_at": None},
+        job, now=100.0)
+    assert via_row == legacy  # both fully idle → equal free fraction
+
+
 def test_recency_breaks_ties_for_spread():
     job = {}
     recent = {"id": "a", "status": "idle", "capabilities": {}, "last_assigned_at": 99.0}

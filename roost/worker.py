@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from collections import deque
 import platform
 import re
 import shlex
@@ -36,6 +37,7 @@ from typing import Any, Optional
 import httpx
 
 from . import config as roost_config
+from . import steward
 from . import triage
 from . import verify as verify_mod
 
@@ -43,6 +45,13 @@ POLL_TIMEOUT = 25.0
 HEARTBEAT_INTERVAL = 15.0
 HEARTBEAT_FAIL_THRESHOLD = 3      # consecutive failures before re-registering
 CREDS_REFRESH_INTERVAL = 1200.0  # re-pull Claude creds every 20 min (they rotate)
+CAPACITY_REFRESH_INTERVAL = 180.0  # re-judge worker capacity at most every few min
+CAPACITY_AGENT_TIMEOUT = 30.0    # cap the steward capacity call (fail-safe to 1)
+# [BUG3a] Diagnosis runs before its OWN job's FAILED terminal event is posted. With
+# real concurrency (Bug-1) it no longer stalls the worker globally, but a long bound
+# still delays this job's terminal event (and its lease renews via the heartbeat, not
+# here), so keep it tight; fall back to the mechanical one-liner on timeout.
+DIAGNOSIS_AGENT_TIMEOUT = 20.0   # cap the failure-diagnosis call (fail-safe to mechanical)
 TOOL_PROBES: dict[str, list[str]] = {
     "claude":   ["claude", "--version"],
     "codex":    ["codex", "--version"],
@@ -145,13 +154,15 @@ def _free_vram_gb() -> Optional[float]:
     return round(total / 1024.0, 1)
 
 
-def load_snapshot(running: int) -> dict[str, Any]:
+def load_snapshot(running: int, capacity: int = 1) -> dict[str, Any]:
     """Live worker load, refreshed on each heartbeat (V2-3).
 
     Cheap to compute; carried in heartbeat capabilities so the captain and the
-    ranking matcher see the same picture.
+    ranking matcher see the same picture. ``capacity`` is the steward-judged max
+    concurrency (cached, recomputed periodically — see Worker._capacity); it sits
+    next to ``running`` so the server can gate placement on free slots.
     """
-    snap: dict[str, Any] = {"running": running}
+    snap: dict[str, Any] = {"running": running, "capacity": max(1, int(capacity))}
     try:
         snap["loadavg1"] = round(os.getloadavg()[0], 2)
     except (OSError, AttributeError):
@@ -503,7 +514,15 @@ def _build_docker_argv(spec: dict, job_id: str, policy: Optional[dict] = None) -
         argv += ["-w", str(c["workdir"])]
     for vol in c.get("volumes") or []:
         argv += ["-v", str(vol)]
-    for key, val in (c.get("env") or {}).items():
+    # [M4-parity] The in-container env is attacker-controllable too — a docker job
+    # could set ANTHROPIC_*/*_PROXY/NODE_OPTIONS inside the container to redirect creds
+    # or inject code. Apply the SAME blocked-key policy as the subprocess env, honoring
+    # the `allow_unsafe_env` opt-in for parity.
+    ctr_env, dropped_ctr_env = _sanitize_env(c.get("env"), policy)
+    if dropped_ctr_env:
+        print(f"[roost] dropped unsafe container env keys for {job_id}: "
+              f"{', '.join(sorted(dropped_ctr_env))}", flush=True)
+    for key, val in ctr_env.items():
         argv += ["-e", f"{key}={val}"]
     argv.append(str(image))
     cmd = spec.get("command")
@@ -773,13 +792,27 @@ class Worker:
         # re-register via the legacy shared-token path.
         self.enrolled = enrolled
         self.policy: dict = {}
-        self._running = 0  # in-flight jobs on this worker (V1 caps at 1)
+        self._running = 0  # in-flight jobs on this worker
+        # Steward-judged max concurrency (load.capacity). Cached and recomputed
+        # periodically (first heartbeat, then every CAPACITY_REFRESH_INTERVAL or when
+        # the running-count changes) — NOT on every 15s heartbeat. Fail-safe = 1.
+        self._capacity = steward.FALLBACK_CAPACITY
+        self._capacity_at = 0.0          # monotonic time of last judgment
+        self._capacity_running = -1      # running-count the cached value was judged at
+        self._capacity_lock = asyncio.Lock()
+        self._capacity_task: Optional[asyncio.Task] = None  # in-flight bg judgment
         self._stop = asyncio.Event()
         self._heartbeat_failures = 0
         # job_id -> {"process", "is_docker", "cancelled"} for jobs executing now,
         # so a server-side cancel (delivered via the heartbeat response) can tear
         # them down — including the sibling docker container of a kind:docker job.
         self._active: dict[str, dict] = {}
+        # [BUG1] In-flight run_job tasks keyed by job_id, so the worker runs up to
+        # self._capacity jobs CONCURRENTLY (not one inline at a time). The loop spawns
+        # into here and waits on _slot_free (set whenever any job task finishes) for a
+        # free slot, rather than awaiting a single job to completion or busy-spinning.
+        self._job_tasks: dict[str, asyncio.Task] = {}
+        self._slot_free = asyncio.Event()
         # [H5] Verify/self-heal subprocesses spawned by _oneshot_agent, keyed by
         # job_id, so a server cancel (or timeout teardown) of the parent job also
         # kills an in-flight verifier/fix agent instead of leaking tokens.
@@ -900,7 +933,17 @@ class Worker:
     async def heartbeat_forever(self) -> None:
         while not self._stop.is_set():
             try:
-                caps_with_load = {**self.capabilities, "load": load_snapshot(self._running)}
+                # [BUG2] Capacity judgment can await a ~claude -p subprocess; it must
+                # NEVER delay the heartbeat POST (which renews leases + delivers cancels
+                # — a stall risks lease expiry → requeue → double-execution). So we only
+                # TRIGGER the judgment as a detached background task here and post the
+                # heartbeat immediately using the cached value (fail-safe 1 until the
+                # first judgment lands).
+                self._maybe_spawn_capacity_refresh()
+                caps_with_load = {
+                    **self.capabilities,
+                    "load": load_snapshot(self._running, self._capacity),
+                }
                 r = await self.client.post(
                     f"/workers/{self.worker_id}/heartbeat",
                     json={"capabilities": caps_with_load},
@@ -946,6 +989,159 @@ class Worker:
                 await asyncio.wait_for(self._stop.wait(), timeout=HEARTBEAT_INTERVAL)
             except asyncio.TimeoutError:
                 pass
+
+    # ---------- steward judgments (capacity + diagnosis) ----------
+
+    async def _run_steward_agent(
+        self, prompt: str, *, label: str, timeout_s: float,
+    ) -> Optional[str]:
+        """Run a one-shot haiku steward agent (fresh context) and return its result
+        text, or None if claude is absent / the call fails / times out / yields no
+        result. Callers MUST fall back deterministically on None — the steward never
+        blocks the worker. Uses --output-format json (single JSON object on stdout)."""
+        if shutil.which("claude") is None:
+            return None
+        argv = [
+            "claude", "-p", prompt,
+            "--model", steward.STEWARD_MODEL,
+            "--output-format", "json",
+        ]
+        # [BUG3b] The steward call ingests attacker-controlled job stdout/stderr tails
+        # (diagnosis) and runs in the worker's cwd. Sanitize the inherited environment
+        # the same way job subprocesses are sanitized, so a job can't pre-seed
+        # ANTHROPIC_*/*_PROXY/NODE_OPTIONS/LD_* into the steward's process and redirect
+        # its creds or inject code. We filter os.environ itself (not a job env layer).
+        env, _dropped = _sanitize_env(dict(os.environ), self.policy)
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *argv, cwd=self.default_cwd or os.getcwd(), env=env,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+            )
+        except (FileNotFoundError, PermissionError, OSError):
+            return None
+        try:
+            out, _err = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+        except asyncio.TimeoutError:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+            try:
+                await proc.wait()
+            except Exception:  # noqa: BLE001
+                pass
+            return None
+        except Exception:  # noqa: BLE001 — steward must never raise into the worker
+            return None
+        if proc.returncode != 0:
+            return None
+        text = (out or b"").decode("utf-8", errors="replace").strip()
+        if not text:
+            return None
+        # `--output-format json` wraps the agent reply: {"type":"result","result": "..."}.
+        try:
+            obj = json.loads(text)
+            if isinstance(obj, dict) and obj.get("result") is not None:
+                return str(obj["result"])
+        except (json.JSONDecodeError, TypeError):
+            pass
+        return text  # not the wrapper shape — let the caller parse the raw text
+
+    async def _judge_capacity(self) -> int:
+        """Ask the steward agent for this box's max concurrency, cache it, and return
+        it. Deterministic fail-safe = 1 (steward.FALLBACK_CAPACITY) when claude is
+        absent or the call fails/parses wrong — logged. Pure-mechanical fallback never
+        blocks the worker."""
+        facts = steward.machine_facts(
+            self.capabilities, self._running, find_nvidia_smi=_find_nvidia_smi,
+        )
+        raw = await self._run_steward_agent(
+            steward.capacity_prompt(facts), label="capacity",
+            timeout_s=CAPACITY_AGENT_TIMEOUT,
+        )
+        cap = steward.parse_capacity(raw)
+        if cap is None:
+            cap = steward.FALLBACK_CAPACITY
+            print("[roost] capacity steward unavailable/unparseable; "
+                  f"fail-safe capacity={cap}", flush=True)
+        else:
+            print(f"[roost] capacity steward → max_concurrent={cap} "
+                  f"(running={self._running})", flush=True)
+        self._capacity = cap
+        self._capacity_at = time.monotonic()
+        self._capacity_running = self._running
+        # [BUG1] If capacity GREW while the main loop is parked waiting for a slot, wake
+        # it so it re-evaluates and can pick up more concurrent work without waiting for
+        # a job to finish first. (Shrinking is enforced lazily at the next poll check.)
+        self._slot_free.set()
+        return cap
+
+    def _capacity_is_stale(self) -> bool:
+        """Whether the cached capacity needs recomputing: first time, the running-count
+        changed since it was judged, or CAPACITY_REFRESH_INTERVAL elapsed."""
+        now = time.monotonic()
+        return (
+            self._capacity_at == 0.0
+            or self._running != self._capacity_running
+            or (now - self._capacity_at) >= CAPACITY_REFRESH_INTERVAL
+        )
+
+    def _maybe_spawn_capacity_refresh(self) -> None:
+        """[BUG2] Non-blocking trigger: if the cached capacity is stale and no judgment
+        is already in flight, spawn one as a DETACHED background task that only updates
+        the cached value. Returns immediately so the caller (the heartbeat) never waits
+        on a ~claude subprocess. Single-flight via the in-flight task handle."""
+        if self._stop.is_set():
+            return
+        if self._capacity_task is not None and not self._capacity_task.done():
+            return
+        if not self._capacity_is_stale():
+            return
+        self._capacity_task = asyncio.create_task(self._refresh_capacity_once())
+
+    async def _refresh_capacity_once(self) -> None:
+        """Recompute capacity in the background, updating only the cached value. Holds a
+        lock so overlapping triggers can't spawn duplicate steward agents, and never
+        raises into its caller (it runs detached)."""
+        if self._capacity_lock.locked():
+            return
+        async with self._capacity_lock:
+            if not self._capacity_is_stale():
+                return
+            try:
+                await self._judge_capacity()
+            except Exception as e:  # noqa: BLE001 — never let the steward break the worker
+                self._capacity = steward.FALLBACK_CAPACITY
+                self._capacity_at = time.monotonic()
+                self._capacity_running = self._running
+                print(f"[roost] capacity judgment error: {e}; fail-safe capacity=1",
+                      flush=True)
+
+    async def _diagnose_failure(
+        self, spec: dict, *, exit_code: Optional[Any],
+        stdout_tail: Optional[str], stderr_tail: Optional[str],
+        error: Optional[str] = None,
+    ) -> str:
+        """Author a short root-cause line for a FAILED terminal event. Agentic (haiku)
+        with a deterministic mechanical fallback (exit_code + last stderr line) when
+        claude is absent or the call fails. Always returns a non-empty string."""
+        fallback = steward.deterministic_diagnosis(
+            exit_code=exit_code, stderr_tail=stderr_tail,
+            stdout_tail=stdout_tail, error=error,
+        )
+        try:
+            raw = await self._run_steward_agent(
+                steward.diagnosis_prompt(
+                    spec_summary=steward.spec_summary(spec), exit_code=exit_code,
+                    stdout_tail=stdout_tail, stderr_tail=stderr_tail,
+                ),
+                label="diagnosis", timeout_s=DIAGNOSIS_AGENT_TIMEOUT,
+            )
+        except Exception:  # noqa: BLE001 — diagnosis must never break reporting
+            raw = None
+        return steward.clean_diagnosis(raw) or fallback
 
     def _claude_creds_path(self) -> Path:
         """Where this worker's claude reads its credentials: the isolated
@@ -1039,19 +1235,87 @@ class Worker:
                         print(f"[roost] re-register failed: {e}; backing off", flush=True)
                         await asyncio.sleep(5.0)
                         continue
+                # [BUG1] Bounded concurrency: re-read the (dynamic, steward-judged)
+                # capacity each iteration and only poll for new work while we have a free
+                # slot. At capacity, WAIT for a job to finish (slot to free) instead of
+                # polling — so we never lease more than we can run, and never busy-spin.
+                if len(self._job_tasks) >= max(1, self._capacity):
+                    await self._wait_for_free_slot()
+                    continue
                 job = await self.poll_once()
                 if not job:
                     continue
-                await self.run_job(job)
+                self._spawn_job(job)
         finally:
             self._stop.set()
             hb_task.cancel()
             creds_task.cancel()
+            # [BUG1] Shutdown: tear down EVERY in-flight job (process group + docker
+            # container + aux verify/heal procs) and cancel its task, not just one.
+            await self._shutdown_jobs()
             for t in (hb_task, creds_task):
                 try:
                     await t
                 except asyncio.CancelledError:
                     pass
+
+    def _spawn_job(self, job: dict) -> None:
+        """[BUG1] Launch run_job as a tracked background task so the loop can keep
+        polling for more concurrent work. A done-callback frees the slot and reaps the
+        task entry on EVERY completion path (success/verify/heal/cancel/timeout/error)."""
+        job_id = job["id"]
+        task = asyncio.create_task(self.run_job(job))
+        self._job_tasks[job_id] = task
+
+        def _done(t: asyncio.Task, _jid: str = job_id) -> None:
+            self._job_tasks.pop(_jid, None)
+            # Surface an unexpected crash (run_job guards its own paths, but never let a
+            # task die silently and leak _running/_active accounting unnoticed).
+            if not t.cancelled():
+                exc = t.exception()
+                if exc is not None:
+                    print(f"[roost] job {_jid} task crashed: {exc!r}", flush=True)
+            self._slot_free.set()
+
+        task.add_done_callback(_done)
+
+    async def _wait_for_free_slot(self) -> None:
+        """Block until a job task completes (slot frees) or the worker is told to stop.
+        The done-callback sets _slot_free; we clear it before returning so the next full
+        slot blocks again."""
+        self._slot_free.clear()
+        # Re-check: a slot may have freed (or capacity grown) between the loop's check
+        # and clearing the event, in which case return immediately.
+        if len(self._job_tasks) < max(1, self._capacity):
+            return
+        stop_wait = asyncio.create_task(self._stop.wait())
+        slot_wait = asyncio.create_task(self._slot_free.wait())
+        try:
+            await asyncio.wait(
+                {stop_wait, slot_wait}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for t in (stop_wait, slot_wait):
+                t.cancel()
+
+    async def _shutdown_jobs(self) -> None:
+        """[BUG1] Cancel ALL in-flight job tasks and tear down their process groups /
+        docker containers / aux procs. Used on worker shutdown."""
+        tasks = list(self._job_tasks.values())
+        for job_id in list(self._active.keys()):
+            try:
+                await self._kill_active_job(job_id, "shutdown")
+            except Exception:  # noqa: BLE001 — teardown is best-effort
+                pass
+        for t in tasks:
+            t.cancel()
+        for t in tasks:
+            try:
+                await t
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        # Done-callbacks that pop _job_tasks run on a later loop turn; clear here so
+        # the worker's view of in-flight work is empty immediately after shutdown.
+        self._job_tasks.clear()
 
     async def run_job(self, job: dict) -> None:
         job_id = job["id"]
@@ -1160,6 +1424,9 @@ class Worker:
         declined = False
         decline_reason: Optional[str] = None
         result_text: Optional[str] = None
+        # Bounded tails of each stream, kept only so a FAILED job can be diagnosed
+        # (steward). Capped lines so a chatty job can't grow worker memory.
+        tails: dict[str, deque] = {"stdout": deque(maxlen=40), "stderr": deque(maxlen=40)}
 
         async def relay(stream: asyncio.StreamReader, kind: str) -> None:
             nonlocal tokens_used, declined, decline_reason, result_text
@@ -1169,6 +1436,7 @@ class Worker:
                 if not line:
                     return
                 text = line.decode("utf-8", errors="replace").rstrip("\n")
+                tails[kind].append(text)
                 # Bare-worker accept/decline protocol: the triage agent emits the
                 # decline marker in its output to route the task to a better node.
                 if is_auto and not declined and decline_marker in text:
@@ -1342,6 +1610,16 @@ class Worker:
                                 result={"output": result_text} if result_text else None)
         else:
             terminal.update(type="failed", error=f"exit_code={exit_code}", exit_code=exit_code)
+        # On a FAILED terminal event, attach a steward-authored root-cause `diagnosis`
+        # (agentic haiku, with a deterministic mechanical fallback). Never touches the
+        # success/decline paths, so it can't slow a healthy job down.
+        if terminal.get("type") == "failed":
+            terminal["diagnosis"] = await self._diagnose_failure(
+                spec, exit_code=terminal.get("exit_code"),
+                stdout_tail="\n".join(tails["stdout"]),
+                stderr_tail="\n".join(tails["stderr"]),
+                error=terminal.get("error"),
+            )
         self._active.pop(job_id, None)
         await self._post_event(job_id, terminal)
         self._running = max(0, self._running - 1)

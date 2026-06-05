@@ -40,11 +40,15 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "roost_do",
         "description": (
-            "THE main tool: do a plain-language GOAL on the fleet. A worker self-selects "
-            "the best-fit node, runs it, and an INDEPENDENT verifier checks the goal was "
-            "actually achieved (and self-heals a wrong result). Returns {run_id, state} "
-            "immediately — call roost_result to get the verified outcome + evidence. Use "
-            "this for almost everything; you never pick a node, kind, or write a spec."
+            "THE main tool: do a plain-language GOAL on the fleet. The goal is first "
+            "CLASSIFIED (same trust loop as the CLI): a multi-part goal is dispatched "
+            "via the captain; an AMBIGUOUS goal comes back with a clarifying_question to "
+            "answer and re-call (nothing runs); a DESTRUCTIVE goal (or one that couldn't "
+            "be classified) requires you to re-call with confirm: true (nothing runs "
+            "otherwise). A single, safe goal runs: a worker self-selects the best-fit "
+            "node, runs it, and an INDEPENDENT verifier checks the goal was actually "
+            "achieved (and self-heals a wrong result). On a run it returns {run_id, "
+            "state} — call roost_result to get the verified outcome + evidence."
         ),
         "inputSchema": {
             "type": "object",
@@ -54,6 +58,9 @@ TOOLS: list[dict[str, Any]] = [
                            "description": "Independently verify the result (default true)."},
                 "model": {"type": "string", "description": "Optional model override."},
                 "wallclock_min": {"type": "number", "default": 15},
+                "confirm": {"type": "boolean", "default": False,
+                            "description": "Required true to proceed when the goal is "
+                                           "destructive or could not be classified."},
             },
             "required": ["goal"],
         },
@@ -240,9 +247,54 @@ def _run_summary(job: dict) -> dict:
 
 
 def tool_roost_do(args: dict) -> dict:
+    """The trust loop, mirrored for MCP (which cannot interactively prompt):
+
+    - multi-part goal → dispatch via the captain (same path as CLI `do`).
+    - ambiguous → return the clarifying_question; the caller refines and calls again.
+    - destructive OR classify-failed → require an explicit `confirm: true`; without
+      it, return what will happen and that confirmation is required (do NOT run).
+    - single, safe → post a kind: auto job (the original behavior).
+    """
+    from . import cli as _cli
+
+    goal = args["goal"]
+    plan = _cli._classify_goal(goal)
+
+    # Mirror the CLI ordering exactly (roost/cli.py `do_`): ambiguity and the
+    # needs-confirm gate come FIRST, before routing multi→dispatch / single→run.
+    # A destructive (or classify-failed) goal must demand confirmation regardless
+    # of whether it's single OR multi — otherwise a destructive multi could be
+    # dispatched to the captain with no confirm.
+    if plan["ambiguous"] and plan["clarifying_question"]:
+        return {"needs": "clarification",
+                "clarifying_question": plan["clarifying_question"],
+                "note": "ambiguous goal — refine it (or fold the answer into the goal) "
+                        "and call roost_do again. Nothing was run."}
+
+    if _cli._needs_confirm(plan) and not args.get("confirm"):
+        reason = ("could not classify the goal (fail-closed)"
+                  if plan.get("classify_failed") else "looks destructive")
+        return {"needs": "confirmation", "reason": reason,
+                "will_do": plan["restated"],
+                "note": "this goal " + reason + " — call roost_do again with "
+                        "confirm: true to proceed. Nothing was run."}
+
+    if plan["mode"] == "multi":
+        url = os.environ.get("ROOST_URL", "http://127.0.0.1:8787")
+        token = os.environ.get("ROOST_TOKEN", "")
+        try:
+            root_id, rc = _cli.dispatch_goal(url, token, goal, model=args.get("model"))
+        except FileNotFoundError as e:
+            return {"error": "captain_unavailable", "detail": str(e),
+                    "note": "the captain needs Claude Code (`claude`) on PATH."}
+        return {"run_id": root_id, "state": "succeeded" if rc == 0 else "failed",
+                "mode": "multi",
+                "note": "multi-step goal dispatched via the captain; inspect the plan "
+                        f"with roost_status/roost_logs on {root_id}."}
+
     body: dict[str, Any] = {
         "kind": "auto",
-        "task": args["goal"],
+        "task": goal,
         "verify": args.get("verify", True),
         "budget": {"max_wallclock_min": args.get("wallclock_min", 15), "max_tokens": 200000},
     }
