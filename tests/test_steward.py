@@ -99,16 +99,64 @@ def _mk_worker():
     return Worker("http://127.0.0.1:9", "tok", "w1", self_test=False)
 
 
-def test_capacity_failsafe_is_one_when_steward_absent(monkeypatch):
+def test_capacity_failsafe_is_at_least_one_when_steward_absent(monkeypatch):
     w = _mk_worker()
 
     async def _none(*a, **k):
-        return None  # claude absent / call failed → parse fails → fail-safe
+        return None  # claude absent / call failed → parse fails → mechanical estimate
 
     monkeypatch.setattr(w, "_run_steward_agent", _none)
     cap = asyncio.run(w._judge_capacity())
-    assert cap == steward.FALLBACK_CAPACITY == 1
-    assert w._capacity == 1
+    # No longer collapses to a flat 1: it's the mechanical estimate (>= 1) from the
+    # host facts. We only assert the floor here; the mechanical estimator itself is
+    # exercised directly below with controlled facts.
+    assert cap >= steward.FALLBACK_CAPACITY == 1
+    assert w._capacity == cap
+    asyncio.run(w.close())
+
+
+# ---------- mechanical capacity estimate (claude unavailable) ----------
+
+
+def test_mechanical_capacity_big_box_exceeds_one():
+    facts = {"cpus": 32, "mem_available_gb": 120.0, "running_jobs": 0}
+    assert steward.mechanical_capacity(facts) > 1
+
+
+def test_mechanical_capacity_tiny_box_is_one():
+    facts = {"cpus": 2, "mem_available_gb": 2.0, "running_jobs": 0}
+    assert steward.mechanical_capacity(facts) == 1
+
+
+def test_mechanical_capacity_gated_by_memory():
+    # Many cores but memory-starved → memory caps it, not cores.
+    facts = {"cpus": 64, "mem_available_gb": 6.0, "running_jobs": 0}
+    assert steward.mechanical_capacity(facts) == 1
+
+
+def test_mechanical_capacity_bounded_and_safe_on_garbage():
+    assert steward.mechanical_capacity({}) == 1
+    assert steward.mechanical_capacity({"cpus": "lots"}) == 1
+    # Huge box is bounded so we never auto-estimate absurd concurrency.
+    big = steward.mechanical_capacity(
+        {"cpus": 256, "mem_available_gb": 2000.0, "running_jobs": 0})
+    assert 1 <= big <= steward._MECHANICAL_CAP_MAX
+
+
+def test_capacity_uses_mechanical_estimate_when_steward_absent(monkeypatch):
+    """End-to-end: claude steward returns nothing, worker derives capacity > 1 from a
+    big-box facts dict via the mechanical estimate (graceful degradation, not flat 1)."""
+    w = _mk_worker()
+    w.capabilities = {"cpus": 32, "ram_gb": 120.0}
+
+    async def _none(*a, **k):
+        return None
+
+    # Force the live mem reading to a big value so machine_facts reflects a big box.
+    monkeypatch.setattr("roost.steward._mem_available_gb", lambda: 120.0)
+    monkeypatch.setattr(w, "_run_steward_agent", _none)
+    cap = asyncio.run(w._judge_capacity())
+    assert cap > 1
     asyncio.run(w.close())
 
 

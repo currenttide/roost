@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import sqlite3
 
-CURRENT_VERSION = 8
+CURRENT_VERSION = 9
 
 # Full V1 schema for fresh installs.
 SCHEMA_V1 = """
@@ -98,6 +98,31 @@ CREATE TABLE IF NOT EXISTS enroll_tokens (
     used_by_worker  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_enroll_tokens_expiry ON enroll_tokens(expires_at);
+
+CREATE TABLE IF NOT EXISTS api_tokens (
+    id            TEXT PRIMARY KEY,
+    token_hash    TEXT NOT NULL UNIQUE,
+    label         TEXT,
+    scope         TEXT NOT NULL DEFAULT 'mobile',
+    created_at    REAL NOT NULL,
+    last_used_at  REAL,
+    revoked       INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash);
+"""
+
+# V8 → V9 (scoped client tokens: `roost pair` for the mobile apps).
+_API_TOKENS_DDL = """
+CREATE TABLE IF NOT EXISTS api_tokens (
+    id            TEXT PRIMARY KEY,
+    token_hash    TEXT NOT NULL UNIQUE,
+    label         TEXT,
+    scope         TEXT NOT NULL DEFAULT 'mobile',
+    created_at    REAL NOT NULL,
+    last_used_at  REAL,
+    revoked       INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash);
 """
 
 # V0 → V1 additive migration. Each entry is (column_name, full DDL fragment).
@@ -208,6 +233,10 @@ def migrate(conn: sqlite3.Connection) -> int:
         # V7 → V8: capacity-based concurrency + agentic failure diagnosis.
         _add_missing("workers", _WORKER_V8_ADDS)
         _add_missing("jobs", _JOB_V8_ADDS)
+
+    if version < 9:
+        # V8 → V9: scoped client tokens (`roost pair` for the mobile apps).
+        conn.executescript(_API_TOKENS_DDL)
 
     conn.execute(f"PRAGMA user_version = {CURRENT_VERSION}")
     return CURRENT_VERSION

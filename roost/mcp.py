@@ -210,6 +210,31 @@ TOOLS: list[dict[str, Any]] = [
         "description": "List registered workers and a summary of their capabilities.",
         "inputSchema": {"type": "object", "properties": {}},
     },
+    {
+        "name": "roost_exec",
+        "description": (
+            "Run a shell command on ONE specific fleet worker — no SSH. Hard-pins "
+            "a `command` job to the named node (by worker id OR name) through the "
+            "job channel, waits for it, and returns {job_id, state, exit_code, "
+            "output, worker}. For debugging/operating nodes that have no inbound "
+            "SSH and changing IPs. If the target matches no worker, or a NAME "
+            "matches several online workers, it errors (use an id). Set wait:false "
+            "to submit and return the job_id without blocking."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "worker": {"type": "string",
+                           "description": "Target worker — its id OR name."},
+                "command": {"description": "Shell command (string) or argv (array)."},
+                "timeout_min": {"type": "number", "default": 2,
+                                "description": "Hard wall-clock budget in minutes."},
+                "wait": {"type": "boolean", "default": True,
+                         "description": "Block until the command finishes (default true)."},
+            },
+            "required": ["worker", "command"],
+        },
+    },
 ]
 
 
@@ -425,6 +450,59 @@ def tool_roost_workers(_args: dict) -> dict:
         return {"workers": r.json()}
 
 
+def tool_roost_exec(args: dict) -> dict:
+    """Run a shell command on ONE specific worker via a hard-pinned command job.
+
+    Validates the target (id OR name) against GET /workers — clear error on no
+    match / ambiguous online name — then submits a `command` job carrying the
+    pinned `target` field (the control-plane contract) and waits for it.
+    """
+    from . import cli as _cli
+
+    worker = args["worker"]
+    command = args["command"]
+    cmd = command if isinstance(command, str) else " ".join(command)
+    with _client() as c:
+        r = c.get("/workers")
+        r.raise_for_status()
+        workers = r.json()
+    try:
+        target = _cli._resolve_target(workers, worker)
+    except Exception as e:  # click.ClickException (or any) → a clean tool error
+        return {"error": "bad_target", "detail": getattr(e, "message", str(e))}
+
+    # PINNED CONTRACT: `target` hard-pins the job to one worker (id OR name).
+    body: dict[str, Any] = {
+        "kind": "command",
+        "command": cmd,
+        "target": worker,
+        "budget": {"max_wallclock_min": args.get("timeout_min", 2)},
+    }
+    parent = _parent_id()
+    if parent:
+        body["parent_job_id"] = parent
+    with _client() as c:
+        r = c.post("/jobs", json=body)
+        r.raise_for_status()
+        job = r.json()
+    if not args.get("wait", True):
+        return {"job_id": job.get("id"), "state": job.get("state"),
+                "worker": f"{target.get('name')} ({target.get('id')})",
+                "note": "submitted — call roost_wait(job_id)/roost_logs(job_id)."}
+    final = tool_roost_wait({"job_id": job["id"], "timeout_sec": 600})
+    logs = tool_roost_logs({"job_id": job["id"], "limit": 500})
+    output = "\n".join(le.get("data", "") for le in logs.get("logs", []))
+    return {
+        "job_id": final.get("id"),
+        "state": final.get("state"),
+        "exit_code": final.get("exit_code"),
+        "worker": f"{target.get('name')} ({target.get('id')})",
+        "output": output,
+        "error": final.get("error"),
+        "timed_out_waiting": final.get("timed_out_waiting"),
+    }
+
+
 TOOL_IMPL = {
     "roost_do":           tool_roost_do,
     "roost_runs":         tool_roost_runs,
@@ -436,6 +514,7 @@ TOOL_IMPL = {
     "roost_logs":    tool_roost_logs,
     "roost_cancel":  tool_roost_cancel,
     "roost_workers": tool_roost_workers,
+    "roost_exec":    tool_roost_exec,
 }
 
 

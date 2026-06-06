@@ -175,3 +175,70 @@ def test_roost_do_destructive_multi_with_confirm_dispatches(monkeypatch):
     out = mcp.tool_roost_do({"goal": "wipe data on every box", "confirm": True})
     assert out["mode"] == "multi" and out["run_id"] == "root-7"
     assert called["goal"] == "wipe data on every box"
+
+
+# ---------- roost_exec: run a command on one pinned worker ----------
+
+
+def test_roost_exec_tool_listed():
+    resp = mcp.handle({"jsonrpc": "2.0", "id": 9, "method": "tools/list"})
+    names = {t["name"] for t in resp["result"]["tools"]}
+    assert "roost_exec" in names
+    assert "roost_exec" in mcp.TOOL_IMPL
+
+
+class _WResp:
+    def __init__(self, payload):
+        self._payload = payload
+    def raise_for_status(self): pass
+    def json(self): return self._payload
+
+
+def _exec_mcp_client(workers, posted):
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def get(self, path, **k):
+            return _WResp(workers)
+        def post(self, path, json):
+            posted["body"] = json
+            return _WResp({"id": "job-x", "state": "queued"})
+    return _C()
+
+
+def test_roost_exec_sets_target_and_submits_command(monkeypatch):
+    posted = {}
+    workers = [{"id": "aaa111", "name": "gpu-box", "status": "idle"}]
+    monkeypatch.setattr(mcp, "_client", lambda: _exec_mcp_client(workers, posted))
+    # don't block on a live job — stub the wait/logs helpers
+    monkeypatch.setattr(mcp, "tool_roost_wait",
+                        lambda a: {"id": "job-x", "state": "succeeded", "exit_code": 0})
+    monkeypatch.setattr(mcp, "tool_roost_logs",
+                        lambda a: {"logs": [{"data": "hello"}]})
+    out = mcp.tool_roost_exec({"worker": "gpu-box", "command": "echo hello"})
+    assert posted["body"]["kind"] == "command"
+    assert posted["body"]["command"] == "echo hello"
+    assert posted["body"]["target"] == "gpu-box"  # PINNED CONTRACT
+    assert out["state"] == "succeeded" and out["exit_code"] == 0
+    assert out["output"] == "hello"
+
+
+def test_roost_exec_argv_command_is_joined(monkeypatch):
+    posted = {}
+    workers = [{"id": "aaa111", "name": "gpu-box", "status": "idle"}]
+    monkeypatch.setattr(mcp, "_client", lambda: _exec_mcp_client(workers, posted))
+    out = mcp.tool_roost_exec({"worker": "gpu-box", "command": ["df", "-h"],
+                               "wait": False})
+    assert posted["body"]["command"] == "df -h"
+    assert posted["body"]["target"] == "gpu-box"
+    assert out["job_id"] == "job-x"
+
+
+def test_roost_exec_unknown_worker_returns_error(monkeypatch):
+    posted = {}
+    workers = [{"id": "aaa111", "name": "gpu-box", "status": "idle"}]
+    monkeypatch.setattr(mcp, "_client", lambda: _exec_mcp_client(workers, posted))
+    out = mcp.tool_roost_exec({"worker": "ghost", "command": "ls"})
+    assert out["error"] == "bad_target"
+    assert "no worker named/ided 'ghost'" in out["detail"]
+    assert posted == {}  # never submitted

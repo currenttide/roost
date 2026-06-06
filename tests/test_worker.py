@@ -13,9 +13,12 @@ from roost.worker import (
     Worker,
     _auto_prefilter,
     _budget_remaining,
+    _build_claude_argv,
     _build_docker_argv,
     _sanitize_env,
     _validate_container,
+    build_bwrap_argv,
+    detect_capabilities,
     load_snapshot,
 )
 
@@ -501,3 +504,211 @@ def test_slow_capacity_judgment_does_not_delay_heartbeat(monkeypatch):
         await w.close()
 
     asyncio.run(go())
+
+
+# ---------- Jetson/Tegra integrated-GPU detection ----------
+
+
+def test_tegra_gpu_detected_via_nv_tegra_release(monkeypatch):
+    """A Jetson (nv_tegra_release stamp present) advertises an integrated GPU even
+    though the discrete-GPU probe returns nothing usable."""
+    import roost.worker as wm
+
+    monkeypatch.setattr(wm, "_detect_gpus", lambda: [])  # discrete probe yields nothing
+    monkeypatch.setattr(wm.os.path, "exists",
+                        lambda p: p == "/etc/nv_tegra_release")
+    monkeypatch.setattr(wm, "_device_tree_model",
+                        lambda: "NVIDIA Jetson AGX Orin Developer Kit")
+    monkeypatch.setattr(wm, "_detect_ram_gb", lambda: 64.0)
+    monkeypatch.setattr(wm, "_detect_docker", lambda: {})
+    monkeypatch.setattr(wm.shutil, "which", lambda _n: None)
+
+    caps = detect_capabilities(self_test=False)
+    assert caps.get("gpu_count") == 1
+    assert caps.get("tegra") is True
+    assert caps.get("gpu_vram_gb") and caps["gpu_vram_gb"] > 0
+    assert "Orin" in caps["gpu"][0]
+
+
+def test_tegra_gpu_detected_via_device_tree_model(monkeypatch):
+    import roost.worker as wm
+
+    monkeypatch.setattr(wm, "_detect_gpus", lambda: [])
+    monkeypatch.setattr(wm.os.path, "exists", lambda p: False)  # no L4T stamp
+    monkeypatch.setattr(wm, "_device_tree_model", lambda: "NVIDIA Jetson Orin Nano")
+    monkeypatch.setattr(wm, "_detect_ram_gb", lambda: 8.0)
+    gpus = wm._detect_tegra_gpu()
+    assert len(gpus) == 1
+    assert gpus[0]["tegra"] is True
+    assert gpus[0]["vram_gb"] >= 1.0
+
+
+def test_tegra_vram_floored_for_tiny_board(monkeypatch):
+    import roost.worker as wm
+
+    monkeypatch.setattr(wm.os.path, "exists", lambda p: p == "/etc/nv_tegra_release")
+    monkeypatch.setattr(wm, "_device_tree_model", lambda: "NVIDIA Jetson Nano")
+    monkeypatch.setattr(wm, "_detect_ram_gb", lambda: 1.0)  # tiny shared RAM
+    gpus = wm._detect_tegra_gpu()
+    assert gpus and gpus[0]["vram_gb"] >= 1.0
+
+
+def test_no_tegra_on_ordinary_host(monkeypatch):
+    """A normal Linux box (no Tegra signals) does not falsely advertise a GPU."""
+    import roost.worker as wm
+
+    monkeypatch.setattr(wm.os.path, "exists", lambda p: False)
+    monkeypatch.setattr(wm, "_device_tree_model", lambda: None)
+    monkeypatch.setattr(wm, "_find_nvidia_smi", lambda: None)
+    assert wm._detect_tegra_gpu() == []
+
+
+def test_discrete_gpu_unchanged_when_present(monkeypatch):
+    """When the standard discrete-GPU probe finds a GPU, the Tegra fallback is NOT
+    consulted and no `tegra` marker is set."""
+    import roost.worker as wm
+
+    monkeypatch.setattr(wm, "_detect_gpus",
+                        lambda: [{"name": "NVIDIA RTX 4090", "vram_gb": 24.0, "driver": "550"}])
+    called = {"tegra": False}
+
+    def _tegra():
+        called["tegra"] = True
+        return [{"name": "should-not-be-used", "vram_gb": 99}]
+
+    monkeypatch.setattr(wm, "_detect_tegra_gpu", _tegra)
+    monkeypatch.setattr(wm, "_detect_docker", lambda: {})
+    monkeypatch.setattr(wm.shutil, "which", lambda _n: None)
+    caps = detect_capabilities(self_test=False)
+    assert caps["gpu"] == ["NVIDIA RTX 4090"]
+    assert "tegra" not in caps
+    assert called["tegra"] is False
+
+
+# ---------- bwrap detection capability ----------
+
+
+def test_bwrap_capability_advertised_when_present(monkeypatch):
+    import roost.worker as wm
+
+    monkeypatch.setattr(wm, "_detect_gpus", lambda: [])
+    monkeypatch.setattr(wm, "_detect_tegra_gpu", lambda: [])
+    monkeypatch.setattr(wm, "_detect_docker", lambda: {})
+    monkeypatch.setattr(wm.shutil, "which", lambda n: "/usr/bin/bwrap" if n == "bwrap" else None)
+    caps = detect_capabilities(self_test=False)
+    assert caps.get("bwrap") is True
+
+
+def test_bwrap_capability_absent_when_missing(monkeypatch):
+    import roost.worker as wm
+
+    monkeypatch.setattr(wm, "_detect_gpus", lambda: [])
+    monkeypatch.setattr(wm, "_detect_tegra_gpu", lambda: [])
+    monkeypatch.setattr(wm, "_detect_docker", lambda: {})
+    monkeypatch.setattr(wm.shutil, "which", lambda _n: None)
+    caps = detect_capabilities(self_test=False)
+    assert "bwrap" not in caps
+
+
+# ---------- bwrap sandbox argv construction ----------
+
+
+def test_build_bwrap_argv_binds_and_wraps_claude(tmp_path):
+    cwd = str(tmp_path)
+    claude_argv = ["claude", "-p", "do the thing", "--dangerously-skip-permissions"]
+    argv = build_bwrap_argv(claude_argv, cwd)
+    assert argv[0] == "bwrap"
+    # The claude command is wrapped after a `--` separator, intact and in order.
+    assert "--" in argv
+    sep = argv.index("--")
+    assert argv[sep + 1:] == claude_argv
+    # Whole host mounted read-only.
+    assert "--ro-bind" in argv
+    # cwd is bound read-write (a RW hole punched into the ro host).
+    pairs = list(zip(argv, argv[1:], argv[2:]))
+    assert ("--bind", cwd, cwd) in pairs
+    # Network is NOT unshared (claude needs the API); host PIDs ARE hidden.
+    assert "--unshare-net" not in argv
+    assert "--unshare-pid" in argv
+    assert "--die-with-parent" in argv
+
+
+def test_build_bwrap_argv_binds_claude_config_dir(monkeypatch, tmp_path):
+    ccd = tmp_path / "isolated-claude"
+    ccd.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(ccd))
+    argv = build_bwrap_argv(["claude", "-p", "x"], str(tmp_path))
+    pairs = list(zip(argv, argv[1:], argv[2:]))
+    assert ("--bind", str(ccd), str(ccd)) in pairs
+
+
+def _bwrap_policy_worker():
+    return {"sandbox": "bwrap"}
+
+
+def test_claude_argv_wrapped_in_bwrap_when_policy_enabled_and_no_sandbox_flag(monkeypatch):
+    """OPT-IN: policy sandbox=bwrap + bwrap available + claude has no --sandbox →
+    claude runs --dangerously-skip-permissions INSIDE a bwrap jail, even on a
+    NON-trusted worker (trust_skip not set)."""
+    import roost.worker as wm
+
+    monkeypatch.setattr(wm.shutil, "which",
+                        lambda n: "/usr/bin/" + n if n in ("claude", "bwrap") else None)
+    monkeypatch.setattr(wm, "_claude_supports_sandbox", lambda: False)
+    argv = _build_claude_argv(
+        {"intent": "build it", "permissions": {"sandbox": True}}, "job1",
+        worker_policy={"sandbox": "bwrap"},  # NOT trusted
+        base_url=None, token=None, can_dispatch=False, tempfiles=[], cwd="/work")
+    assert argv[0] == "bwrap"
+    assert "--dangerously-skip-permissions" in argv
+    # The wrapped claude invocation is present after the separator.
+    sep = argv.index("--")
+    assert argv[sep + 1] == "claude"
+
+
+def test_claude_argv_not_wrapped_when_policy_off(monkeypatch):
+    """Default (no bwrap policy): non-trusted worker without --sandbox support falls
+    back to --permission-mode default, NOT bwrap — existing behavior unchanged."""
+    import roost.worker as wm
+
+    monkeypatch.setattr(wm.shutil, "which",
+                        lambda n: "/usr/bin/" + n if n in ("claude", "bwrap") else None)
+    monkeypatch.setattr(wm, "_claude_supports_sandbox", lambda: False)
+    argv = _build_claude_argv(
+        {"intent": "build it", "permissions": {"sandbox": True}}, "job1",
+        worker_policy={},  # policy OFF
+        base_url=None, token=None, can_dispatch=False, tempfiles=[], cwd="/work")
+    assert argv[0] == "claude"
+    assert "bwrap" not in argv
+    assert "--permission-mode" in argv
+
+
+def test_claude_argv_not_wrapped_when_bwrap_missing(monkeypatch):
+    """Policy enabled but bwrap not installed → no wrap (graceful)."""
+    import roost.worker as wm
+
+    monkeypatch.setattr(wm.shutil, "which",
+                        lambda n: "/usr/bin/claude" if n == "claude" else None)
+    monkeypatch.setattr(wm, "_claude_supports_sandbox", lambda: False)
+    argv = _build_claude_argv(
+        {"intent": "x", "permissions": {"sandbox": True}}, "job1",
+        worker_policy={"sandbox": "bwrap"},
+        base_url=None, token=None, can_dispatch=False, tempfiles=[], cwd="/work")
+    assert argv[0] == "claude"
+    assert "bwrap" not in argv
+
+
+def test_native_sandbox_flag_preferred_over_bwrap(monkeypatch):
+    """If claude DOES support --sandbox, use it directly even when bwrap policy is on."""
+    import roost.worker as wm
+
+    monkeypatch.setattr(wm.shutil, "which",
+                        lambda n: "/usr/bin/" + n if n in ("claude", "bwrap") else None)
+    monkeypatch.setattr(wm, "_claude_supports_sandbox", lambda: True)
+    argv = _build_claude_argv(
+        {"intent": "x", "permissions": {"sandbox": True}}, "job1",
+        worker_policy={"sandbox": "bwrap"},
+        base_url=None, token=None, can_dispatch=False, tempfiles=[], cwd="/work")
+    assert argv[0] == "claude"
+    assert "--sandbox" in argv
+    assert "bwrap" not in argv

@@ -15,6 +15,7 @@ Control plane / fleet:
     roost serve              run the control plane
     roost enroll-token       (admin) mint a single-use enrollment token
     roost revoke <worker>    (admin) revoke a worker's credential
+    roost pair               (admin) pair a phone: scoped mobile token + QR
 
 This machine:
 
@@ -862,6 +863,85 @@ def enroll_token_cmd(ctx: click.Context, label: Optional[str], ttl: Optional[flo
         click.echo(f"  curl -fsSL {url}/install.sh | sh -s -- {tok['token']}")
 
 
+def _pair_uri(url: str, token: str, label: Optional[str]) -> str:
+    """Compact pairing payload for QR: roost://pair?d=<base64url(json)>."""
+    import base64
+
+    payload = {"v": 1, "url": url, "token": token}
+    if label:
+        payload["name"] = label
+    raw = json.dumps(payload, separators=(",", ":")).encode()
+    return "roost://pair?d=" + base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _print_qr(data: str) -> bool:
+    """Render a terminal QR if the optional `qrcode` package is present."""
+    try:
+        import qrcode  # type: ignore
+    except ImportError:
+        return False
+    qr = qrcode.QRCode(border=1)
+    qr.add_data(data)
+    qr.print_ascii(invert=True)
+    return True
+
+
+@cli.command()
+@click.option("--label", default=None,
+              help="Device label for audit (e.g. 'yang-iphone')")
+@click.option("--list", "list_", is_flag=True, help="List paired tokens")
+@click.option("--revoke", "revoke_id", default=None, metavar="TOKEN_ID",
+              help="Revoke a pairing by token id")
+@click.pass_context
+def pair(ctx: click.Context, label: Optional[str], list_: bool,
+         revoke_id: Optional[str]) -> None:
+    """(Admin) Pair a phone: mint a 'mobile'-scoped token and show a QR.
+
+    The mobile scope can read fleet state and submit/cancel jobs, but can
+    never mint enroll tokens, touch workers, or fetch Claude credentials.
+    """
+    url, _, _ = _resolve(ctx)
+    with _ctx_client(ctx) as c:
+        if list_:
+            r = c.get("/pair-tokens")
+            if r.status_code == 403:
+                raise click.ClickException("admin auth required (use the shared --token/ROOST_TOKEN)")
+            r.raise_for_status()
+            rows = r.json()
+            if not rows:
+                click.echo("no paired tokens")
+                return
+            for t in rows:
+                state = "revoked" if t["revoked"] else "active"
+                used = _rel_time(t["last_used_at"]) if t["last_used_at"] else "never"
+                click.echo(f"{t['id']}  {state:8}  scope={t['scope']}  "
+                           f"last used {used}  {t['label'] or ''}")
+            return
+        if revoke_id:
+            r = c.delete(f"/pair-tokens/{revoke_id}")
+            if r.status_code == 404:
+                raise click.ClickException("token not found (or already revoked)")
+            r.raise_for_status()
+            click.echo(f"revoked {revoke_id}")
+            return
+        r = c.post("/pair-tokens", json={"label": label})
+        if r.status_code == 403:
+            raise click.ClickException("admin auth required (use the shared --token/ROOST_TOKEN)")
+        if r.status_code >= 400:
+            raise click.ClickException(f"pair failed: HTTP {r.status_code}: {r.text}")
+        tok = r.json()
+
+    if any(h in url for h in ("127.0.0.1", "localhost")):
+        click.echo("warning: control plane URL is loopback — the phone can't reach it.")
+        click.echo("         re-run with --url http://<LAN-or-tailscale-address>:8787\n")
+    uri = _pair_uri(url, tok["token"], label)
+    if not _print_qr(uri):
+        click.echo("(install `qrcode` for a scannable QR: uv tool install qrcode)")
+    click.echo(f"pairing uri: {uri}")
+    click.echo(f"token id:    {tok['id']}  (revoke later: roost pair --revoke {tok['id']})")
+    click.echo("scan the QR with the Roost app, or paste the URI into its pairing screen.")
+
+
 @cli.command()
 @click.argument("worker_id")
 @click.pass_context
@@ -1321,6 +1401,94 @@ def run(ctx: click.Context, task: tuple, follow: bool, model: Optional[str],
                 click.echo(f"result: {res['output']}")
     except Exception:  # noqa: BLE001 — best-effort summary
         pass
+    sys.exit(rc)
+
+
+def _resolve_target(workers: list[dict], target: str) -> dict:
+    """Pick the single worker a `roost exec` should hard-pin to.
+
+    `target` matches a worker by id (exact) OR by name. Pure; raises
+    click.ClickException with an actionable message when there's no match or an
+    ambiguous one:
+      - an id match always wins and is unambiguous (ids are unique).
+      - otherwise match by name; if a name matches several ONLINE workers we
+        can't tell them apart → ask the operator to use an id (two nodes can
+        briefly share a name). Offline same-name rows don't count toward
+        ambiguity (a dead duplicate shouldn't block exec).
+    """
+    for w in workers:
+        if w.get("id") == target:
+            return w
+    by_name = [w for w in workers if w.get("name") == target]
+    if not by_name:
+        raise click.ClickException(
+            f"no worker named/ided '{target}' — see `roost workers`")
+    online = [w for w in by_name if w.get("status") in ("idle", "busy")]
+    candidates = online or by_name
+    if len(candidates) > 1:
+        ids = ", ".join(w["id"] for w in candidates)
+        raise click.ClickException(
+            f"name '{target}' matches {len(candidates)} workers ({ids}) — "
+            f"use a worker id (see `roost workers`)")
+    return candidates[0]
+
+
+@cli.command("exec")
+@click.argument("worker")
+@click.argument("command", nargs=-1, required=True)
+@click.option("--timeout", "timeout_min", default=2.0, type=float, show_default=True,
+              help="Hard wall-clock budget in minutes.")
+@click.option("--detach", "detach", is_flag=True,
+              help="Submit and print the job id without waiting.")
+@click.option("--no-validate", "no_validate", is_flag=True,
+              help="Skip the up-front GET /workers target check.")
+@click.pass_context
+def exec_(ctx: click.Context, worker: str, command: tuple, timeout_min: float,
+          detach: bool, no_validate: bool) -> None:
+    """Run a shell COMMAND on ONE specific fleet WORKER — no SSH.
+
+    Pins a `command` job to a single node (by worker id or name) through the
+    existing job channel, streams its output live, and exits with the job's exit
+    code. For debugging/operating a pull-based fleet where nodes have no inbound
+    SSH and changing IPs.
+
+      roost exec gpu-box -- nvidia-smi
+      roost exec gpu-box "df -h /data && free -m"
+      roost exec 7f3a... --timeout 10 -- ./long_diagnostic.sh
+    """
+    cmd = " ".join(command)
+    url, token, _ = _resolve(ctx)
+
+    # Optionally validate the target exists up front so we fail fast with an
+    # actionable message instead of submitting a job that sits queued forever.
+    if not no_validate:
+        with _client(url, token) as c:
+            try:
+                r = c.get("/workers")
+                r.raise_for_status()
+            except httpx.HTTPError as e:
+                raise click.ClickException(f"cannot reach control plane at {url}: {e}")
+            target = _resolve_target(r.json(), worker)
+        click.echo(f"[exec] → {target['name']} ({target['id'][:8]})  $ {cmd}")
+    else:
+        click.echo(f"[exec] → {worker}  $ {cmd}")
+
+    # PINNED CONTRACT: `target` hard-pins the job to one worker (id OR name).
+    body: dict[str, Any] = {
+        "kind": "command",
+        "command": cmd,
+        "target": worker,
+        "budget": {"max_wallclock_min": timeout_min},
+    }
+    with _client(url, token) as c:
+        r = c.post("/jobs", json=body)
+        if r.status_code >= 400:
+            raise click.ClickException(f"exec failed: HTTP {r.status_code}: {r.text}")
+        job = r.json()
+    if detach:
+        click.echo(f"submitted: {job['id']} (state={job['state']})")
+        return
+    rc = _stream(url, token, job["id"])
     sys.exit(rc)
 
 

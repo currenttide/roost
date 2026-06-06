@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import click
+import pytest
 from click.testing import CliRunner
 
 from roost import cli as roost_cli
@@ -421,3 +422,162 @@ def test_recent_successes_examples_and_empty():
     # truncation of long goals
     long = _recent_successes([_run(goal="y" * 90)])[0]
     assert long.endswith("...") and len(long) == 70
+
+
+# ---------- `roost exec`: run a command on one pinned worker ----------
+
+from roost.cli import _resolve_target
+
+
+def _wk(id_, name, status="idle"):
+    return {"id": id_, "name": name, "status": status}
+
+
+class _ExecResp:
+    """Stub httpx response for the exec flow (GET /workers, POST /jobs)."""
+    def __init__(self, payload, status_code=200):
+        self._payload = payload
+        self.status_code = status_code
+        self.text = "err"
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._payload
+
+
+def _exec_client(workers, job):
+    """A fake httpx client usable as `_client(url, token)` context manager that
+    serves GET /workers and records the POSTed job body in `job`."""
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def get(self, path, **k):
+            assert path == "/workers"
+            return _ExecResp(workers)
+        def post(self, path, json):
+            assert path == "/jobs"
+            job["body"] = json
+            return _ExecResp({"id": "job-x", "state": "queued"})
+    return _C()
+
+
+def test_resolve_target_by_id_wins():
+    workers = [_wk("aaa111", "box"), _wk("bbb222", "box")]
+    # an exact id match is unambiguous even when names collide
+    assert _resolve_target(workers, "aaa111")["id"] == "aaa111"
+
+
+def test_resolve_target_by_name():
+    workers = [_wk("aaa111", "gpu-box"), _wk("bbb222", "cpu-box")]
+    assert _resolve_target(workers, "gpu-box")["id"] == "aaa111"
+
+
+def test_resolve_target_unknown_errors():
+    with pytest.raises(click.ClickException) as ei:
+        _resolve_target([_wk("aaa111", "box")], "ghost")
+    assert "no worker named/ided 'ghost'" in str(ei.value)
+
+
+def test_resolve_target_ambiguous_online_name_errors():
+    workers = [_wk("aaa111", "box", "idle"), _wk("bbb222", "box", "busy")]
+    with pytest.raises(click.ClickException) as ei:
+        _resolve_target(workers, "box")
+    assert "matches 2 workers" in str(ei.value)
+    assert "use a worker id" in str(ei.value)
+
+
+def test_resolve_target_offline_duplicate_does_not_block():
+    # one online + one offline of the same name → the online one wins
+    workers = [_wk("aaa111", "box", "idle"), _wk("dead", "box", "offline")]
+    assert _resolve_target(workers, "box")["id"] == "aaa111"
+
+
+def test_exec_detach_submits_command_job_with_target(monkeypatch):
+    job: dict = {}
+    workers = [_wk("aaa111", "gpu-box")]
+    monkeypatch.setattr(roost_cli, "_resolve",
+                        lambda ctx: ("http://cp", "tok", None))
+    monkeypatch.setattr(roost_cli, "_client",
+                        lambda url, token: _exec_client(workers, job))
+    res = CliRunner().invoke(roost_cli.exec_,
+                             ["gpu-box", "--detach", "--", "nvidia-smi"])
+    assert res.exit_code == 0
+    assert "submitted: job-x" in res.output
+    body = job["body"]
+    assert body["kind"] == "command"
+    assert body["command"] == "nvidia-smi"
+    assert body["target"] == "gpu-box"  # PINNED CONTRACT
+    assert body["budget"]["max_wallclock_min"] == 2.0
+
+
+def test_exec_streams_and_exits_with_job_code(monkeypatch):
+    job: dict = {}
+    workers = [_wk("aaa111", "gpu-box")]
+    monkeypatch.setattr(roost_cli, "_resolve",
+                        lambda ctx: ("http://cp", "tok", None))
+    monkeypatch.setattr(roost_cli, "_client",
+                        lambda url, token: _exec_client(workers, job))
+    # reuse the submit-and-follow plumbing → _stream returns the exit code
+    monkeypatch.setattr(roost_cli, "_stream", lambda url, token, jid, **k: 3)
+    res = CliRunner().invoke(roost_cli.exec_, ["gpu-box", "uptime"])
+    assert res.exit_code == 3
+    assert job["body"]["target"] == "gpu-box"
+    assert job["body"]["command"] == "uptime"
+
+
+def test_exec_unknown_worker_errors_before_submit(monkeypatch):
+    job: dict = {}
+    workers = [_wk("aaa111", "gpu-box")]
+    monkeypatch.setattr(roost_cli, "_resolve",
+                        lambda ctx: ("http://cp", "tok", None))
+    monkeypatch.setattr(roost_cli, "_client",
+                        lambda url, token: _exec_client(workers, job))
+    res = CliRunner().invoke(roost_cli.exec_, ["ghost", "--", "ls"])
+    assert res.exit_code != 0
+    assert "no worker named/ided 'ghost'" in res.output
+    assert job == {}  # never submitted
+
+
+def test_exec_ambiguous_name_errors_before_submit(monkeypatch):
+    job: dict = {}
+    workers = [_wk("aaa111", "box", "idle"), _wk("bbb222", "box", "busy")]
+    monkeypatch.setattr(roost_cli, "_resolve",
+                        lambda ctx: ("http://cp", "tok", None))
+    monkeypatch.setattr(roost_cli, "_client",
+                        lambda url, token: _exec_client(workers, job))
+    res = CliRunner().invoke(roost_cli.exec_, ["box", "--", "ls"])
+    assert res.exit_code != 0
+    assert "use a worker id" in res.output
+    assert job == {}
+
+
+# ---------- roost pair: pairing URI encoding ----------
+
+
+def test_pair_uri_roundtrips():
+    import base64
+    import json as _json
+
+    from roost.cli import _pair_uri
+
+    uri = _pair_uri("http://192.168.1.193:8787", "rst-mob-abc123", "yang-iphone")
+    assert uri.startswith("roost://pair?d=")
+    b64 = uri.split("d=", 1)[1]
+    b64 += "=" * (-len(b64) % 4)  # restore stripped padding
+    payload = _json.loads(base64.urlsafe_b64decode(b64))
+    assert payload == {"v": 1, "url": "http://192.168.1.193:8787",
+                       "token": "rst-mob-abc123", "name": "yang-iphone"}
+
+
+def test_pair_uri_omits_empty_label():
+    import base64
+    import json as _json
+
+    from roost.cli import _pair_uri
+
+    uri = _pair_uri("http://h:8787", "t", None)
+    b64 = uri.split("d=", 1)[1]
+    b64 += "=" * (-len(b64) % 4)
+    assert "name" not in _json.loads(base64.urlsafe_b64decode(b64))

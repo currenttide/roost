@@ -70,6 +70,7 @@ WORKER_PRUNE_TTL = 6 * 3600.0  # 6 hours since last_seen
 ENROLL_TOKEN_TTL = 900.0  # 15 minutes
 ENROLL_PREFIX = "rst-enr-"
 WORKER_CRED_PREFIX = "rst-wkr-"
+MOBILE_TOKEN_PREFIX = "rst-mob-"
 
 TERMINAL_STATES = ("succeeded", "failed", "cancelled")
 ACTIVE_STATES = ("queued", "assigned", "running")
@@ -589,6 +590,47 @@ def _register_worker(
     return _row_to_worker(row)
 
 
+def _retire_superseded_workers(
+    db_path: Path, new_worker_id: str, name: str, capabilities: dict
+) -> list[str]:
+    """When a machine re-enrolls, retire the PRIOR non-offline row(s) it
+    supersedes so the new enrollment cleanly replaces it (no stale duplicate
+    that must be manually revoked/pruned).
+
+    Conservative by construction: a row is only retired when it clearly belongs
+    to *this same machine* re-enrolling — same ``name`` AND same host identity
+    (``capabilities.hostname`` when both rows report one; otherwise name alone).
+    The brand-new row is never touched, already-offline rows are left as-is, and
+    unrelated workers (different name or different hostname) are never affected.
+    Retirement reuses revocation semantics: mark revoked + offline and drop the
+    credential, so the ghost can't heartbeat its way back in.
+    """
+    new_host = (capabilities or {}).get("hostname")
+    retired: list[str] = []
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT id, capabilities FROM workers "
+            "WHERE name=? AND id != ? AND status != 'offline' AND revoked = 0",
+            (name, new_worker_id),
+        ).fetchall()
+        for r in rows:
+            try:
+                old_host = (json.loads(r["capabilities"]) or {}).get("hostname")
+            except (TypeError, json.JSONDecodeError):
+                old_host = None
+            # Same host identity required when BOTH rows carry a hostname; if
+            # either lacks one, fall back to name-only (the best signal we have).
+            if new_host and old_host and new_host != old_host:
+                continue
+            conn.execute(
+                "UPDATE workers SET cred_hash=NULL, status='offline', revoked=1 "
+                "WHERE id=?",
+                (r["id"],),
+            )
+            retired.append(r["id"])
+    return retired
+
+
 def _heartbeat_worker(
     db_path: Path,
     worker_id: str,
@@ -788,7 +830,7 @@ def _try_assign_one(db_path: Path, worker_id: str) -> Optional[dict]:
         try:
             now = time.time()
             me_row = conn.execute(
-                "SELECT id, status, capacity, capabilities, last_assigned_at "
+                "SELECT id, name, status, capacity, capabilities, last_assigned_at "
                 "FROM workers WHERE id=?",
                 (worker_id,),
             ).fetchone()
@@ -838,13 +880,26 @@ def _try_assign_one(db_path: Path, worker_id: str) -> Optional[dict]:
                 requires = json.loads(row["requires"])
                 if not matches(me["capabilities"], requires):
                     continue
+                spec = json.loads(row["spec"])
+                # Hard worker-pin (`target`): a job that names a target may be
+                # taken ONLY by the worker whose id == target, or whose name ==
+                # target while it is not offline. Every other worker skips it
+                # unconditionally (never falls through on placement-grace), so a
+                # pinned job stays queued until its target polls — and if the
+                # target doesn't exist / is offline, it simply waits.
+                target = spec.get("target")
+                if target is not None:
+                    is_target = me_row["id"] == target or (
+                        me_row["name"] == target and me_row["status"] != "offline"
+                    )
+                    if not is_target:
+                        continue
                 waited = now - (row["created_at"] or now)
                 # bare-worker (kind: auto): never re-grab a task this worker already
                 # declined — a poor fit won't become a good one. The task waits for a
                 # capable node; it only fails once ALL capable nodes have declined.
                 if worker_id in _decliner_set(row["declined_by"]):
                     continue
-                spec = json.loads(row["spec"])
                 job = {"prefer": spec.get("prefer"), "requires": requires}
                 if waited >= PLACEMENT_GRACE:
                     chosen = row  # don't starve: take it regardless of fit
@@ -1277,6 +1332,65 @@ def _list_enroll_tokens(db_path: Path) -> list[dict]:
         return [dict(r) for r in cur.fetchall()]
 
 
+# ---------- Scoped client tokens (`roost pair`) ----------
+#
+# A 'mobile' token is a long-lived bearer for thin clients (the phone apps).
+# It gets read access + job submit/cancel via require_any, and is explicitly
+# rejected by require_admin and require_worker — so it can never mint enroll
+# tokens, delete workers, or fetch /claude-creds.
+
+
+def _mint_api_token(db_path: Path, label: Optional[str], scope: str = "mobile") -> dict:
+    raw = MOBILE_TOKEN_PREFIX + secrets.token_urlsafe(32)
+    token_id = uuid.uuid4().hex[:12]
+    now = time.time()
+    with _connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO api_tokens(id, token_hash, label, scope, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (token_id, _hash_cred(raw), label, scope, now),
+        )
+    return {"id": token_id, "token": raw, "label": label, "scope": scope,
+            "created_at": now}
+
+
+def _api_token_by_hash(db_path: Path, token_hash: str) -> Optional[dict]:
+    """Active (non-revoked) api_token row by hash; touches last_used_at at
+    most once a minute so the auth path stays read-mostly."""
+    now = time.time()
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM api_tokens WHERE token_hash=? AND revoked=0",
+            (token_hash,),
+        ).fetchone()
+        if row is None:
+            return None
+        d = dict(row)
+        if (d.get("last_used_at") or 0) < now - 60:
+            conn.execute(
+                "UPDATE api_tokens SET last_used_at=? WHERE id=?", (now, d["id"])
+            )
+        d.pop("token_hash", None)  # never leak hash
+        return d
+
+
+def _list_api_tokens(db_path: Path) -> list[dict]:
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            "SELECT id, label, scope, created_at, last_used_at, revoked "
+            "FROM api_tokens ORDER BY created_at DESC"
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def _revoke_api_token(db_path: Path, token_id: str) -> bool:
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE api_tokens SET revoked=1 WHERE id=? AND revoked=0", (token_id,)
+        )
+        return cur.rowcount > 0
+
+
 # ---------- Log retention (called periodically) ----------
 
 
@@ -1315,6 +1429,7 @@ class JobSubmit(BaseModel):
     env: Optional[dict[str, str]] = None
     requires: dict[str, Any] = Field(default_factory=dict)
     prefer: Optional[Any] = None  # soft routing hint, e.g. {"worker": "<id>"} (V2-4)
+    target: Optional[str] = None  # HARD worker-pin: a worker id OR name; only that worker may take it
     success_criteria: Optional[str] = None
     budget: dict[str, Any] = Field(default_factory=dict)
     permissions: dict[str, Any] = Field(default_factory=dict)
@@ -1345,6 +1460,10 @@ class EnrollTokenRequest(BaseModel):
     label: Optional[str] = None
     policy: dict[str, Any] = Field(default_factory=dict)
     ttl_sec: Optional[float] = None
+
+
+class PairTokenRequest(BaseModel):
+    label: Optional[str] = None
 
 
 class HeartbeatPayload(BaseModel):
@@ -1413,7 +1532,8 @@ def create_app(
     app.state.shared_token = shared_token
 
     def authenticate(request: Request, authorization: Optional[str] = Header(None)) -> dict:
-        """Returns dict with at least {kind: 'shared'|'worker'|'none', worker?: dict}."""
+        """Returns dict with at least {kind: 'shared'|'worker'|'mobile'|'none',
+        worker?: dict, token?: dict}."""
         if not shared_token:
             return {"kind": "none"}
         if not authorization or not authorization.startswith("Bearer "):
@@ -1421,9 +1541,13 @@ def create_app(
         raw = authorization[7:]
         if raw == shared_token:
             return {"kind": "shared"}
-        worker = _worker_by_cred_hash(db, _hash_cred(raw))
+        cred_hash = _hash_cred(raw)
+        worker = _worker_by_cred_hash(db, cred_hash)
         if worker is not None:
             return {"kind": "worker", "worker": worker}
+        api_token = _api_token_by_hash(db, cred_hash)
+        if api_token is not None:
+            return {"kind": "mobile", "token": api_token}
         raise HTTPException(401, "invalid bearer token")
 
     def require_admin(principal: dict = Depends(authenticate)) -> dict:
@@ -1441,6 +1565,8 @@ def create_app(
             return principal  # admin can act as any worker
         if principal["kind"] == "worker":
             return principal
+        # 'mobile' lands here: thin clients never get worker-plane access
+        # (creds provisioning, lease/poll, heartbeat).
         raise HTTPException(403, "worker credential required")
 
     def require_matching_worker(
@@ -1503,6 +1629,26 @@ def create_app(
     async def list_tokens():
         return await asyncio.to_thread(_list_enroll_tokens, db)
 
+    # ---- mobile pairing (scoped client tokens) ----
+
+    @app.post("/pair-tokens", dependencies=[Depends(require_admin)])
+    async def mint_pair_token(payload: PairTokenRequest):
+        """Mint a long-lived 'mobile'-scoped token for a thin client (phone app).
+
+        The raw token is returned exactly once; only its hash is stored."""
+        return await asyncio.to_thread(_mint_api_token, db, payload.label, "mobile")
+
+    @app.get("/pair-tokens", dependencies=[Depends(require_admin)])
+    async def list_pair_tokens():
+        return await asyncio.to_thread(_list_api_tokens, db)
+
+    @app.delete("/pair-tokens/{token_id}", dependencies=[Depends(require_admin)])
+    async def revoke_pair_token(token_id: str):
+        ok = await asyncio.to_thread(_revoke_api_token, db, token_id)
+        if not ok:
+            raise HTTPException(404, "token not found (or already revoked)")
+        return {"revoked": True}
+
     @app.post("/enroll")
     async def enroll(payload: EnrollRequest):
         try:
@@ -1528,6 +1674,16 @@ def create_app(
                 "UPDATE enroll_tokens SET used_by_worker=? WHERE token_hash=?",
                 (worker["id"], tok_row["token_hash"]),
             )
+        # Dedup: a node re-enrolling under the same name + host identity cleanly
+        # replaces its prior row(s); retire the superseded ghost so it doesn't
+        # linger as a stale duplicate needing manual revoke/prune.
+        await asyncio.to_thread(
+            _retire_superseded_workers,
+            db,
+            worker["id"],
+            payload.name,
+            payload.capabilities,
+        )
         resp = {"worker_id": worker["id"], "credential": raw_cred, "policy": policy}
         # Onboarding (v1): help the worker run Claude Code. Install it if missing
         # and provision auth by COPYING the operator's credentials. Gated by the
@@ -1927,26 +2083,50 @@ async def _sweep_loop(db_path: Path) -> None:
 # ---------- Install script ----------
 
 
-def render_install_script(control_plane_url: str) -> str:
+# Where a fresh `curl … | sh` install pulls THIS project's code from when the
+# operator hasn't configured anything. NOT the unrelated `roost` PyPI package —
+# default to a known-good git source so the served one-liner installs Roost.
+DEFAULT_INSTALL_SOURCE = "git+https://github.com/roost-sh/roost@main"
+
+
+def render_install_script(
+    control_plane_url: str,
+    source: Optional[str] = None,
+    claude_install_cmd: Optional[str] = None,
+) -> str:
+    # The control plane injects its own known-good source so a fresh install
+    # gets the right code without the operator passing --source. Operators can
+    # still override via ROOST_INSTALL_SOURCE (serve env) or --source (per run).
+    install_source = (
+        source
+        or os.environ.get("ROOST_INSTALL_SOURCE")
+        or DEFAULT_INSTALL_SOURCE
+    )
+    claude_cmd = claude_install_cmd or CLAUDE_INSTALL_CMD
     return f"""#!/usr/bin/env sh
 # Roost worker installer. Idempotent: re-running upgrades in place.
 # Usage:
-#   curl -fsSL {control_plane_url}/install.sh | sh -s -- <enroll-token> [--name NAME] [--source SOURCE]
+#   curl -fsSL {control_plane_url}/install.sh | sh -s -- <enroll-token> \\
+#       [--name NAME] [--source SOURCE] [--with-claude] [--no-start]
 #
-# SOURCE defaults to the published roost wheel. Override with a git URL or
-# a local path when iterating, e.g. --source 'git+https://github.com/you/roost'.
+# SOURCE defaults to this control plane's own known-good source. Override with
+# a git URL or local path when iterating, e.g.
+#   --source 'git+https://github.com/you/roost@branch'.
+# Pass --with-claude to also install the Claude CLI (for agent jobs).
 set -eu
 
 ROOST_URL="${{ROOST_URL:-{control_plane_url}}}"
 ROOST_ENROLL_TOKEN="${{ROOST_ENROLL_TOKEN:-${{1:-}}}}"
 ROOST_NAME="${{ROOST_NAME:-$(hostname)}}"
-ROOST_SOURCE="${{ROOST_SOURCE:-roost}}"
+ROOST_SOURCE="${{ROOST_SOURCE:-{install_source}}}"
+ROOST_WITH_CLAUDE="${{ROOST_WITH_CLAUDE:-0}}"
 
 shift 2>/dev/null || true
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --name) ROOST_NAME="$2"; shift 2 ;;
         --source) ROOST_SOURCE="$2"; shift 2 ;;
+        --with-claude) ROOST_WITH_CLAUDE=1; shift ;;
         --no-start) ROOST_NO_START=1; shift ;;
         *) shift ;;
     esac
@@ -1965,10 +2145,21 @@ if ! command -v uv >/dev/null 2>&1; then
 fi
 
 echo "[install] installing roost from $ROOST_SOURCE..."
-uv tool install --force "$ROOST_SOURCE"
+# Pin Python 3.12: newer interpreters can break the async HTTP client.
+uv tool install --force --python 3.12 "$ROOST_SOURCE"
 
 # Ensure tool dir on PATH for this session.
 export PATH="$HOME/.local/bin:$PATH"
+
+# Optionally install the Claude CLI so this node can run agent (claude) jobs.
+if [ "$ROOST_WITH_CLAUDE" = "1" ]; then
+    if command -v claude >/dev/null 2>&1; then
+        echo "[install] claude already present; skipping."
+    else
+        echo "[install] installing claude CLI..."
+        {claude_cmd}
+    fi
+fi
 
 echo "[install] enrolling as $ROOST_NAME ..."
 roost enroll --url "$ROOST_URL" --token "$ROOST_ENROLL_TOKEN" --name "$ROOST_NAME"
