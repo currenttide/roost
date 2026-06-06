@@ -168,3 +168,20 @@ Entries are written by the loop; humans read, never need to edit.
   and the placer kept preferring it — marking w1 offline (faithful to a real
   outage) fixed placement to w2. Wire change is additive (older workers ignore
   `owned`; older servers send none and the worker skips reconcile).
+
+## 2026-06-06 22:34 UTC — R4: Escape job intent in verifier prompt
+- Verdict: blocked (cut by human)
+- Branch/PR: loop/r4-verifier-prompt-injection (deleted) / -
+- What changed: nothing landed. Human direction mid-iteration: "delete r4, go
+  straight to r5". Uncommitted work (50 lines of prompt-injection regression
+  tests in tests/test_verify.py asserting FENCE_BEGIN/FENCE_END delimiters and
+  marker redaction in render_user — implementation not yet written) discarded;
+  branch deleted.
+- Evidence:
+  - `git checkout -- tests/test_verify.py && git branch -D loop/r4-verifier-prompt-injection` → clean master @ d150da1
+- Judge: n/a — human cut precedes the judge gate.
+- Models: implementer claude-opus-4-8 / judge n/a
+- Notes: R5 was already closed `invalid` (2026-06-05 — prune_expired exists,
+  roost/blobs.py:134, wired into the server sweep), so the next live Ranked
+  item is R6 (publish from mobile). Bookkeeping rides the R6 branch (direct
+  master push is permission-gated in this session).

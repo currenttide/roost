@@ -59,7 +59,7 @@ Done-when: sane default cap (config-overridable, per job kind) applied when no b
 Surface: backend/robustness. *(Re-scoped 2026-06-05: the worker DOES track consecutive heartbeat failures and forces re-register, roost/worker.py:~1185.)* Residual: during a CP outage longer than LEASE_TTL (60s), the server sweeps the job to `lease_expired`/re-queues it while the original worker is still running it → possible duplicate execution; post-re-register reconciliation semantics are undefined.
 Done-when: semantics chosen + documented (abort local work on re-register, or report-and-dedupe on reconnect); test simulates a CP outage past the TTL; pytest green.
 
-### R4. Escape job intent in verifier prompt — `open`
+### R4. Escape job intent in verifier prompt — `cut` *(human, 2026-06-06 — in-progress work discarded, branch deleted)*
 Surface: backend/security. Job `intent` is interpolated raw into the verifier prompt (roost/verify.py + worker.py) — adversarial intents can steer the verdict.
 Done-when: intent is delimited/escaped (e.g. fenced with clear instruction framing); a prompt-injection regression test exists; pytest green.
 
