@@ -26,7 +26,7 @@ Entries are written by the loop; humans read, never need to edit.
 
 ## 2026-06-06 04:30 UTC — I0: Prove the verification paths the loop will rely on
 - Verdict: shipped
-- Branch/PR: loop/i0-verification-plumbing / (PR pending judge)
+- Branch/PR: loop/i0-verification-plumbing / https://github.com/currenttide/roost/pull/7
 - What changed: no product code — environment plumbing + backlog/journal bookkeeping.
   Admin auth fixed, CLI repointed to this checkout, Mac node proven with Xcode,
   artifact round-trip through the blob store verified byte-identical.
