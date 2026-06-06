@@ -68,9 +68,12 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "roost_runs",
         "description": (
-            "The inbox: recent + in-flight goals with their phase (running / verifying / "
-            "self-healing / done), whether they were verified, and the one-line result. "
-            "Use to answer 'what's running?' / 'how did that go?' / 'why did it fail?'."
+            "The inbox: recent + in-flight goals, each with its phase (running / "
+            "verifying / self-healing / done), whether it was verified, and a one-line "
+            "result. Reach for this to answer 'what's running?' / 'how did that go?' / "
+            "'why did it fail?'. Returns {runs: [{run_id, goal, phase, verified, "
+            "result, worker}]}. Gotcha: results are truncated one-liners — use "
+            "roost_result(run_id) for the full verified outcome + evidence."
         ),
         "inputSchema": {
             "type": "object",
@@ -95,16 +98,25 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "roost_capabilities",
-        "description": "Describe what this fleet can do (nodes, cores, GPUs) in plain language.",
+        "description": (
+            "Describe what this fleet can do — live node count, total CPU cores, and "
+            "GPU nodes (model + VRAM) — in plain language. Reach for this to answer "
+            "'what can this run?' or to size a job before submitting. Returns {nodes, "
+            "cpu_cores, gpu_nodes, can}. Gotcha: only counts ONLINE (idle/busy) "
+            "workers, so offline nodes don't show."
+        ),
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
         "name": "roost_submit",
         "description": (
-            "Submit a sub-job to the Roost fleet. Returns immediately with "
-            "{job_id, state, depth, root_job_id}. Use roost_wait to block "
-            "until completion. The job inherits the caller's job as parent, "
-            "so depth/tree-budget guardrails apply."
+            "Submit a precisely-shaped sub-job — reach for this (over roost_do) when "
+            "you need explicit control: a docker/GPU image, hard `requires` "
+            "constraints, a budget, or to fan out children yourself. Returns "
+            "immediately with {job_id, state, depth, root_job_id}; block with "
+            "roost_wait. Gotcha: the job inherits the caller's job as parent, so "
+            "depth/tree-budget guardrails apply — a 409 comes back as "
+            "{error: guardrail}."
         ),
         "inputSchema": {
             "type": "object",
@@ -182,7 +194,13 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "roost_logs",
-        "description": "Return a job's logs (optionally since a given seq).",
+        "description": (
+            "Return a job's captured stdout/stderr log lines. Reach for this to see "
+            "WHAT a job actually printed — progress, errors, output — after "
+            "roost_status/roost_wait tells you the state. Returns {logs: [{seq, "
+            "stream, data}]}. Gotcha: logs are paginated — pass `since` (the last seq "
+            "you saw) to tail incrementally rather than re-reading from the top."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -195,7 +213,12 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "roost_cancel",
-        "description": "Cancel a job (set tree=true to cancel its descendants too).",
+        "description": (
+            "Cancel a job — stop a run that's stuck, runaway, or no longer needed. "
+            "Set tree=true to also cancel everything it spawned (the whole subtree). "
+            "Returns the updated job record. Gotcha: a job already in a terminal "
+            "state can't be cancelled and comes back as {error: not_cancellable}."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -207,19 +230,24 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "roost_workers",
-        "description": "List registered workers and a summary of their capabilities.",
+        "description": (
+            "List registered workers with their id, name, status, and full "
+            "capabilities (os, arch, hostname, cpus, gpu, tools, …). Reach for this "
+            "to pick a target for roost_exec/send_file, or to debug why a job won't "
+            "place. Returns {workers: [...]}. Gotcha: includes offline/stale rows — "
+            "check `status` (idle/busy = reachable) before pinning work to one."
+        ),
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
         "name": "roost_exec",
         "description": (
-            "Run a shell command on ONE specific fleet worker — no SSH. Hard-pins "
-            "a `command` job to the named node (by worker id OR name) through the "
-            "job channel, waits for it, and returns {job_id, state, exit_code, "
-            "output, worker}. For debugging/operating nodes that have no inbound "
-            "SSH and changing IPs. If the target matches no worker, or a NAME "
-            "matches several online workers, it errors (use an id). Set wait:false "
-            "to submit and return the job_id without blocking."
+            "Run a shell command on ONE specific fleet worker — no SSH. Reach for "
+            "this to operate/debug a node directly (changing IPs, no inbound SSH). "
+            "Hard-pins a `command` job to the named node (id OR name), waits for it, "
+            "and returns {job_id, state, exit_code, output, worker}. Gotcha: if a "
+            "NAME matches several online workers it errors — use an id; set "
+            "wait:false to submit and return the job_id without blocking."
         ),
         "inputSchema": {
             "type": "object",
@@ -234,6 +262,91 @@ TOOLS: list[dict[str, Any]] = [
             },
             "required": ["worker", "command"],
         },
+    },
+    {
+        "name": "stage_file",
+        "description": (
+            "Stage a LOCAL file into the control-plane blob store (POST /blobs) and "
+            "get back a PRESIGNED get_url that carries its own auth. Reach for this "
+            "when you want a worker/job to pull a file without handing it any "
+            "credentials — drop the get_url straight into a goal ('fetch <url> and "
+            "run it'). Returns {id, name, size, sha256, get_url, expires_at}. Gotcha: "
+            "it's a staging area, not a fileserver — blobs are size-capped and expire "
+            "(default 24h); pass ttl_sec to extend up to the CP's ceiling."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Local file to upload."},
+                "ttl_sec": {"type": "number",
+                            "description": "How long the staged blob lives (seconds). "
+                                           "Default 24h; clamped to the CP ceiling."},
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "send_file",
+        "description": (
+            "Push a LOCAL file TO a worker — the no-SSH `scp`. Stages the file, then "
+            "hard-pins a delivery `command` job to that node which mkdir -ps the "
+            "destination dir, curls the presigned blob, and sha256-verifies it "
+            "(exit 1 on mismatch). Reach for this to seed a node with a dataset, "
+            "script, or model. Returns {job_id, destination, worker, blob}; poll it "
+            "with roost_wait/roost_status. Gotcha: the destination is a path on the "
+            "REMOTE worker, and the parent dir is created for you."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "worker": {"type": "string",
+                           "description": "Target worker — its id OR name."},
+                "local_path": {"type": "string", "description": "Local file to send."},
+                "destination_path": {"type": "string",
+                                     "description": "Absolute path to write on the worker."},
+                "ttl_sec": {"type": "number",
+                            "description": "Blob TTL (seconds) — must outlast delivery."},
+            },
+            "required": ["worker", "local_path", "destination_path"],
+        },
+    },
+    {
+        "name": "fetch_file",
+        "description": (
+            "Pull a file FROM a worker to here — the reverse of send_file. Mints a "
+            "presigned upload slot, hard-pins a `command` job that curl -T uploads "
+            "the remote file into it, waits for that job, then downloads the blob to "
+            "local_path. Reach for this to retrieve a result/log/artifact off a node "
+            "with no inbound SSH. Returns {local_path, size, worker, job_id}. Gotcha: "
+            "this blocks until the remote upload finishes; local_path defaults to the "
+            "remote basename in the current directory."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "worker": {"type": "string",
+                           "description": "Source worker — its id OR name."},
+                "remote_path": {"type": "string",
+                                "description": "Absolute path to read on the worker."},
+                "local_path": {"type": "string",
+                               "description": "Where to write it locally "
+                                              "(default: basename in cwd)."},
+                "timeout_min": {"type": "number", "default": 5,
+                                "description": "Budget for the remote upload job."},
+            },
+            "required": ["worker", "remote_path"],
+        },
+    },
+    {
+        "name": "list_staged",
+        "description": (
+            "List files currently staged in the blob store (GET /blobs) with their "
+            "presigned get_urls. Use to see what's available to hand to a job, or to "
+            "find a stale upload. Returns {staged: [{id, name, size, sha256, state, "
+            "get_url, expires_at}]}. Gotcha: expired blobs are swept and won't appear; "
+            "a `pending` state means an upload (fetch) hasn't finished yet."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
     },
 ]
 
@@ -503,6 +616,179 @@ def tool_roost_exec(args: dict) -> dict:
     }
 
 
+# ---------- transfer tools (blob store: stage / send / fetch) ----------
+
+
+def _stage_blob(path: str, ttl_sec: Optional[float] = None) -> dict:
+    """Upload a local file to POST /blobs; return its public blob dict."""
+    import os.path as _osp
+
+    name = _osp.basename(path) or "blob"
+    with open(path, "rb") as f:
+        data = f.read()
+    params: dict[str, Any] = {"name": name}
+    if ttl_sec:
+        params["ttl_sec"] = ttl_sec
+    with _client() as c:
+        r = c.post("/blobs", params=params, content=data)
+        r.raise_for_status()
+        return r.json()
+
+
+def _resolve_worker(worker: str) -> dict:
+    """Resolve a worker id/name to its record (clear error on miss/ambiguity)."""
+    from . import cli as _cli
+
+    with _client() as c:
+        r = c.get("/workers")
+        r.raise_for_status()
+        workers = r.json()
+    return _cli._resolve_target(workers, worker)
+
+
+def _sha_check_cmd(os_name: str, sha256: str, dest: str) -> str:
+    """Shell snippet that verifies dest's sha256 == expected, exit 1 on mismatch.
+
+    Uses shasum on darwin (no coreutils sha256sum), sha256sum elsewhere.
+    """
+    if (os_name or "").lower() == "darwin":
+        got = f"$(shasum -a 256 {dest} | cut -d' ' -f1)"
+    else:
+        got = f"$(sha256sum {dest} | cut -d' ' -f1)"
+    return (f'got={got}; '
+            f'if [ "$got" != "{sha256}" ]; then '
+            f'echo "sha256 mismatch: $got != {sha256}" >&2; exit 1; fi')
+
+
+def tool_stage_file(args: dict) -> dict:
+    blob = _stage_blob(args["path"], args.get("ttl_sec"))
+    return {"id": blob["id"], "name": blob["name"], "size": blob["size"],
+            "sha256": blob["sha256"], "get_url": blob["get_url"],
+            "expires_at": blob["expires_at"]}
+
+
+def tool_send_file(args: dict) -> dict:
+    """Stage a local file, then hard-pin a delivery command job to the worker.
+
+    The job mkdir -ps the destination dir, curls the presigned blob, and verifies
+    the sha256 (exit 1 on mismatch) — sha256 the contract, the worker never sees a
+    credential. Pinned via requires.hostname (== the worker's capabilities.hostname).
+    """
+    try:
+        target = _resolve_worker(args["worker"])
+    except Exception as e:  # click.ClickException (or any) → clean tool error
+        return {"error": "bad_target", "detail": getattr(e, "message", str(e))}
+
+    caps = target.get("capabilities") or {}
+    hostname = caps.get("hostname")
+    if not hostname:
+        return {"error": "no_hostname",
+                "detail": f"worker {target.get('name')} advertises no hostname "
+                          "capability — cannot pin a delivery job to it."}
+
+    blob = _stage_blob(args["local_path"], args.get("ttl_sec"))
+    dest = args["destination_path"]
+    sha_check = _sha_check_cmd(caps.get("os"), blob["sha256"], dest)
+    command = (
+        f'set -e; mkdir -p "$(dirname {dest})"; '
+        f"curl -fsSL '{blob['get_url']}' -o {dest}; "
+        f"{sha_check}"
+    )
+
+    body: dict[str, Any] = {
+        "kind": "command",
+        "command": command,
+        "requires": {"hostname": f"=={hostname}"},
+        "budget": {"max_wallclock_min": 10},
+    }
+    parent = _parent_id()
+    if parent:
+        body["parent_job_id"] = parent
+    with _client() as c:
+        r = c.post("/jobs", json=body)
+        r.raise_for_status()
+        job = r.json()
+    return {"job_id": job.get("id"), "state": job.get("state"),
+            "destination": dest,
+            "worker": f"{target.get('name')} ({target.get('id')})",
+            "blob": {"id": blob["id"], "size": blob["size"], "sha256": blob["sha256"]},
+            "note": "delivery job submitted — poll roost_wait(job_id)/roost_status(job_id)."}
+
+
+def tool_fetch_file(args: dict) -> dict:
+    """Pull a remote file here: presign an upload slot, pin a curl -T upload job,
+    wait for it, then download the blob to local_path."""
+    import os.path as _osp
+
+    try:
+        target = _resolve_worker(args["worker"])
+    except Exception as e:
+        return {"error": "bad_target", "detail": getattr(e, "message", str(e))}
+
+    caps = target.get("capabilities") or {}
+    hostname = caps.get("hostname")
+    if not hostname:
+        return {"error": "no_hostname",
+                "detail": f"worker {target.get('name')} advertises no hostname "
+                          "capability — cannot pin a fetch job to it."}
+
+    remote = args["remote_path"]
+    local = args.get("local_path") or _osp.basename(remote) or "blob"
+
+    with _client() as c:
+        r = c.post("/blobs/presign", json={"name": _osp.basename(remote) or "blob"})
+        r.raise_for_status()
+        slot = r.json()
+
+    # The worker-side leg: PUT the remote file into the presigned slot.
+    command = f"curl -fsSL -T {remote} '{slot['put_url']}'"
+    body: dict[str, Any] = {
+        "kind": "command",
+        "command": command,
+        "requires": {"hostname": f"=={hostname}"},
+        "budget": {"max_wallclock_min": args.get("timeout_min", 5)},
+    }
+    parent = _parent_id()
+    if parent:
+        body["parent_job_id"] = parent
+    with _client() as c:
+        r = c.post("/jobs", json=body)
+        r.raise_for_status()
+        job = r.json()
+
+    final = tool_roost_wait({"job_id": job["id"],
+                             "timeout_sec": float(args.get("timeout_min", 5)) * 60})
+    if final.get("state") != "succeeded":
+        logs = tool_roost_logs({"job_id": job["id"], "limit": 200})
+        output = "\n".join(le.get("data", "") for le in logs.get("logs", []))
+        return {"error": "fetch_failed", "job_id": job.get("id"),
+                "state": final.get("state"), "detail": final.get("error"),
+                "output": output,
+                "note": "the remote upload job did not succeed; the file was not fetched."}
+
+    with _client() as c:
+        r = c.get(f"/blobs/{slot['id']}")
+        r.raise_for_status()
+        content = r.content
+    with open(local, "wb") as f:
+        f.write(content)
+    return {"local_path": _osp.abspath(local), "size": len(content),
+            "worker": f"{target.get('name')} ({target.get('id')})",
+            "job_id": job.get("id")}
+
+
+def tool_list_staged(_args: dict) -> dict:
+    with _client() as c:
+        r = c.get("/blobs")
+        r.raise_for_status()
+        blobs = r.json()
+    return {"staged": [
+        {"id": b["id"], "name": b["name"], "size": b["size"], "sha256": b["sha256"],
+         "state": b["state"], "get_url": b["get_url"], "expires_at": b["expires_at"]}
+        for b in blobs
+    ]}
+
+
 TOOL_IMPL = {
     "roost_do":           tool_roost_do,
     "roost_runs":         tool_roost_runs,
@@ -515,6 +801,10 @@ TOOL_IMPL = {
     "roost_cancel":  tool_roost_cancel,
     "roost_workers": tool_roost_workers,
     "roost_exec":    tool_roost_exec,
+    "stage_file":    tool_stage_file,
+    "send_file":     tool_send_file,
+    "fetch_file":    tool_fetch_file,
+    "list_staged":   tool_list_staged,
 }
 
 

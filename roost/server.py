@@ -29,10 +29,13 @@ from typing import Any, AsyncIterator, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import (
-    HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse,
+    FileResponse, HTMLResponse, JSONResponse, PlainTextResponse,
+    RedirectResponse, StreamingResponse,
 )
 from pydantic import BaseModel, Field
 
+from . import blobs as blobstore
+from . import publish as publishlib
 from . import triage
 from . import watcher
 from .matcher import matches, placement_score
@@ -784,9 +787,9 @@ def _score_worker_row(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def _inflight_count(conn: sqlite3.Connection, worker_id: str) -> int:
-    """Number of non-terminal jobs currently owned by this worker
-    (assigned/running/leased — i.e. ACTIVE_STATES). This is the work in flight
-    that gates capacity-based assignment."""
+    """Number of in-flight jobs currently owned by this worker
+    (state IN assigned/running). This is the work in flight that gates
+    capacity-based assignment."""
     row = conn.execute(
         "SELECT COUNT(*) AS n FROM jobs "
         "WHERE worker_id=? AND state IN ('assigned','running')",
@@ -1332,12 +1335,28 @@ def _list_enroll_tokens(db_path: Path) -> list[dict]:
         return [dict(r) for r in cur.fetchall()]
 
 
-# ---------- Scoped client tokens (`roost pair`) ----------
+# ---------- Scoped client tokens (`roost pair` / `roost token`) ----------
 #
-# A 'mobile' token is a long-lived bearer for thin clients (the phone apps).
-# It gets read access + job submit/cancel via require_any, and is explicitly
-# rejected by require_admin and require_worker — so it can never mint enroll
-# tokens, delete workers, or fetch /claude-creds.
+# A scoped api_token is a long-lived bearer for a *client* front door — a phone
+# app ('mobile'), a Codex / script integration ('agent'), anything that plugs
+# into your personal compute backend without being handed the admin token.
+# Both scopes authenticate as kind "client" and share ONE permission set; the
+# scope column is an audit/label distinction, not a privilege boundary.
+#
+#   scope → allowed verbs (enforced by require_any + explicit guards below):
+#     READ   GET  /derived /jobs* /workers /workers/{id}    (observe the fleet)
+#     SUBMIT POST /jobs                                       (queue work)
+#     CANCEL DELETE /jobs/{id}                                (cancel own/any job)
+#     BLOBS  POST /blobs, POST /blobs/presign, GET /blobs,
+#            GET /blobs/{id}                                  (stage/list/download)
+#
+#   client tokens are explicitly DENIED (require_admin / require_worker reject
+#   kind "client"): mint tokens (/enroll-tokens, /pair-tokens), enroll workers,
+#   revoke or prune workers, finalize jobs, read /claude-creds, DELETE /blobs,
+#   and every worker-plane endpoint (lease/poll/heartbeat/report, /triage-prompt).
+#
+# Allowed scope values; "mobile" stays the default for backward compatibility.
+API_TOKEN_SCOPES = ("mobile", "agent")
 
 
 def _mint_api_token(db_path: Path, label: Optional[str], scope: str = "mobile") -> dict:
@@ -1464,6 +1483,7 @@ class EnrollTokenRequest(BaseModel):
 
 class PairTokenRequest(BaseModel):
     label: Optional[str] = None
+    scope: Optional[str] = None  # "mobile" (default) | "agent"
 
 
 class HeartbeatPayload(BaseModel):
@@ -1471,7 +1491,7 @@ class HeartbeatPayload(BaseModel):
 
 
 class JobEvent(BaseModel):
-    type: str  # started | succeeded | failed | progress
+    type: str  # started | succeeded | failed | progress | declined
     attempt: Optional[int] = None
     exit_code: Optional[int] = None
     result: Any = None
@@ -1509,9 +1529,18 @@ def create_app(
     *,
     run_sweeper: bool = True,
     provision_claude_auth: bool = True,
+    publish_domain: Optional[str] = None,
 ) -> FastAPI:
     db = Path(db_path or os.environ.get("ROOST_DB", DEFAULT_DB))
     shared_token = token if token is not None else os.environ.get("ROOST_TOKEN", "")
+    # When set (e.g. "roost.pub"), published sites are addressable as
+    # https://<slug>.<domain>/ through a tunnel, and requests arriving under
+    # that domain can ONLY reach site content (see the host middleware below).
+    publish_domain = (
+        publish_domain
+        if publish_domain is not None
+        else os.environ.get("ROOST_PUBLISH_DOMAIN") or None
+    )
     _init_db(db)
 
     @asynccontextmanager
@@ -1530,10 +1559,54 @@ def create_app(
     app = FastAPI(title="Roost", version="0.2.0", lifespan=lifespan)
     app.state.db_path = db
     app.state.shared_token = shared_token
+    app.state.publish_domain = publish_domain
+
+    if publish_domain:
+        # PUBLIC-EDGE GUARD + host routing. The tunnel (cloudflared) forwards
+        # *.<publish_domain> to this same origin, so the Host header is the
+        # only thing separating "the internet" from "the LAN API". Any request
+        # arriving under the publish domain is answered HERE — site content
+        # only — and never falls through to the fleet API. A request for
+        # demo.<domain> serves sites/demo/ at the root.
+        @app.middleware("http")
+        async def public_host_router(request: Request, call_next):
+            host = request.headers.get("host", "")
+            hostname = host.split(":", 1)[0].strip().lower().rstrip(".")
+            apex = publish_domain.lower()
+            if hostname != apex and not hostname.endswith("." + apex):
+                return await call_next(request)  # LAN/API traffic: untouched
+
+            if request.method not in ("GET", "HEAD"):
+                return PlainTextResponse("method not allowed", status_code=405)
+
+            if hostname == apex:
+                # Apex: a one-line landing. Deliberately no site listing —
+                # published slugs are shared by their owners, not enumerated.
+                if request.url.path == "/":
+                    return HTMLResponse(
+                        "<!doctype html><title>roost</title>"
+                        "<body style='font-family:system-ui;text-align:center;"
+                        "padding-top:4rem'><h3>🐦 roost.pub</h3>"
+                        "<p>Sites published from someone's own fleet.</p>")
+                return PlainTextResponse("not found", status_code=404)
+
+            slug = publishlib.slug_for_host(hostname, publish_domain)
+            if slug is None:
+                return PlainTextResponse("not found", status_code=404)
+            served = await asyncio.to_thread(
+                publishlib.resolve_served_path, db, slug, request.url.path)
+            if served is None:
+                return PlainTextResponse("not found", status_code=404)
+            return FileResponse(served)
 
     def authenticate(request: Request, authorization: Optional[str] = Header(None)) -> dict:
-        """Returns dict with at least {kind: 'shared'|'worker'|'mobile'|'none',
-        worker?: dict, token?: dict}."""
+        """Returns dict with at least {kind: 'shared'|'worker'|'client'|'none',
+        worker?: dict, token?: dict, scope?: str}.
+
+        A scoped api_token (minted via /pair-tokens, any scope) authenticates as
+        kind "client": a non-admin, non-worker front door. require_admin and
+        require_worker both reject it; its allowed verbs are documented in the
+        scope→verbs matrix above."""
         if not shared_token:
             return {"kind": "none"}
         if not authorization or not authorization.startswith("Bearer "):
@@ -1547,7 +1620,11 @@ def create_app(
             return {"kind": "worker", "worker": worker}
         api_token = _api_token_by_hash(db, cred_hash)
         if api_token is not None:
-            return {"kind": "mobile", "token": api_token}
+            return {
+                "kind": "client",
+                "scope": api_token.get("scope") or "mobile",
+                "token": api_token,
+            }
         raise HTTPException(401, "invalid bearer token")
 
     def require_admin(principal: dict = Depends(authenticate)) -> dict:
@@ -1565,8 +1642,8 @@ def create_app(
             return principal  # admin can act as any worker
         if principal["kind"] == "worker":
             return principal
-        # 'mobile' lands here: thin clients never get worker-plane access
-        # (creds provisioning, lease/poll, heartbeat).
+        # 'client' (mobile/agent) lands here: front-door tokens never get
+        # worker-plane access (creds provisioning, lease/poll, heartbeat).
         raise HTTPException(403, "worker credential required")
 
     def require_matching_worker(
@@ -1629,14 +1706,21 @@ def create_app(
     async def list_tokens():
         return await asyncio.to_thread(_list_enroll_tokens, db)
 
-    # ---- mobile pairing (scoped client tokens) ----
+    # ---- client front-door tokens (scoped api_tokens: phones + agents) ----
 
     @app.post("/pair-tokens", dependencies=[Depends(require_admin)])
     async def mint_pair_token(payload: PairTokenRequest):
-        """Mint a long-lived 'mobile'-scoped token for a thin client (phone app).
+        """Mint a long-lived scoped token for a client front door — a phone
+        ('mobile', the default) or a Codex/script integration ('agent'). Both
+        scopes share the same client permission set (see the scope→verbs matrix);
+        the scope is an audit label, so an operator can tell phones from agents.
 
         The raw token is returned exactly once; only its hash is stored."""
-        return await asyncio.to_thread(_mint_api_token, db, payload.label, "mobile")
+        scope = payload.scope or "mobile"
+        if scope not in API_TOKEN_SCOPES:
+            raise HTTPException(
+                400, f"unknown scope {scope!r}; allowed: {', '.join(API_TOKEN_SCOPES)}")
+        return await asyncio.to_thread(_mint_api_token, db, payload.label, scope)
 
     @app.get("/pair-tokens", dependencies=[Depends(require_admin)])
     async def list_pair_tokens():
@@ -1899,6 +1983,238 @@ def create_app(
 
         return StreamingResponse(gen(), media_type="text/event-stream")
 
+    # ---- blob store (fleet file transfer staging — mac-app DESIGN.md §14) ----
+    # Presigned URLs let the worker-side leg (a normal command job) curl a
+    # blob without carrying credentials; tokens never enter job specs.
+
+    blob_secret = blobstore.get_secret(db)
+
+    def _store_body_stream(blob_id: str):
+        """Returns an async receiver that streams a request body to the blob
+        file with size-cap + sha256, returning (size, hexdigest)."""
+        async def receive(request: Request) -> tuple[int, str]:
+            path = blobstore.blob_path(db, blob_id)
+            digest = hashlib.sha256()
+            size = 0
+            with open(path, "wb") as f:
+                async for chunk in request.stream():
+                    size += len(chunk)
+                    if size > blobstore.BLOB_MAX_BYTES:
+                        f.close()
+                        path.unlink(missing_ok=True)
+                        raise HTTPException(
+                            413, f"blob exceeds {blobstore.BLOB_MAX_BYTES} bytes")
+                    digest.update(chunk)
+                    f.write(chunk)
+            return size, digest.hexdigest()
+        return receive
+
+    @app.post("/blobs")
+    async def upload_blob(
+        request: Request,
+        name: str = Query("blob"),
+        ttl_sec: Optional[float] = Query(None),
+        principal: dict = Depends(require_any),
+    ):
+        """Stage a file (raw body). Returns the blob with a presigned get_url."""
+        def _insert() -> dict:
+            with _connect(db) as conn:
+                return blobstore.insert_blob(
+                    conn, name, ttl_sec, "ready", principal["kind"])
+        row = await asyncio.to_thread(_insert)
+        size, sha = await _store_body_stream(row["id"])(request)
+        def _finalize() -> None:
+            with _connect(db) as conn:
+                blobstore.finalize_blob(conn, row["id"], size, sha)
+        await asyncio.to_thread(_finalize)
+        row.update(size=size, sha256=sha, state="ready")
+        return blobstore.public_dict(row, str(request.base_url), blob_secret)
+
+    @app.post("/blobs/presign")
+    async def presign_blob(
+        request: Request,
+        payload: Optional[dict[str, Any]] = None,
+        principal: dict = Depends(require_any),
+    ):
+        """Mint a pending blob + presigned put_url for a worker-side upload
+        (the fetch flow: a job PUTs the file here, the operator downloads)."""
+        payload = payload or {}
+        def _insert() -> dict:
+            with _connect(db) as conn:
+                return blobstore.insert_blob(
+                    conn, payload.get("name") or "blob",
+                    payload.get("ttl_sec"), "pending", principal["kind"])
+        row = await asyncio.to_thread(_insert)
+        return blobstore.public_dict(row, str(request.base_url), blob_secret)
+
+    @app.put("/blobs/{blob_id}")
+    async def put_blob(
+        blob_id: str, request: Request,
+        exp: int = Query(...), sig: str = Query(...),
+    ):
+        """Presigned upload leg — no bearer needed; the signature IS the auth."""
+        if not blobstore.verify_sig(blob_secret, blob_id, exp, "put", sig):
+            raise HTTPException(403, "invalid or expired signature")
+        def _get() -> Optional[dict]:
+            with _connect(db) as conn:
+                return blobstore.get_blob(conn, blob_id)
+        row = await asyncio.to_thread(_get)
+        if row is None:
+            raise HTTPException(404, "blob not found")
+        size, sha = await _store_body_stream(blob_id)(request)
+        def _finalize() -> None:
+            with _connect(db) as conn:
+                blobstore.finalize_blob(conn, blob_id, size, sha)
+        await asyncio.to_thread(_finalize)
+        return {"id": blob_id, "size": size, "sha256": sha, "state": "ready"}
+
+    @app.get("/blobs/{blob_id}")
+    async def download_blob(
+        blob_id: str,
+        request: Request,
+        exp: Optional[int] = Query(None),
+        sig: Optional[str] = Query(None),
+        authorization: Optional[str] = Header(None),
+    ):
+        """Download: bearer token OR presigned exp/sig (for worker-side jobs)."""
+        presigned_ok = (
+            exp is not None and sig is not None
+            and blobstore.verify_sig(blob_secret, blob_id, exp, "get", sig)
+        )
+        if not presigned_ok:
+            authenticate(request, authorization)  # raises 401 when bad
+        def _get() -> Optional[dict]:
+            with _connect(db) as conn:
+                return blobstore.get_blob(conn, blob_id)
+        row = await asyncio.to_thread(_get)
+        if row is None or row["expires_at"] <= time.time():
+            raise HTTPException(404, "blob not found or expired")
+        if row["state"] != "ready":
+            raise HTTPException(409, "blob upload not finished")
+        path = blobstore.blob_path(db, blob_id)
+        if not path.is_file():
+            raise HTTPException(410, "blob file missing")
+        return FileResponse(
+            path, filename=row["name"], media_type="application/octet-stream")
+
+    @app.get("/blobs", dependencies=[Depends(require_any)])
+    async def list_blobs_endpoint(request: Request):
+        def _list() -> list[dict]:
+            with _connect(db) as conn:
+                return blobstore.list_blobs(conn)
+        rows = await asyncio.to_thread(_list)
+        return [blobstore.public_dict(r, str(request.base_url), blob_secret)
+                for r in rows]
+
+    # Admin-only: a client token may stage/list/download blobs (it needs file
+    # transfer) but not delete them — deletion is fleet janitorial, not a client
+    # verb. (Was require_any, which let any client token wipe another's blob.)
+    @app.delete("/blobs/{blob_id}", dependencies=[Depends(require_admin)])
+    async def delete_blob_endpoint(blob_id: str):
+        def _delete() -> bool:
+            with _connect(db) as conn:
+                return blobstore.delete_blob(db, conn, blob_id)
+        ok = await asyncio.to_thread(_delete)
+        if not ok:
+            raise HTTPException(404, "blob not found")
+        return {"deleted": True}
+
+    # ---- static publish (built thing → real URL on your own CP) ----
+    # The publishing loop is the bottleneck for people who just built something:
+    # `roost publish ./site` tars the dir, uploads a blob, and POST /publish
+    # extracts it into <data_dir>/sites/<slug>/ — live at GET /pub/<slug>/.
+    # Agents publish too — that's the point — so a client (agent-scoped) token
+    # may POST /publish; deletion stays admin-only (janitorial, like blobs).
+
+    @app.post("/publish")
+    async def publish_site(
+        request: Request,
+        payload: dict[str, Any],
+        principal: dict = Depends(require_any),
+    ):
+        """Extract a previously-uploaded tar.gz blob into a live static site."""
+        if principal["kind"] not in ("shared", "none", "client"):
+            raise HTTPException(403, "publish requires admin or a client token")
+        blob_id = (payload or {}).get("blob_id")
+        if not blob_id:
+            raise HTTPException(400, "blob_id is required")
+
+        def _load_blob() -> Optional[dict]:
+            with _connect(db) as conn:
+                return blobstore.get_blob(conn, blob_id)
+        blob = await asyncio.to_thread(_load_blob)
+        if blob is None or blob["expires_at"] <= time.time():
+            raise HTTPException(404, "blob not found or expired")
+        if blob["state"] != "ready":
+            raise HTTPException(409, "blob upload not finished")
+
+        # Default the name to the blob's stem, dropping a tar.gz/tgz/tar suffix
+        # (the CLI uploads "<name>.tar.gz").
+        default_name = blob["name"]
+        for suffix in (".tar.gz", ".tgz", ".tar"):
+            if default_name.endswith(suffix):
+                default_name = default_name[: -len(suffix)]
+                break
+        else:
+            default_name = Path(default_name).stem
+        name = (payload or {}).get("name") or default_name or "site"
+        slug = publishlib.normalize_slug(name)
+        if slug is None:
+            raise HTTPException(
+                400, "invalid site name: slug must match ^[a-z0-9][a-z0-9-]{0,39}$")
+
+        tar_path = blobstore.blob_path(db, blob_id)
+        if not tar_path.is_file():
+            raise HTTPException(410, "blob file missing")
+
+        def _install() -> dict:
+            try:
+                size, files = publishlib.extract_bundle(db, slug, tar_path)
+            except publishlib.PublishError as e:
+                raise HTTPException(e.status, e.detail)
+            with _connect(db) as conn:
+                return publishlib.upsert_site(
+                    conn, slug, size, files, principal["kind"])
+        row = await asyncio.to_thread(_install)
+        return publishlib.public_dict(row, str(request.base_url), publish_domain)
+
+    @app.get("/publish", dependencies=[Depends(require_any)])
+    async def list_sites_endpoint(request: Request):
+        def _list() -> list[dict]:
+            with _connect(db) as conn:
+                return publishlib.list_sites(conn)
+        rows = await asyncio.to_thread(_list)
+        return [publishlib.public_dict(r, str(request.base_url), publish_domain)
+                for r in rows]
+
+    @app.delete("/publish/{slug}", dependencies=[Depends(require_admin)])
+    async def unpublish_site(slug: str):
+        def _delete() -> bool:
+            with _connect(db) as conn:
+                return publishlib.delete_site(db, conn, slug)
+        ok = await asyncio.to_thread(_delete)
+        if not ok:
+            raise HTTPException(404, "site not found")
+        return {"unpublished": True, "slug": slug}
+
+    # Public static serving. UNAUTHENTICATED on purpose — a published site is
+    # meant to be reachable by anyone with the URL (that's the whole point).
+    # Tradeoff: on a LAN/Tailscale-exposed CP this exposes the site to that
+    # network; keep nothing secret in a published bundle.
+    @app.get("/pub/{slug}")
+    async def serve_site_root(slug: str):
+        return RedirectResponse(url=f"/pub/{slug}/", status_code=307)
+
+    @app.get("/pub/{slug}/{path:path}")
+    async def serve_site(slug: str, path: str = ""):
+        # resolve_served_path enforces the in-site commonpath check (belt and
+        # braces over the filtered extraction) and the index.html / SPA fallback.
+        file_path = await asyncio.to_thread(
+            publishlib.resolve_served_path, db, slug, path)
+        if file_path is None:
+            raise HTTPException(404, "not found")
+        return FileResponse(file_path)
+
     # ---- worker plane ----
 
     @app.post("/workers/register")
@@ -2074,6 +2390,14 @@ async def _sweep_loop(db_path: Path) -> None:
                 )
             except Exception as e:  # noqa: BLE001
                 print(f"[roost] log prune error: {e}", flush=True)
+            # Expired staged blobs ride the same throttle (file + row).
+            try:
+                def _prune_blobs() -> None:
+                    with _connect(db_path) as conn:
+                        blobstore.prune_expired(db_path, conn)
+                await asyncio.to_thread(_prune_blobs)
+            except Exception as e:  # noqa: BLE001
+                print(f"[roost] blob prune error: {e}", flush=True)
         try:
             await asyncio.sleep(SWEEPER_INTERVAL)
         except asyncio.CancelledError:
@@ -2183,6 +2507,7 @@ def run(
     token: Optional[str] = None,
     provision_claude_auth: bool = True,
     insecure: bool = False,
+    publish_domain: Optional[str] = None,
 ) -> None:
     import uvicorn
 
@@ -2222,5 +2547,6 @@ def run(
             flush=True,
         )
     app = create_app(db_path=db_path, token=token,
-                     provision_claude_auth=provision_claude_auth)
+                     provision_claude_auth=provision_claude_auth,
+                     publish_domain=publish_domain)
     uvicorn.run(app, host=host, port=port, log_level="info")

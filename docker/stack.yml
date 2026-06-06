@@ -24,6 +24,10 @@ services:
               "--db", "/data/roost.db", "--provision-auth"]
     environment:
       ROOST_TOKEN: ${ROOST_TOKEN:?set ROOST_TOKEN}
+      # Public domain for published sites (e.g. roost.pub). When set, requests
+      # for <slug>.<domain> serve that site only (API unreachable under it) and
+      # `roost publish` prints the shareable https URL. Empty = LAN-only.
+      ROOST_PUBLISH_DOMAIN: ${ROOST_PUBLISH_DOMAIN:-}
     ports:
       - "8787:8787"
     volumes:

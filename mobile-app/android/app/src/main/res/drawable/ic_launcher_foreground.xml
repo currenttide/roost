@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Minimal vector mark: a stylized "roost" perch. Keeps APK tiny (no PNGs). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#E6F0FF"
+        android:pathData="M54,30 L72,48 L66,48 L66,72 L42,72 L42,48 L36,48 Z" />
+    <path
+        android:fillColor="#E6F0FF"
+        android:pathData="M40,76 L68,76 L68,80 L40,80 Z" />
+</vector>

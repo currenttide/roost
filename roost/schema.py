@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import sqlite3
 
-CURRENT_VERSION = 9
+CURRENT_VERSION = 11
 
-# Full V1 schema for fresh installs.
+# Full current (V11) schema for fresh installs.
 SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS workers (
     id              TEXT PRIMARY KEY,
@@ -109,6 +109,27 @@ CREATE TABLE IF NOT EXISTS api_tokens (
     revoked       INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash);
+
+CREATE TABLE IF NOT EXISTS blobs (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    size        INTEGER NOT NULL DEFAULT 0,
+    sha256      TEXT,
+    state       TEXT NOT NULL DEFAULT 'ready',  -- pending (awaiting PUT) | ready
+    created_at  REAL NOT NULL,
+    expires_at  REAL NOT NULL,
+    created_by  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_blobs_expiry ON blobs(expires_at);
+
+CREATE TABLE IF NOT EXISTS sites (
+    slug        TEXT PRIMARY KEY,
+    size        INTEGER NOT NULL DEFAULT 0,
+    file_count  INTEGER NOT NULL DEFAULT 0,
+    created_at  REAL NOT NULL,
+    updated_at  REAL NOT NULL,
+    created_by  TEXT
+);
 """
 
 # V8 → V9 (scoped client tokens: `roost pair` for the mobile apps).
@@ -123,6 +144,33 @@ CREATE TABLE IF NOT EXISTS api_tokens (
     revoked       INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash);
+"""
+
+# V9 → V10 (blob store: fleet file transfer staging, mac-app DESIGN.md §14).
+_BLOBS_DDL = """
+CREATE TABLE IF NOT EXISTS blobs (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    size        INTEGER NOT NULL DEFAULT 0,
+    sha256      TEXT,
+    state       TEXT NOT NULL DEFAULT 'ready',  -- pending (awaiting PUT) | ready
+    created_at  REAL NOT NULL,
+    expires_at  REAL NOT NULL,
+    created_by  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_blobs_expiry ON blobs(expires_at);
+"""
+
+# V10 → V11 (static publish: sites served at /pub/<slug>/ from the CP).
+_SITES_DDL = """
+CREATE TABLE IF NOT EXISTS sites (
+    slug        TEXT PRIMARY KEY,
+    size        INTEGER NOT NULL DEFAULT 0,
+    file_count  INTEGER NOT NULL DEFAULT 0,
+    created_at  REAL NOT NULL,
+    updated_at  REAL NOT NULL,
+    created_by  TEXT
+);
 """
 
 # V0 → V1 additive migration. Each entry is (column_name, full DDL fragment).
@@ -237,6 +285,14 @@ def migrate(conn: sqlite3.Connection) -> int:
     if version < 9:
         # V8 → V9: scoped client tokens (`roost pair` for the mobile apps).
         conn.executescript(_API_TOKENS_DDL)
+
+    if version < 10:
+        # V9 → V10: blob store (fleet file transfer staging).
+        conn.executescript(_BLOBS_DDL)
+
+    if version < 11:
+        # V10 → V11: static publish (sites served at /pub/<slug>/).
+        conn.executescript(_SITES_DDL)
 
     conn.execute(f"PRAGMA user_version = {CURRENT_VERSION}")
     return CURRENT_VERSION
