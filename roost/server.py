@@ -30,7 +30,7 @@ from typing import Any, AsyncIterator, Optional
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import (
     FileResponse, HTMLResponse, JSONResponse, PlainTextResponse,
-    RedirectResponse, StreamingResponse,
+    RedirectResponse, Response, StreamingResponse,
 )
 from pydantic import BaseModel, Field
 
@@ -2330,7 +2330,12 @@ def create_app(
                 return job
             remaining = end - asyncio.get_event_loop().time()
             if remaining <= 0:
-                return JSONResponse(status_code=204, content=None)
+                # 204 No Content MUST carry no body. JSONResponse(content=None)
+                # serialises to b"null" with Content-Length: 4, so the empty-body
+                # 204 then overruns its declared length and uvicorn raises
+                # "Response content longer than Content-Length" on every idle poll
+                # (which any wrapping middleware surfaces). A bare Response is empty.
+                return Response(status_code=204)
             await asyncio.sleep(min(0.5, remaining))
 
     @app.post(

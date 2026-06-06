@@ -142,6 +142,9 @@ def test_capability_mismatch_stays_queued(client: TestClient):
     client.post("/jobs", json={"command": "true", "requires": {"gpu_vram_gb": ">=99999"}})
     r = client.get(f"/workers/{worker_id}/poll", params={"timeout": 0}, headers=wh)
     assert r.status_code == 204  # no match → nothing assigned
+    # A 204 must carry no body — a JSON-serialised None would overrun Content-Length
+    # and make uvicorn raise on every idle poll.
+    assert r.content == b""
 
 
 def test_revoke_blocks_worker(client: TestClient):
