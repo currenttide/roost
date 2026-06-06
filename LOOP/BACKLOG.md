@@ -55,7 +55,7 @@ Done-when: leading-dash (and empty) values rejected for all spec-sourced argv po
 Surface: backend/robustness. *(Re-scoped 2026-06-05: `max_wallclock_min`/`_sec` IS enforced — budget→`timeout_s`→`wait_for` + `killpg` on timeout, roost/worker.py:1602–1607, 1916–1924.)* Residual: a job that sets no budget gets `timeout_s=None` and runs unbounded, holding a capacity slot forever.
 Done-when: sane default cap (config-overridable, per job kind) applied when no budget is set; timeout reported distinctly from `failed`; tests for both the default and an explicit override; pytest green.
 
-### R3. Reconcile still-running jobs after lease expiry + re-register — `open`
+### R3. Reconcile still-running jobs after lease expiry + re-register — `done` *(2026-06-06)*
 Surface: backend/robustness. *(Re-scoped 2026-06-05: the worker DOES track consecutive heartbeat failures and forces re-register, roost/worker.py:~1185.)* Residual: during a CP outage longer than LEASE_TTL (60s), the server sweeps the job to `lease_expired`/re-queues it while the original worker is still running it → possible duplicate execution; post-re-register reconciliation semantics are undefined.
 Done-when: semantics chosen + documented (abort local work on re-register, or report-and-dedupe on reconnect); test simulates a CP outage past the TTL; pytest green.
 

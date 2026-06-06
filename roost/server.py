@@ -453,6 +453,19 @@ def _recently_cancelled_for_worker(db_path: Path, worker_id: str) -> list[str]:
     return [r["id"] for r in rows]
 
 
+def _owned_job_ids(db_path: Path, worker_id: str) -> list[str]:
+    """[R3] Job ids the control plane currently attributes to this worker
+    (assigned/running). Returned on every heartbeat so a worker that kept
+    running through a CP outage can abort attempts the sweeper has since
+    requeued elsewhere (lease reconciliation) instead of duplicating work."""
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT id FROM jobs WHERE worker_id=? AND state IN ('assigned','running')",
+            (worker_id,),
+        ).fetchall()
+    return [r["id"] for r in rows]
+
+
 def _cancel_job(db_path: Path, job_id: str, cascade: bool) -> int:
     """Cancel a job (and optionally its subtree). Returns count cancelled."""
     now = time.time()
@@ -2271,7 +2284,11 @@ def create_app(
         # running process / docker container (cancel can't push under the pull
         # model; this is the back-channel).
         cancelled = await asyncio.to_thread(_recently_cancelled_for_worker, db, worker_id)
-        return {"ok": True, "cancel": cancelled}
+        # [R3] Also report which jobs we still attribute to this worker, so it
+        # can abort local attempts whose lease was swept during a CP outage
+        # (additive field; older workers ignore it).
+        owned = await asyncio.to_thread(_owned_job_ids, db, worker_id)
+        return {"ok": True, "cancel": cancelled, "owned": owned}
 
     @app.get("/workers/{worker_id}/poll", dependencies=[Depends(require_matching_worker)])
     async def poll(worker_id: str, timeout: float = Query(POLL_HOLD_MAX, ge=0, le=POLL_HOLD_MAX)):

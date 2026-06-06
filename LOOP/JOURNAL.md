@@ -131,3 +131,32 @@ Entries are written by the loop; humans read, never need to edit.
 - Notes: cap values are judgment calls (runaway breakers, not schedulers) —
   flagged for human review in the PR. R1's journal Branch/PR line backfilled
   with PR #10 in this commit (carry-over noted last iteration).
+
+## 2026-06-06 05:31 UTC — R3: Reconcile still-running jobs after lease expiry + re-register
+- Verdict: shipped
+- Branch/PR: loop/r3-lease-reconciliation / (PR pending judge)
+- What changed: semantics CHOSEN and documented — abort orphaned local work on
+  reconcile (vs. report-and-dedupe), since the server has already requeued and a
+  stale terminal report is rejected anyway. Server: heartbeat response gains an
+  additive `owned` field (`_owned_job_ids`). Worker: (1) `_reconcile_owned` —
+  after a successful heartbeat, kill active jobs the server no longer attributes
+  to us, guarded by LEASE_LOST_GRACE=90s (> LEASE_TTL) so just-leased jobs are
+  never reaped; (2) `_reap_stale_attempt` — a re-lease of a job we still run
+  kills the stale attempt and waits for it to fully unwind before the new one
+  starts (fixes the _active/_job_tasks job_id-key collision, which would have
+  cross-wired the attempts' tracking); (3) teardown reasons extended:
+  `lease_lost` joins `cancelled` as a report-nothing teardown, prints show the
+  real reason. README documents the lease/outage behavior.
+- Evidence:
+  - `python -m pytest -q` → 379 passed in 11.71s (was 374; +5, none removed)
+  - live smoke (scratch CP :8797, REAL 75s CP outage with `sleep 300` running, LEASE_TTL=60s):
+    - during outage: job stayed `running` attempt 1 locally; on CP restart the sweeper had requeued it (`queued 1`)
+    - worker heartbeat reconcile: `lease lost (server no longer attributes it to us); aborting local attempt` → `torn down (lease_lost)` (worker.log)
+    - job re-leased and `running` attempt 2; old attempt-1 process group confirmed dead (pgrep), exactly one fresh process tree
+    - no stale terminal event posted (attempt 2 untouched by attempt 1's teardown)
+- Judge: (filled after verdict)
+- Models: implementer claude-opus-4-8 / judge (filled after verdict)
+- Notes: one test fix mid-iteration: outage-sim test originally left w1 online,
+  and the placer kept preferring it — marking w1 offline (faithful to a real
+  outage) fixed placement to w2. Wire change is additive (older workers ignore
+  `owned`; older servers send none and the worker skips reconcile).
