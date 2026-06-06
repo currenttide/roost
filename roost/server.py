@@ -1536,6 +1536,62 @@ def _read_host_claude_creds() -> Optional[str]:
 CLAUDE_INSTALL_CMD = "curl -fsSL https://claude.ai/install.sh | bash"
 
 
+class _PublicHostRouter:
+    """Public-edge guard for the publish domain — as a PURE-ASGI middleware.
+
+    Requests arriving under <publish_domain> (via the tunnel) are answered here
+    with site content only and never fall through to the fleet API. Everything
+    else (LAN/API traffic) is passed straight through at the ASGI layer.
+
+    This is deliberately NOT a Starlette ``@app.middleware('http')``
+    (``BaseHTTPMiddleware``): that wrapper re-streams every response, which raises
+    "Response content longer than Content-Length" on 204 (idle worker long-poll)
+    and on streaming (SSE) responses — it fired thousands of times and
+    destabilised worker polling. A pure-ASGI pass-through never touches those.
+    """
+
+    def __init__(self, app, *, db: Path, publish_domain: str) -> None:
+        self.app = app
+        self.db = db
+        self.publish_domain = publish_domain
+        self.apex = publish_domain.lower()
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope.get("type") != "http":
+            return await self.app(scope, receive, send)
+        host = ""
+        for k, v in scope.get("headers") or []:
+            if k == b"host":
+                host = v.decode("latin-1")
+                break
+        hostname = host.split(":", 1)[0].strip().lower().rstrip(".")
+        if hostname != self.apex and not hostname.endswith("." + self.apex):
+            return await self.app(scope, receive, send)  # LAN/API: untouched
+        resp = await self._site_response(scope.get("method", "GET"),
+                                         hostname, scope.get("path", "/"))
+        await resp(scope, receive, send)
+
+    async def _site_response(self, method: str, hostname: str, path: str):
+        if method not in ("GET", "HEAD"):
+            return PlainTextResponse("method not allowed", status_code=405)
+        if hostname == self.apex:
+            if path == "/":
+                return HTMLResponse(
+                    "<!doctype html><title>roost</title>"
+                    "<body style='font-family:system-ui;text-align:center;"
+                    "padding-top:4rem'><h3>🐦 roost.pub</h3>"
+                    "<p>Sites published from someone's own fleet.</p>")
+            return PlainTextResponse("not found", status_code=404)
+        slug = publishlib.slug_for_host(hostname, self.publish_domain)
+        if slug is None:
+            return PlainTextResponse("not found", status_code=404)
+        served = await asyncio.to_thread(
+            publishlib.resolve_served_path, self.db, slug, path)
+        if served is None:
+            return PlainTextResponse("not found", status_code=404)
+        return FileResponse(served)
+
+
 def create_app(
     db_path: Optional[Path] = None,
     token: Optional[str] = None,
@@ -1576,41 +1632,13 @@ def create_app(
 
     if publish_domain:
         # PUBLIC-EDGE GUARD + host routing. The tunnel (cloudflared) forwards
-        # *.<publish_domain> to this same origin, so the Host header is the
-        # only thing separating "the internet" from "the LAN API". Any request
-        # arriving under the publish domain is answered HERE — site content
-        # only — and never falls through to the fleet API. A request for
-        # demo.<domain> serves sites/demo/ at the root.
-        @app.middleware("http")
-        async def public_host_router(request: Request, call_next):
-            host = request.headers.get("host", "")
-            hostname = host.split(":", 1)[0].strip().lower().rstrip(".")
-            apex = publish_domain.lower()
-            if hostname != apex and not hostname.endswith("." + apex):
-                return await call_next(request)  # LAN/API traffic: untouched
-
-            if request.method not in ("GET", "HEAD"):
-                return PlainTextResponse("method not allowed", status_code=405)
-
-            if hostname == apex:
-                # Apex: a one-line landing. Deliberately no site listing —
-                # published slugs are shared by their owners, not enumerated.
-                if request.url.path == "/":
-                    return HTMLResponse(
-                        "<!doctype html><title>roost</title>"
-                        "<body style='font-family:system-ui;text-align:center;"
-                        "padding-top:4rem'><h3>🐦 roost.pub</h3>"
-                        "<p>Sites published from someone's own fleet.</p>")
-                return PlainTextResponse("not found", status_code=404)
-
-            slug = publishlib.slug_for_host(hostname, publish_domain)
-            if slug is None:
-                return PlainTextResponse("not found", status_code=404)
-            served = await asyncio.to_thread(
-                publishlib.resolve_served_path, db, slug, request.url.path)
-            if served is None:
-                return PlainTextResponse("not found", status_code=404)
-            return FileResponse(served)
+        # *.<publish_domain> to this same origin, so the Host header is the only
+        # thing separating "the internet" from "the LAN API". Any request arriving
+        # under the publish domain is answered with site content only and never
+        # falls through to the fleet API. Implemented as a PURE-ASGI middleware
+        # (see _PublicHostRouter) so it does NOT re-stream pass-through API
+        # responses — a BaseHTTPMiddleware here broke 204/SSE responses.
+        app.add_middleware(_PublicHostRouter, db=db, publish_domain=publish_domain)
 
     def authenticate(request: Request, authorization: Optional[str] = Header(None)) -> dict:
         """Returns dict with at least {kind: 'shared'|'worker'|'client'|'none',

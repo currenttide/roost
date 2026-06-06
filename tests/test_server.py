@@ -1365,3 +1365,22 @@ def test_install_script_pins_python_and_real_source(client: TestClient):
     assert "git+https://github.com" in body
     # Opt-in claude install flag is documented/handled.
     assert "--with-claude" in body
+
+
+def test_publish_middleware_passthrough_and_routing(tmp_path: Path):
+    # Pure-ASGI publish router: LAN/API traffic passes straight through (so 204/SSE
+    # responses are never re-streamed), publish-domain hosts get site content only.
+    db = tmp_path / "roost.db"
+    app = server.create_app(db_path=db, token="t", run_sweeper=False, publish_domain="roost.pub")
+    with TestClient(app) as c:
+        # LAN/API traffic (normal host) is untouched.
+        assert c.get("/healthz").status_code == 200
+        # Apex host → landing page, never the API.
+        r = c.get("/", headers={"host": "roost.pub"})
+        assert r.status_code == 200 and "roost.pub" in r.text
+        # Apex non-root → 404 (no API leak under the public domain).
+        assert c.get("/workers", headers={"host": "roost.pub"}).status_code == 404
+        # Unknown slug subdomain → 404.
+        assert c.get("/", headers={"host": "nope.roost.pub"}).status_code == 404
+        # A non-publish host still reaches the API (auth-gated, not routed to publish).
+        assert c.get("/healthz", headers={"host": "192.168.1.193:8787"}).status_code == 200
