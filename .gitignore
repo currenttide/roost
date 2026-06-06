@@ -35,3 +35,7 @@ mac-app/.build/
 *.swp
 .idea/
 .vscode/
+
+# Swift (mac-app)
+.build/
+.swiftpm/

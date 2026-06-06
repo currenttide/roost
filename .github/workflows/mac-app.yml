@@ -1,0 +1,37 @@
+# Roost for Mac — CI (DESIGN.md §11)
+# RoostKit (client + models) tests run on Linux for every PR touching mac-app;
+# the full app type-checks and builds on a macOS runner.
+name: mac-app
+
+on:
+  push:
+    branches: [master]
+    paths: ["mac-app/**", ".github/workflows/mac-app.yml"]
+  pull_request:
+    paths: ["mac-app/**", ".github/workflows/mac-app.yml"]
+
+jobs:
+  roostkit-linux:
+    name: RoostKit tests (Linux)
+    runs-on: ubuntu-22.04
+    container: swift:6.0-jammy
+    steps:
+      - uses: actions/checkout@v4
+      - name: swift test
+        working-directory: mac-app
+        run: swift test
+
+  app-macos:
+    name: App build + tests (macOS)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: swift build
+        working-directory: mac-app
+        run: swift build
+      - name: swift test
+        working-directory: mac-app
+        run: swift test
+      - name: assemble Roost.app
+        working-directory: mac-app
+        run: ./scripts/build.sh

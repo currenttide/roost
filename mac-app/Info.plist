@@ -2,15 +2,24 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key><string>Roost Fleet</string>
-    <key>CFBundleDisplayName</key><string>Roost Fleet</string>
-    <key>CFBundleIdentifier</key><string>com.roost.fleet.console</string>
-    <key>CFBundleVersion</key><string>1.0</string>
-    <key>CFBundleShortVersionString</key><string>1.0</string>
+    <key>CFBundleName</key><string>Roost</string>
+    <key>CFBundleDisplayName</key><string>Roost</string>
+    <key>CFBundleIdentifier</key><string>com.roost.mac</string>
+    <key>CFBundleVersion</key><string>1</string>
+    <key>CFBundleShortVersionString</key><string>0.1.0</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleExecutable</key><string>RoostFleet</string>
-    <key>LSMinimumSystemVersion</key><string>11.0</string>
-    <key>LSUIElement</key><false/>
+    <key>CFBundleExecutable</key><string>RoostMac</string>
+    <key>LSMinimumSystemVersion</key><string>14.0</string>
+    <!-- menu bar app: no Dock icon by default (a setting flips activation policy) -->
+    <key>LSUIElement</key><true/>
     <key>NSHighResolutionCapable</key><true/>
+    <!-- Plain-HTTP control planes are common on LANs/Tailscale (DESIGN.md §6).
+         The app warns in Settings instead of blocking. -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsArbitraryLoads</key><true/>
+        <key>NSAllowsLocalNetworking</key><true/>
+    </dict>
+    <key>NSHumanReadableCopyright</key><string>Roost — open source fleet orchestrator</string>
 </dict>
 </plist>
