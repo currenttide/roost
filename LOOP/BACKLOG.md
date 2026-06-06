@@ -19,12 +19,12 @@ Direction anchor for the improvement loop (see `PROTOCOL.md` for the rules).
 
 ## Iteration 0 — verification plumbing (do first)
 
-### I0. Prove the verification paths the loop will rely on — `open`
+### I0. Prove the verification paths the loop will rely on — `done` *(2026-06-05, journal entry)*
 Surface: tooling/fleet. The loop's honesty depends on these working before any feature claims.
-- [ ] Fix admin auth: `roost workers` currently 401s against `http://127.0.0.1:8787` (CP pings OK, v0.2.0). Wire the right token via config/env — never commit it.
-- [ ] Repoint the installed `roost` CLI: it currently resolves to `/workspace/yang/agent_fleet/roost/cli.py`, a different checkout. Install from this repo (`uv tool install --python 3.12 -e .` or equivalent) so smoke tests exercise this code.
-- [ ] Confirm the Mac node: enrolled, online, and has Xcode — prove it with a trivial Roost job (`xcodebuild -version`, `xcrun simctl list devices | head`).
-- [ ] Artifact round-trip: a Mac job produces a file (e.g. a `simctl` screenshot of a booted simulator) and ships it back via the blob store; verify it lands intact.
+- [x] Fix admin auth: token from `~/roost-fleet/admin_token` wired into `~/.config/roost/config.toml` (0600, outside repo); `roost workers` lists 16 nodes.
+- [x] Repoint the installed `roost` CLI: editable install now maps to `/workspace/yang/roost-oss/roost` (was `/workspace/yang/agent_fleet`), Python 3.12.8.
+- [x] Confirm the Mac node: `roost exec mac-mini-m4` → Xcode 26.2 (17C52), simulator list returned, iPhone 17 Pro booted, exit 0.
+- [x] Artifact round-trip: presigned blob `ab1499820fe3`; Mac `simctl` screenshot (280,802 B PNG) PUT from the Mac, downloaded here; sha256 `5381727b…` identical at all three hops.
 - [x] Hygiene: add `mac-app/.build/` to `.gitignore` — done 2026-06-05, pre-loop.
 
 Done-when: the four remaining proven with evidence in the journal; the Mac path either works
@@ -132,3 +132,4 @@ first iteration on that ratchet measures and records it here (no code changes).
 - Mobile push notifications (DESIGN.md v1.1 — ntfy/UnifiedPush)
 - Interactive follow-up to running agent jobs (DESIGN.md §3.2, v2)
 - Mac app follow-ups (the native SwiftPM app lands with I1; webview wrapper is the deleted PoC — never resurrect it)
+- Version drift: running CP self-reports 0.2.0, pyproject.toml says 0.1.0 — single-source the version (found during I0, 2026-06-06)
