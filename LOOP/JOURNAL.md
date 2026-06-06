@@ -72,3 +72,28 @@ Entries are written by the loop; humans read, never need to edit.
   (always)" authorization granted 2026-06-06 (AskUserQuestion). I0's deviation
   is now healed — LOOP/ lives on master; this entry's PR targets master
   normally. feat/mobile-app branch left in place (PR closed with note).
+
+## 2026-06-06 04:56 UTC — R1: Harden docker argv assembly against flag injection
+- Verdict: shipped
+- Branch/PR: loop/r1-docker-argv-hardening / (PR pending judge)
+- What changed: new `_argv_value(what, value)` guard in roost/worker.py — rejects
+  empty/whitespace-only and leading-dash (incl. whitespace-masked) values for every
+  spec-sourced `docker run` argv position: image, gpus, cpus, memory, shm_size,
+  network, workdir, each volumes entry. In-container `command` elements deliberately
+  NOT restricted (they land after the image where docker stops flag parsing;
+  leading dashes there are legitimate, e.g. ["ls", "-la"]) — rationale in a code
+  comment. 12 new tests: the `image: "--privileged"` escalation, each container
+  field, volume entries, whitespace-masking, empties, and a legit-spec regression.
+- Evidence:
+  - `python -m pytest -q` → 359 passed in 9.60s (was 347; +12 new, none removed)
+- Judge: approve (round 1) — re-ran pytest (359 passed in 9.87s), verified no
+  test deletions, confirmed all 8 argv positions guarded incl. the
+  `container.image` fallback, probed adversarially (whitespace/newline/tab
+  masks, bare "-", unicode dashes, NUL byte, env path) and found no bypass;
+  command-exemption rationale verified empirically.
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (explicit
+  `model: sonnet` override; the judge's verdict text dropped its mandatory
+  first-line model ID — a same-override probe re-confirmed claude-sonnet-4-6;
+  logged as a formatting slip, not a model substitution)
+- Notes: scope held to Done-when; no drive-bys. Env keys/values were already
+  positionally safe (consumed by `-e`) and policy-filtered by `_sanitize_env`.
