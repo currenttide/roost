@@ -27,6 +27,9 @@ admin_token
 # Local Claude Code settings (machine-specific; may contain tokens)
 .claude/settings.local.json
 
+# SwiftPM build artifacts (mac-app)
+mac-app/.build/
+
 # OS / editor
 .DS_Store
 *.swp

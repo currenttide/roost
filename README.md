@@ -2,18 +2,22 @@
 
 # Roost
 
-**Turn your scattered machines into one fleet you run by just saying what you want.**
+**Your scattered machines become one agent-pluggable fleet — any agent app can run work
+on it, verify it, and publish from it.**
 
-Drive laptops, servers, Raspberry Pis, GPU boxes, and cloud VMs from a single control
-plane. State a goal in plain language — Roost picks the right node, runs it, and an
-independent verifier checks it actually worked before telling you it succeeded.
+Roost is the **personal compute-and-hosting backend that any agent plugs into**. Agent
+apps — Claude Code, the Claude app, the Codex app, plain CLI, the phone apps — are the
+**front doors**: they own intent capture and conversation. Roost is **the building**:
+execution on hardware you own, independent verification (the trust loop), file movement,
+durable serving, and receipts. The verbs are the product — **run · verify · transfer ·
+serve/publish · observe · schedule** — and it's **model-vendor-neutral by construction**.
 
 ```bash
 roost up                                    # zero → a running fleet-of-one
 roost do "report the GPU model and free VRAM on a GPU box"
 ```
 
-[Quickstart](#quickstart) · [The trust loop](#the-trust-loop) · [Dashboard](#dashboard) · [Talk to it](#talk-to-your-fleet-mcp) · [Job kinds](#job-kinds--precise-control) · [Architecture](#architecture)
+[Plug your agent in](#plug-your-agent-in) · [Quickstart](#quickstart) · [The trust loop](#the-trust-loop) · [Dashboard](#dashboard) · [Talk to it](#talk-to-your-fleet-mcp) · [Job kinds](#job-kinds--precise-control) · [Architecture](#architecture)
 
 </div>
 
@@ -41,10 +45,12 @@ Wi-Fi, WSL, and the cloud — especially now that a lot of the work you want to 
 
 ## What Roost does
 
-**Roost is that missing middle.** One lightweight control plane turns your scattered
-machines into a fleet you hand work to in plain language. You don't pick a node, choose a
-job kind, or write a spec — you say what you want, and Roost routes it, runs it, and
-**verifies the result**.
+**Roost is that missing middle — the backend your agents plug into.** One lightweight
+control plane turns your scattered machines into a fleet that *any* agent app can hand
+work to. The front door (Claude Code, the Claude app, Codex, a script, a phone) owns the
+conversation; Roost owns the **work**: it routes a plain-language goal to the right node,
+runs it, and **verifies the result**. You don't pick a node, choose a job kind, or write
+a spec.
 
 Under the hood it's a **pull-based** orchestrator: workers long-poll the control plane,
 lease a job, heartbeat while running, and report results — so a Pi on home Wi-Fi and a
@@ -58,6 +64,24 @@ What makes it more than a job queue:
 - **Verified, not just "exit 0".** Every agentic job is independently checked; "succeeded" means a verifier confirmed the goal was met — and a wrong result self-heals before failing honestly.
 - **Self-selecting workers.** Hand a plain task to the fleet and a free worker's own agent decides if it's a good fit or routes it onward — correct GPU placement with zero `requires`.
 - **You can watch it.** A live web panel, a terminal dashboard, and an MCP server all render the same model: what's running, its health, its cost, and its evidence.
+
+---
+
+## Plug your agent in
+
+Roost is the building; your agent app is the front door. Point any agent at one control
+plane and it gets the whole verb surface — **run · verify · transfer · serve/publish · observe ·
+schedule**.
+
+- **Claude Code (CLI):** `claude mcp add roost -- roost mcp` (with `ROOST_URL`/`ROOST_TOKEN`).
+- **Claude app / desktop:** the same MCP server as a remote connector (needs a reachable
+  LAN/tailscale URL).
+- **Codex / anything HTTP:** bearer token, `POST /jobs` with `{kind: "auto", task: …}`,
+  then poll `GET /jobs/{id}` or stream `/jobs/{id}/stream`.
+- **Scripts / cron:** `roost do` / `roost exec` / `roost submit` one-liners.
+
+Mint a scoped token for non-admin front doors with `roost pair`. Full copy-paste recipes
+per front door: **[docs/INTEGRATIONS.md](docs/INTEGRATIONS.md)**.
 
 ---
 
@@ -196,7 +220,7 @@ inbox of recent runs), **`roost_result`** (the verified outcome + evidence for a
 ## Job kinds & precise control
 
 `roost do` covers the common case. When you want exact control, write a spec and
-`roost submit spec.yaml` (add `--detach` to not block). There are four kinds:
+`roost submit spec.yaml` (add `--detach` to not block). There are five kinds:
 
 | Kind | What it runs | Where it lands |
 |------|--------------|----------------|
@@ -347,7 +371,7 @@ mac-app/build.sh http://<control-plane-host>:8787 "<admin-token>"
 
 ```bash
 uv tool install --python 3.12 --with pytest .    # or: pip install -e ".[dev]"
-python -m pytest -q                               # 161 tests
+python -m pytest -q                               # 347 tests
 ```
 
 Contributions welcome. Keep credentials and machine-specific config out of commits

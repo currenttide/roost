@@ -4,7 +4,7 @@ Linux  → systemd user unit at ~/.config/systemd/user/roost-worker.service
         (loginctl enable-linger so it survives logout).
 macOS  → launchd LaunchAgent at ~/Library/LaunchAgents/com.roost.worker.plist
         (KeepAlive=true).
-Other  → falls back to printing a process-supervisor stanza and exits 2.
+Other  → returns exit 2 with a message to run `roost worker` under your own supervisor.
 
 This module shells out to systemctl / launchctl rather than reimplementing
 service management. Each entry point returns (rc, message).

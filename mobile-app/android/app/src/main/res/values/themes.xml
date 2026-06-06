@@ -1,0 +1,9 @@
+<resources>
+    <!-- Material3 dynamic-color-ready base. Actual colors come from the Compose
+         theme (Theme.kt); this XML theme only needs to be a Material3 parent so
+         the system bars and splash behave, with no action bar (Compose draws all UI). -->
+    <style name="Theme.RoostMobile" parent="android:Theme.Material.NoActionBar">
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:windowBackground">@android:color/black</item>
+    </style>
+</resources>

@@ -1,0 +1,30 @@
+{
+  "capable_workers": null,
+  "cost": {
+    "cost_est_usd": 0.0,
+    "tokens_used": 0
+  },
+  "created_at": 1780712549.7668097,
+  "decline_count": 0,
+  "diagnosis": null,
+  "eta_sec": null,
+  "evidence": null,
+  "finished_at": null,
+  "goal": "bump deps and run the test suite",
+  "health": {
+    "reason": "uv lock --upgrade ...",
+    "status": "running"
+  },
+  "idle_sec": 0.1,
+  "last_activity": "uv lock --upgrade ...",
+  "narration": "uv lock --upgrade ...",
+  "phase": "running",
+  "progress": null,
+  "queued_sec": null,
+  "result": "",
+  "root_job_id": "122f4a8dc8c9",
+  "run_id": "122f4a8dc8c9",
+  "state": "running",
+  "verified": null,
+  "worker": "2b18a6ff7587"
+}
