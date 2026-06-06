@@ -16,6 +16,7 @@ Control plane / fleet:
     roost enroll-token       (admin) mint a single-use enrollment token
     roost revoke <worker>    (admin) revoke a worker's credential
     roost pair               (admin) pair a phone: scoped mobile token + QR
+    roost token              (admin) mint a scoped client token (Codex/scripts)
 
 This machine:
 
@@ -886,6 +887,49 @@ def _print_qr(data: str) -> bool:
     return True
 
 
+def _admin_403(verb: str) -> click.ClickException:
+    return click.ClickException(
+        f"admin auth required to {verb} (use the shared --token/ROOST_TOKEN)")
+
+
+def _list_client_tokens(c) -> None:
+    """Shared by `roost pair --list` and `roost token --list`."""
+    r = c.get("/pair-tokens")
+    if r.status_code == 403:
+        raise _admin_403("list tokens")
+    r.raise_for_status()
+    rows = r.json()
+    if not rows:
+        click.echo("no client tokens")
+        return
+    for t in rows:
+        state = "revoked" if t["revoked"] else "active"
+        used = _rel_time(t["last_used_at"]) if t["last_used_at"] else "never"
+        click.echo(f"{t['id']}  {state:8}  scope={t['scope']}  "
+                   f"last used {used}  {t['label'] or ''}")
+
+
+def _revoke_client_token(c, token_id: str) -> None:
+    """Shared by `roost pair --revoke` and `roost token --revoke`."""
+    r = c.delete(f"/pair-tokens/{token_id}")
+    if r.status_code == 403:
+        raise _admin_403("revoke a token")
+    if r.status_code == 404:
+        raise click.ClickException("token not found (or already revoked)")
+    r.raise_for_status()
+    click.echo(f"revoked {token_id}")
+
+
+def _mint_client_token(c, label: Optional[str], scope: str) -> dict:
+    """Mint a scoped client token; returns the minted row (token shown once)."""
+    r = c.post("/pair-tokens", json={"label": label, "scope": scope})
+    if r.status_code == 403:
+        raise _admin_403("mint a token")
+    if r.status_code >= 400:
+        raise click.ClickException(f"mint failed: HTTP {r.status_code}: {r.text}")
+    return r.json()
+
+
 @cli.command()
 @click.option("--label", default=None,
               help="Device label for audit (e.g. 'yang-iphone')")
@@ -899,37 +943,17 @@ def pair(ctx: click.Context, label: Optional[str], list_: bool,
 
     The mobile scope can read fleet state and submit/cancel jobs, but can
     never mint enroll tokens, touch workers, or fetch Claude credentials.
+    For a Codex/script front door (no QR), use `roost token --scope agent`.
     """
     url, _, _ = _resolve(ctx)
     with _ctx_client(ctx) as c:
         if list_:
-            r = c.get("/pair-tokens")
-            if r.status_code == 403:
-                raise click.ClickException("admin auth required (use the shared --token/ROOST_TOKEN)")
-            r.raise_for_status()
-            rows = r.json()
-            if not rows:
-                click.echo("no paired tokens")
-                return
-            for t in rows:
-                state = "revoked" if t["revoked"] else "active"
-                used = _rel_time(t["last_used_at"]) if t["last_used_at"] else "never"
-                click.echo(f"{t['id']}  {state:8}  scope={t['scope']}  "
-                           f"last used {used}  {t['label'] or ''}")
+            _list_client_tokens(c)
             return
         if revoke_id:
-            r = c.delete(f"/pair-tokens/{revoke_id}")
-            if r.status_code == 404:
-                raise click.ClickException("token not found (or already revoked)")
-            r.raise_for_status()
-            click.echo(f"revoked {revoke_id}")
+            _revoke_client_token(c, revoke_id)
             return
-        r = c.post("/pair-tokens", json={"label": label})
-        if r.status_code == 403:
-            raise click.ClickException("admin auth required (use the shared --token/ROOST_TOKEN)")
-        if r.status_code >= 400:
-            raise click.ClickException(f"pair failed: HTTP {r.status_code}: {r.text}")
-        tok = r.json()
+        tok = _mint_client_token(c, label, "mobile")
 
     if any(h in url for h in ("127.0.0.1", "localhost")):
         click.echo("warning: control plane URL is loopback — the phone can't reach it.")
@@ -940,6 +964,46 @@ def pair(ctx: click.Context, label: Optional[str], list_: bool,
     click.echo(f"pairing uri: {uri}")
     click.echo(f"token id:    {tok['id']}  (revoke later: roost pair --revoke {tok['id']})")
     click.echo("scan the QR with the Roost app, or paste the URI into its pairing screen.")
+
+
+@cli.command()
+@click.option("--label", default=None,
+              help="Token label for audit (e.g. 'codex', 'ci-script')")
+@click.option("--scope", default="agent",
+              type=click.Choice(["agent", "mobile"]),
+              help="Token scope (default: agent — for Codex/scripts)")
+@click.option("--list", "list_", is_flag=True, help="List client tokens")
+@click.option("--revoke", "revoke_id", default=None, metavar="TOKEN_ID",
+              help="Revoke a client token by id")
+@click.pass_context
+def token(ctx: click.Context, label: Optional[str], scope: str,
+          list_: bool, revoke_id: Optional[str]) -> None:
+    """(Admin) Mint a scoped client token for an agent front door (Codex, the
+    Codex app, scripts) — your personal compute backend without the admin token.
+
+    Prints the token ONCE plus a ready-to-paste env snippet. The token can read
+    fleet state, submit/cancel jobs, and use the blob store for file transfer,
+    but can never mint tokens, enroll/revoke workers, finalize jobs, or read
+    Claude credentials. Shares plumbing with `roost pair` (phones).
+    """
+    url, _, _ = _resolve(ctx)
+    with _ctx_client(ctx) as c:
+        if list_:
+            _list_client_tokens(c)
+            return
+        if revoke_id:
+            _revoke_client_token(c, revoke_id)
+            return
+        tok = _mint_client_token(c, label, scope)
+
+    if any(h in url for h in ("127.0.0.1", "localhost")):
+        click.echo("note: control plane URL is loopback — a remote client can't reach it.")
+        click.echo("      re-run with --url http://<LAN-or-tailscale-address>:8787\n")
+    click.echo(f"token id: {tok['id']}  scope={tok['scope']}  "
+               f"(revoke later: roost token --revoke {tok['id']})")
+    click.echo("\npaste into the client's environment (shown once):\n")
+    click.echo(f"  export ROOST_URL={url}")
+    click.echo(f"  export ROOST_TOKEN={tok['token']}")
 
 
 @cli.command()
@@ -1317,6 +1381,106 @@ def mcp(ctx: click.Context) -> None:
     os.environ["ROOST_URL"] = url
     os.environ["ROOST_TOKEN"] = token or ""
     _mcp.main()
+
+
+# ---------- publish (built thing → real URL on your own CP) ----------
+
+
+def _tar_site(src: Path) -> bytes:
+    """Tar.gz a directory with members relative to it (arcname='.'), in memory.
+
+    Includes everything except a top-level .git directory."""
+    import io
+    import tarfile
+
+    def _filter(info: "tarfile.TarInfo") -> Optional["tarfile.TarInfo"]:
+        name = info.name.lstrip("./")
+        if name == ".git" or name.startswith(".git/"):
+            return None
+        return info
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        tar.add(str(src), arcname=".", filter=_filter)
+    return buf.getvalue()
+
+
+def _print_sites(c) -> None:
+    r = c.get("/publish")
+    if r.status_code == 403:
+        raise _admin_403("list sites")
+    r.raise_for_status()
+    rows = r.json()
+    if not rows:
+        click.echo("no published sites")
+        return
+    for s in rows:
+        click.echo(f"{s['slug']:20}  {s['files']:>5} files  "
+                   f"{s['size'] / 1024:.0f} KB  {s['url']}")
+
+
+@cli.command()
+@click.argument("directory", required=False,
+                type=click.Path(exists=True, file_okay=False))
+@click.option("--name", default=None,
+              help="Site name / slug (default: the directory name).")
+@click.option("--list", "list_", is_flag=True, help="List published sites.")
+@click.option("--unpublish", "unpublish_slug", default=None, metavar="SLUG",
+              help="Remove a published site.")
+@click.pass_context
+def publish(ctx: click.Context, directory: Optional[str], name: Optional[str],
+            list_: bool, unpublish_slug: Optional[str]) -> None:
+    """Publish a built directory as a live site on your own control plane.
+
+    One command, end to end: tars the directory, uploads it via the blob store,
+    and the CP extracts it — live at <cp-url>/pub/<slug>/ immediately. Rebuild
+    and re-run to republish (same name replaces the site).
+    """
+    url, _, _ = _resolve(ctx)
+    with _ctx_client(ctx) as c:
+        if list_:
+            _print_sites(c)
+            return
+        if unpublish_slug:
+            r = c.delete(f"/publish/{unpublish_slug}")
+            if r.status_code == 403:
+                raise _admin_403("unpublish a site")
+            if r.status_code == 404:
+                raise click.ClickException("site not found")
+            r.raise_for_status()
+            click.echo(f"unpublished {unpublish_slug}")
+            return
+
+        if not directory:
+            raise click.ClickException(
+                "give a directory to publish, or use --list / --unpublish")
+        src = Path(directory)
+        if not (src / "index.html").is_file():
+            click.echo("warning: no index.html at the top level "
+                       "(publishing anyway — it may be assets).")
+
+        slug_name = name or src.resolve().name
+        bundle = _tar_site(src)
+        up = c.post(f"/blobs?name={slug_name}.tar.gz", content=bundle)
+        if up.status_code >= 400:
+            raise click.ClickException(
+                f"upload failed: HTTP {up.status_code}: {up.text}")
+        blob_id = up.json()["id"]
+
+        r = c.post("/publish", json={"name": slug_name, "blob_id": blob_id})
+        if r.status_code == 403:
+            raise _admin_403("publish")
+        if r.status_code >= 400:
+            raise click.ClickException(
+                f"publish failed: HTTP {r.status_code}: {r.text}")
+        site = r.json()
+
+    click.echo(f"live: {site['url']}")
+    click.echo(f"      {site['files']} files, {site['size'] / 1024:.0f} KB")
+    if any(h in url for h in ("127.0.0.1", "localhost")):
+        click.echo("note: control plane URL is loopback — only reachable from this "
+                   "machine.\n      re-run with --url http://<LAN-or-tailscale-address>:8787 "
+                   "to share it.")
 
 
 # ---------- jobs ----------
