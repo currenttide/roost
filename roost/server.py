@@ -29,10 +29,11 @@ from typing import Any, AsyncIterator, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import (
-    HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse,
+    FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse,
 )
 from pydantic import BaseModel, Field
 
+from . import blobs as blobstore
 from . import triage
 from . import watcher
 from .matcher import matches, placement_score
@@ -1899,6 +1900,139 @@ def create_app(
 
         return StreamingResponse(gen(), media_type="text/event-stream")
 
+    # ---- blob store (fleet file transfer staging — mac-app DESIGN.md §14) ----
+    # Presigned URLs let the worker-side leg (a normal command job) curl a
+    # blob without carrying credentials; tokens never enter job specs.
+
+    blob_secret = blobstore.get_secret(db)
+
+    def _store_body_stream(blob_id: str):
+        """Returns an async receiver that streams a request body to the blob
+        file with size-cap + sha256, returning (size, hexdigest)."""
+        async def receive(request: Request) -> tuple[int, str]:
+            path = blobstore.blob_path(db, blob_id)
+            digest = hashlib.sha256()
+            size = 0
+            with open(path, "wb") as f:
+                async for chunk in request.stream():
+                    size += len(chunk)
+                    if size > blobstore.BLOB_MAX_BYTES:
+                        f.close()
+                        path.unlink(missing_ok=True)
+                        raise HTTPException(
+                            413, f"blob exceeds {blobstore.BLOB_MAX_BYTES} bytes")
+                    digest.update(chunk)
+                    f.write(chunk)
+            return size, digest.hexdigest()
+        return receive
+
+    @app.post("/blobs")
+    async def upload_blob(
+        request: Request,
+        name: str = Query("blob"),
+        ttl_sec: Optional[float] = Query(None),
+        principal: dict = Depends(require_any),
+    ):
+        """Stage a file (raw body). Returns the blob with a presigned get_url."""
+        def _insert() -> dict:
+            with _connect(db) as conn:
+                return blobstore.insert_blob(
+                    conn, name, ttl_sec, "ready", principal["kind"])
+        row = await asyncio.to_thread(_insert)
+        size, sha = await _store_body_stream(row["id"])(request)
+        def _finalize() -> None:
+            with _connect(db) as conn:
+                blobstore.finalize_blob(conn, row["id"], size, sha)
+        await asyncio.to_thread(_finalize)
+        row.update(size=size, sha256=sha, state="ready")
+        return blobstore.public_dict(row, str(request.base_url), blob_secret)
+
+    @app.post("/blobs/presign")
+    async def presign_blob(
+        request: Request,
+        payload: Optional[dict[str, Any]] = None,
+        principal: dict = Depends(require_any),
+    ):
+        """Mint a pending blob + presigned put_url for a worker-side upload
+        (the fetch flow: a job PUTs the file here, the operator downloads)."""
+        payload = payload or {}
+        def _insert() -> dict:
+            with _connect(db) as conn:
+                return blobstore.insert_blob(
+                    conn, payload.get("name") or "blob",
+                    payload.get("ttl_sec"), "pending", principal["kind"])
+        row = await asyncio.to_thread(_insert)
+        return blobstore.public_dict(row, str(request.base_url), blob_secret)
+
+    @app.put("/blobs/{blob_id}")
+    async def put_blob(
+        blob_id: str, request: Request,
+        exp: int = Query(...), sig: str = Query(...),
+    ):
+        """Presigned upload leg — no bearer needed; the signature IS the auth."""
+        if not blobstore.verify_sig(blob_secret, blob_id, exp, "put", sig):
+            raise HTTPException(403, "invalid or expired signature")
+        def _get() -> Optional[dict]:
+            with _connect(db) as conn:
+                return blobstore.get_blob(conn, blob_id)
+        row = await asyncio.to_thread(_get)
+        if row is None:
+            raise HTTPException(404, "blob not found")
+        size, sha = await _store_body_stream(blob_id)(request)
+        def _finalize() -> None:
+            with _connect(db) as conn:
+                blobstore.finalize_blob(conn, blob_id, size, sha)
+        await asyncio.to_thread(_finalize)
+        return {"id": blob_id, "size": size, "sha256": sha, "state": "ready"}
+
+    @app.get("/blobs/{blob_id}")
+    async def download_blob(
+        blob_id: str,
+        request: Request,
+        exp: Optional[int] = Query(None),
+        sig: Optional[str] = Query(None),
+        authorization: Optional[str] = Header(None),
+    ):
+        """Download: bearer token OR presigned exp/sig (for worker-side jobs)."""
+        presigned_ok = (
+            exp is not None and sig is not None
+            and blobstore.verify_sig(blob_secret, blob_id, exp, "get", sig)
+        )
+        if not presigned_ok:
+            authenticate(request, authorization)  # raises 401 when bad
+        def _get() -> Optional[dict]:
+            with _connect(db) as conn:
+                return blobstore.get_blob(conn, blob_id)
+        row = await asyncio.to_thread(_get)
+        if row is None or row["expires_at"] <= time.time():
+            raise HTTPException(404, "blob not found or expired")
+        if row["state"] != "ready":
+            raise HTTPException(409, "blob upload not finished")
+        path = blobstore.blob_path(db, blob_id)
+        if not path.is_file():
+            raise HTTPException(410, "blob file missing")
+        return FileResponse(
+            path, filename=row["name"], media_type="application/octet-stream")
+
+    @app.get("/blobs", dependencies=[Depends(require_any)])
+    async def list_blobs_endpoint(request: Request):
+        def _list() -> list[dict]:
+            with _connect(db) as conn:
+                return blobstore.list_blobs(conn)
+        rows = await asyncio.to_thread(_list)
+        return [blobstore.public_dict(r, str(request.base_url), blob_secret)
+                for r in rows]
+
+    @app.delete("/blobs/{blob_id}", dependencies=[Depends(require_any)])
+    async def delete_blob_endpoint(blob_id: str):
+        def _delete() -> bool:
+            with _connect(db) as conn:
+                return blobstore.delete_blob(db, conn, blob_id)
+        ok = await asyncio.to_thread(_delete)
+        if not ok:
+            raise HTTPException(404, "blob not found")
+        return {"deleted": True}
+
     # ---- worker plane ----
 
     @app.post("/workers/register")
@@ -2074,6 +2208,14 @@ async def _sweep_loop(db_path: Path) -> None:
                 )
             except Exception as e:  # noqa: BLE001
                 print(f"[roost] log prune error: {e}", flush=True)
+            # Expired staged blobs ride the same throttle (file + row).
+            try:
+                def _prune_blobs() -> None:
+                    with _connect(db_path) as conn:
+                        blobstore.prune_expired(db_path, conn)
+                await asyncio.to_thread(_prune_blobs)
+            except Exception as e:  # noqa: BLE001
+                print(f"[roost] blob prune error: {e}", flush=True)
         try:
             await asyncio.sleep(SWEEPER_INTERVAL)
         except asyncio.CancelledError:
