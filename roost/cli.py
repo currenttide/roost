@@ -1498,6 +1498,111 @@ def publish(ctx: click.Context, directory: Optional[str], name: Optional[str],
                    "to share it.")
 
 
+# ---------- schedule (run work on an interval) ----------
+
+
+def _fmt_interval(sec: float) -> str:
+    """Compact human interval: 30s / 5m / 6h / 1d."""
+    for unit, div in (("d", 86400), ("h", 3600), ("m", 60)):
+        if sec >= div and sec % div == 0:
+            return f"{sec / div:.0f}{unit}"
+    return f"{sec:.0f}s"
+
+
+def _print_schedules(c) -> None:
+    r = c.get("/schedules")
+    r.raise_for_status()
+    rows = r.json()
+    if not rows:
+        click.echo("no schedules")
+        return
+    now = time.time()
+    for s in rows:
+        goal = (s["spec"].get("task") or s["spec"].get("intent")
+                or s["spec"].get("command") or "?")
+        if isinstance(goal, list):
+            goal = " ".join(str(g) for g in goal)
+        state = "on " if s["enabled"] else "OFF"
+        click.echo(f"{s['id']}  [{state}] every {_fmt_interval(s['interval_sec'])}  "
+                   f"next in {_fmt_interval(max(0.0, s['next_run_at'] - now))}  "
+                   f"{s['name'] or ''}  {str(goal)[:60]}")
+
+
+@cli.command()
+@click.argument("goal", required=False)
+@click.option("--every", default=None,
+              help="Interval: seconds or <N>[smhd] (e.g. 30m, 6h). Min 30s.")
+@click.option("--spec", "spec_path", default=None,
+              type=click.Path(exists=True, allow_dash=True),
+              help="Full job spec (YAML/JSON file or -) instead of a plain goal.")
+@click.option("--name", default=None, help="Label for the schedule.")
+@click.option("--list", "list_", is_flag=True, help="List schedules.")
+@click.option("--rm", "rm_id", default=None, metavar="ID", help="Delete a schedule.")
+@click.option("--enable", "enable_id", default=None, metavar="ID")
+@click.option("--disable", "disable_id", default=None, metavar="ID")
+@click.pass_context
+def schedule(ctx: click.Context, goal: Optional[str], every: Optional[str],
+             spec_path: Optional[str], name: Optional[str], list_: bool,
+             rm_id: Optional[str], enable_id: Optional[str],
+             disable_id: Optional[str]) -> None:
+    """Run work on an interval — the `schedule` verb.
+
+    \b
+    roost schedule "check disk space on every box" --every 6h
+    roost schedule --spec nightly.yaml --every 1d --name nightly
+    roost schedule --list / --rm ID / --disable ID / --enable ID
+
+    The control plane enqueues a job from the spec every interval (first run
+    one interval after creation). If the previous run is still going, that
+    beat is skipped — runs never pile up. Missed beats while the control
+    plane is down are not back-filled.
+    """
+    with _ctx_client(ctx) as c:
+        if list_:
+            _print_schedules(c)
+            return
+        if rm_id:
+            r = c.delete(f"/schedules/{rm_id}")
+            if r.status_code == 404:
+                raise click.ClickException("schedule not found")
+            r.raise_for_status()
+            click.echo(f"deleted {rm_id}")
+            return
+        if enable_id or disable_id:
+            sid = enable_id or disable_id
+            r = c.patch(f"/schedules/{sid}", json={"enabled": bool(enable_id)})
+            if r.status_code == 404:
+                raise click.ClickException("schedule not found")
+            r.raise_for_status()
+            s = r.json()
+            if s["enabled"]:
+                click.echo(f"{sid} enabled — next run in "
+                           f"{_fmt_interval(s['interval_sec'])}")
+            else:
+                click.echo(f"{sid} disabled")
+            return
+
+        if not every:
+            raise click.ClickException(
+                "give --every (e.g. --every 30m), or use --list / --rm")
+        if spec_path:
+            body_spec = _load_spec(spec_path)
+        elif goal:
+            # The roost-do shape: a kind:auto task — a worker self-assesses
+            # fit and the independent verifier checks the outcome.
+            body_spec = {"kind": "auto", "task": goal}
+        else:
+            raise click.ClickException("give a goal or --spec to schedule")
+        r = c.post("/schedules",
+                   json={"spec": body_spec, "every": every, "name": name})
+        if r.status_code >= 400:
+            raise click.ClickException(
+                f"schedule failed: HTTP {r.status_code}: {r.text}")
+        s = r.json()
+        every_h = _fmt_interval(s["interval_sec"])
+        click.echo(f"scheduled {s['id']}: every {every_h}, first run in {every_h}")
+
+
 # ---------- jobs ----------
 
 

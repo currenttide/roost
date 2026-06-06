@@ -120,7 +120,7 @@ The verbs are the product — model-vendor-neutral by construction.
 | **verify** | independent verifier on every `kind: auto` run (`verify: true`) | the trust loop — returns evidence, not just exit 0 |
 | **transfer** | blob store: `POST /blobs`, `PUT/GET /blobs/{id}` | move files between front door and fleet |
 | **observe** | `roost_runs` / `roost_status` / `GET /derived` / `/panel` | live state, health, cost, evidence |
-| **schedule** | drive `roost do` / `POST /jobs` from cron or a scheduled agent | run work on an interval |
+| **schedule** | `roost schedule "<goal>" --every 6h` / `roost_schedule` / `POST /schedules` | the CP enqueues the job every interval |
 | **serve / publish** | `roost publish ./site` / `POST /publish` → `GET /pub/<slug>/` | static site live on your own CP |
 
 ---
@@ -150,3 +150,28 @@ Agents publish too — a scoped **client** token (`roost token --scope agent`) m
 public is the point — so don't put secrets in a bundle, and note that a LAN/Tailscale-
 exposed CP exposes the site to that network. Sites live on disk + in the `sites` table,
 so they survive control-plane restarts.
+
+## schedule — run work on an interval
+
+```sh
+roost schedule "check disk space on every box" --every 6h
+roost schedule --spec nightly.yaml --every 1d --name nightly
+roost schedule --list / --rm <id> / --disable <id> / --enable <id>
+```
+
+The control plane stores the job spec and its tick (riding the sweeper) enqueues a
+job from it every interval — `POST /schedules {spec, every, name?}`, where `every`
+is seconds or `<N>[smhd]` (min 30s). A plain goal schedules a `kind: auto` task, so
+each run gets a self-selected node and the independent verifier. Agents get the
+same verb via the `roost_schedule` MCP tool; client (phone/agent) tokens may manage
+schedules, the worker plane may not.
+
+Semantics, chosen for predictability over completeness:
+
+- **First run** fires one interval after creation (and after re-enable).
+- **No pile-up**: if the schedule's previous job is still queued/running, that beat
+  is skipped — the clock still advances.
+- **No back-fill**: beats missed while the CP was down are skipped; `next_run_at`
+  advances on the original cadence grid.
+- Every enqueued job carries `schedule_id` in its spec for provenance; schedules
+  survive restarts (`schedules` table).
