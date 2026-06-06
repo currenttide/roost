@@ -239,3 +239,37 @@ Entries are written by the loop; humans read, never need to edit.
   Proposed: publish UI wiring (iOS/Android screens) as follow-up. PR #13
   (rescued CP fixes) still awaits the human; R6 branched before it — merge
   order is safe (no overlapping edits).
+
+## 2026-06-06 23:55 UTC — R7: Atomic publish call
+- Verdict: shipped
+- Branch/PR: loop/r7-atomic-publish / https://github.com/currenttide/roost/pull/15
+- What changed: Done-when option (a) — ONE transactional call. POST /publish
+  dispatches on Content-Type: a non-JSON body + ?name= streams the tar.gz to a
+  private temp file (`.upload-<slug>-<hex>` under sites/, removed in finally),
+  extract_bundle installs atomically, and NO blob row ever exists — the
+  dangling-blob flap window is eliminated structurally, not reconciled. JSON
+  {blob_id,name?} two-step stays byte-compatible (worker presign path), now
+  parsed manually (garbage JSON → clean 400, was framework 422). `roost
+  publish` uses the one-shot call with a two-step fallback on 422 (pre-one-shot
+  CPs reject a raw body with exactly 422; a current server can never emit it
+  on this path — judge-verified). INTEGRATIONS.md + publish.py docstring
+  updated. 10 new tests incl. failure injections (bad tar, oversized
+  mid-stream, empty, bad/missing name) each asserting zero residue.
+- Evidence:
+  - `python -m pytest -q` → 390 passed in 12.14s (was 380; +10, none removed)
+  - live smoke (scratch CP :8795, real CLI): one-shot publish → live at
+    /pub/r7-live/, `GET /blobs` → [] (zero rows ever); garbage-body injection
+    → 400 "not a valid tar.gz", sites dir holds ONLY r7-live; two-step
+    blob→publish regression OK (slug from blob stem, served)
+- Judge: approve (round 1) — re-ran pytest (390), ran its OWN live smoke
+  (:8794: CLI one-shot, failure injection, two-step regression), probed
+  adversarially: temp-file lifecycle covered on every failure path (finally
+  placement vs async stream), dot-prefixed temp can't be served or collide
+  with the slug regex, no other POST /publish callers exist (mcp/captain/
+  worker clean), 422-fallback scoping proven sound, auth identical + body
+  capped mid-stream at BLOB_MAX_BYTES.
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (fenced
+  first-line model-ID block present this round)
+- Notes: mobile one-shot parity deliberately NOT claimed — API.md §6 keeps
+  the two-step as the documented mobile flow; parity filed to Proposed.
+  R5's sweeper remains useful for the presign/worker path.
