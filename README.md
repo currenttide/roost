@@ -204,6 +204,7 @@ inbox of recent runs), **`roost_result`** (the verified outcome + evidence for a
 | **`claude`** | an agent job (an intent) | workers with an agent CLI configured |
 | **`docker`** | an isolated container, optionally GPU | workers with Docker (and a GPU, if required) |
 | **`auto`** | a plain task a free worker self-selects, then verifies | whichever worker fits — the default for `roost do` |
+| **`codex`** | an agent job run via the Codex CLI | workers with `codex` configured |
 
 **`kind: auto`** is the self-selecting path: the task goes to a free worker whose own agent
 introspects the machine and either does it or **declines so it routes to a better-fit
@@ -235,8 +236,9 @@ budget: { max_wallclock_min: 240 }
 ```
 
 **Placement** = hard `requires:` (`gpu_vram_gb`, `tools`, `docker_gpu`, `hostname: "==<name>"`)
-plus optional soft `prefer: { worker: "<id>" }`. Runnable specs live in
-[`examples/`](examples/).
+plus optional soft `prefer: { worker: "<id>" }`, or a hard `target: "<worker id|name>"` that
+pins a job to exactly one worker (it stays queued until that worker is free). Runnable specs
+live in [`examples/`](examples/).
 
 **Inspect & control runs:**
 
@@ -245,6 +247,7 @@ plus optional soft `prefer: { worker: "<id>" }`. Runnable specs live in
 | `roost jobs` | recent jobs |
 | `roost status <id>` | one job's state |
 | `roost logs <id> [--follow]` | job output |
+| `roost exec <worker> -- <cmd>` | run a command on one specific node — no SSH, via the job channel (great for a node whose SSH is unreachable) |
 | `roost tree <root> --health` | a dispatch's whole job tree + per-job liveness |
 | `roost cancel <id> [--tree]` | cancel a job (or its lineage) |
 | `roost workers` | the live fleet |

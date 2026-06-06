@@ -45,6 +45,23 @@ def _enroll_worker(client: TestClient, capabilities: dict) -> tuple[str, str]:
     return body["worker_id"], body["credential"]
 
 
+def _enroll_named(
+    client: TestClient, name: str, capabilities: dict | None = None
+) -> tuple[str, str]:
+    """Enroll a worker with an explicit name; return (worker_id, credential)."""
+    r = client.post("/enroll-tokens", json={"label": "test"})
+    assert r.status_code == 200, r.text
+    token = r.json()["token"]
+    r = client.post(
+        "/enroll",
+        json={"token": token, "name": name, "capabilities": capabilities or {}},
+        headers={"Authorization": ""},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    return body["worker_id"], body["credential"]
+
+
 # ---------- Enrollment + lifecycle (V1 criterion 1) ----------
 
 
@@ -1058,3 +1075,228 @@ def test_prune_endpoint_requires_admin(client: TestClient):
     r = client.post("/workers/prune", params={"older_than_days": 1})
     assert r.status_code == 200, r.text
     assert "pruned" in r.json()
+
+
+# ---------- Mobile pairing (scoped client tokens, `roost pair`) ----------
+
+
+def _pair_mobile(client: TestClient, label: str = "test-phone") -> tuple[str, str]:
+    """Mint a mobile token as admin. Returns (token_id, raw_token)."""
+    r = client.post("/pair-tokens", json={"label": label})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["token"].startswith(server.MOBILE_TOKEN_PREFIX)
+    assert body["scope"] == "mobile"
+    return body["id"], body["token"]
+
+
+def test_pair_token_mint_requires_admin(client: TestClient):
+    _, cred = _enroll_worker(client, {"tools": ["python3"]})
+    r = client.post("/pair-tokens", json={"label": "x"},
+                    headers={"Authorization": f"Bearer {cred}"})
+    assert r.status_code == 403
+
+
+def test_mobile_token_reads_submits_and_cancels(client: TestClient):
+    _enroll_worker(client, {"tools": ["python3"]})
+    _, tok = _pair_mobile(client)
+    mh = {"Authorization": f"Bearer {tok}"}
+
+    # Reads: the dashboard surface.
+    assert client.get("/jobs", headers=mh).status_code == 200
+    assert client.get("/derived", headers=mh).status_code == 200
+    assert client.get("/workers", headers=mh).status_code == 200
+
+    # Submit a job, read it back, read its logs, cancel it.
+    r = client.post("/jobs", headers=mh,
+                    json={"command": "echo hi", "requires": {"tools": ["python3"]}})
+    assert r.status_code == 200, r.text
+    job_id = r.json()["id"]
+    assert client.get(f"/jobs/{job_id}", headers=mh).status_code == 200
+    assert client.get(f"/jobs/{job_id}/logs", headers=mh).status_code == 200
+    r = client.delete(f"/jobs/{job_id}", headers=mh)
+    assert r.status_code == 200, r.text
+
+
+def test_mobile_token_denied_admin_and_worker_plane(client: TestClient):
+    wid, _ = _enroll_worker(client, {"tools": ["python3"]})
+    _, tok = _pair_mobile(client)
+    mh = {"Authorization": f"Bearer {tok}"}
+
+    # Admin plane: minting, pairing management, worker lifecycle.
+    assert client.post("/enroll-tokens", json={"label": "x"}, headers=mh).status_code == 403
+    assert client.post("/pair-tokens", json={"label": "x"}, headers=mh).status_code == 403
+    assert client.get("/pair-tokens", headers=mh).status_code == 403
+    assert client.delete(f"/workers/{wid}", headers=mh).status_code == 403
+    assert client.post("/workers/prune", params={"older_than_days": 1},
+                       headers=mh).status_code == 403
+
+    # Worker plane: creds provisioning + lease loop are off-limits.
+    assert client.get("/claude-creds", headers=mh).status_code == 403
+    assert client.get(f"/workers/{wid}/poll", params={"timeout": 0},
+                      headers=mh).status_code == 403
+    assert client.post(f"/workers/{wid}/heartbeat", json={},
+                       headers=mh).status_code == 403
+
+    # Legacy register path only accepts the shared token.
+    assert client.post("/workers/register", json={"name": "evil", "capabilities": {}},
+                       headers=mh).status_code == 403
+
+
+def test_mobile_token_cannot_finalize_jobs(client: TestClient):
+    _enroll_worker(client, {"tools": ["python3"]})
+    _, tok = _pair_mobile(client)
+    mh = {"Authorization": f"Bearer {tok}"}
+    r = client.post("/jobs", headers=mh,
+                    json={"command": "echo hi", "requires": {"tools": ["python3"]}})
+    job_id = r.json()["id"]
+    r = client.post(f"/jobs/{job_id}/finalize", headers=mh,
+                    json={"state": "succeeded"})
+    assert r.status_code == 403
+
+
+def test_revoked_mobile_token_is_rejected(client: TestClient):
+    token_id, tok = _pair_mobile(client)
+    mh = {"Authorization": f"Bearer {tok}"}
+    assert client.get("/jobs", headers=mh).status_code == 200
+    r = client.delete(f"/pair-tokens/{token_id}")
+    assert r.status_code == 200 and r.json()["revoked"] is True
+    # Token is dead immediately.
+    assert client.get("/jobs", headers=mh).status_code == 401
+    # Double-revoke 404s.
+    assert client.delete(f"/pair-tokens/{token_id}").status_code == 404
+
+
+def test_pair_token_list_never_leaks_secrets(client: TestClient):
+    token_id, tok = _pair_mobile(client, label="audit-me")
+    rows = client.get("/pair-tokens").json()
+    assert any(r["id"] == token_id and r["label"] == "audit-me" for r in rows)
+    for row in rows:
+        assert "token_hash" not in row
+        assert tok not in str(row.values())
+
+
+# ---------- Hard `target` worker-pin ----------
+
+
+def test_target_by_id_pins_to_one_worker(client: TestClient):
+    """A job with target=<worker id> is assignable ONLY to that worker; every
+    other capable worker leaves it queued (no fall-through)."""
+    a_id, a_cred = _enroll_named(client, "a", {"tools": ["python3"]})
+    b_id, b_cred = _enroll_named(client, "b", {"tools": ["python3"]})
+    ah = {"Authorization": f"Bearer {a_cred}"}
+    bh = {"Authorization": f"Bearer {b_cred}"}
+
+    r = client.post("/jobs", json={
+        "command": "true", "requires": {"tools": ["python3"]}, "target": b_id,
+    })
+    job_id = r.json()["id"]
+
+    # Worker a is fully capable but NOT the target → nothing for it.
+    assert client.get(f"/workers/{a_id}/poll", params={"timeout": 0},
+                      headers=ah).status_code == 204
+    # Job is still queued, untouched.
+    assert client.get(f"/jobs/{job_id}").json()["state"] == "queued"
+
+    # The pinned worker b gets it.
+    r = client.get(f"/workers/{b_id}/poll", params={"timeout": 0}, headers=bh)
+    assert r.status_code == 200, r.text
+    assert r.json()["id"] == job_id
+    assert r.json()["state"] == "assigned"
+
+
+def test_target_by_name_pins_to_one_worker(client: TestClient):
+    a_id, a_cred = _enroll_named(client, "alpha", {"tools": ["python3"]})
+    b_id, b_cred = _enroll_named(client, "beta", {"tools": ["python3"]})
+    ah = {"Authorization": f"Bearer {a_cred}"}
+    bh = {"Authorization": f"Bearer {b_cred}"}
+
+    client.post("/jobs", json={
+        "command": "true", "requires": {"tools": ["python3"]}, "target": "beta",
+    })
+    # Non-target by name gets nothing.
+    assert client.get(f"/workers/{a_id}/poll", params={"timeout": 0},
+                      headers=ah).status_code == 204
+    # Target by name gets it.
+    r = client.get(f"/workers/{b_id}/poll", params={"timeout": 0}, headers=bh)
+    assert r.status_code == 200 and r.json()["state"] == "assigned"
+
+
+def test_target_nonexistent_or_offline_stays_queued(client: TestClient):
+    """A target naming a worker that doesn't exist (or is offline) is no error —
+    the job just stays queued, and no other worker may grab it."""
+    a_id, a_cred = _enroll_named(client, "a", {"tools": ["python3"]})
+    ah = {"Authorization": f"Bearer {a_cred}"}
+
+    r = client.post("/jobs", json={
+        "command": "true", "requires": {"tools": ["python3"]},
+        "target": "ghost-worker",
+    })
+    job_id = r.json()["id"]
+    assert client.get(f"/workers/{a_id}/poll", params={"timeout": 0},
+                      headers=ah).status_code == 204
+    assert client.get(f"/jobs/{job_id}").json()["state"] == "queued"
+
+
+def test_normal_job_unaffected_by_target_feature(client: TestClient):
+    """A job with no target routes normally to a capable worker."""
+    a_id, a_cred = _enroll_named(client, "a", {"tools": ["python3"]})
+    ah = {"Authorization": f"Bearer {a_cred}"}
+    client.post("/jobs", json={"command": "true", "requires": {"tools": ["python3"]}})
+    r = client.get(f"/workers/{a_id}/poll", params={"timeout": 0}, headers=ah)
+    assert r.status_code == 200 and r.json()["state"] == "assigned"
+
+
+# ---------- Enroll dedup ----------
+
+
+def test_reenroll_same_name_and_host_retires_old_row(client: TestClient):
+    """Re-enrolling the same machine (same name + hostname) cleanly replaces it:
+    exactly one non-offline 'w1' row remains (the newest); the old one is
+    revoked + offline."""
+    caps = {"hostname": "h", "tools": ["python3"]}
+    old_id, _ = _enroll_named(client, "w1", caps)
+    new_id, _ = _enroll_named(client, "w1", caps)
+    assert old_id != new_id
+
+    with server._connect(client.app.state.db_path) as conn:
+        rows = conn.execute(
+            "SELECT id, status, revoked FROM workers WHERE name='w1'"
+        ).fetchall()
+    by_id = {r["id"]: r for r in rows}
+    # Old row retired: revoked + offline.
+    assert by_id[old_id]["revoked"] == 1
+    assert by_id[old_id]["status"] == "offline"
+    # New row is live and not revoked.
+    assert by_id[new_id]["revoked"] == 0
+    assert by_id[new_id]["status"] != "offline"
+    # Exactly one non-offline 'w1' row.
+    live = [r for r in rows if r["status"] != "offline"]
+    assert len(live) == 1 and live[0]["id"] == new_id
+
+
+def test_reenroll_different_host_does_not_retire(client: TestClient):
+    """A different machine reusing a name (different hostname) is NOT retired —
+    only a clearly-superseded same-host row is."""
+    old_id, _ = _enroll_named(client, "w1", {"hostname": "h1"})
+    new_id, _ = _enroll_named(client, "w1", {"hostname": "h2"})
+    with server._connect(client.app.state.db_path) as conn:
+        old = conn.execute(
+            "SELECT revoked FROM workers WHERE id=?", (old_id,)
+        ).fetchone()
+    assert old["revoked"] == 0
+
+
+# ---------- install.sh hardening ----------
+
+
+def test_install_script_pins_python_and_real_source(client: TestClient):
+    body = client.get("/install.sh").text
+    # Python is pinned to 3.12 (newer interpreters break the async HTTP client).
+    assert "--python 3.12" in body
+    # The default source is NOT the bare unrelated `roost` PyPI name.
+    assert 'ROOST_SOURCE="${ROOST_SOURCE:-roost}"' not in body
+    # It defaults to a real (git) source for this project.
+    assert "git+https://github.com" in body
+    # Opt-in claude install flag is documented/handled.
+    assert "--with-claude" in body

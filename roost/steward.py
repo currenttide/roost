@@ -36,6 +36,48 @@ STEWARD_MODEL = "claude-haiku-4-5-20251001"
 # unavailable or returns nonsense. Never block the worker on the steward.
 FALLBACK_CAPACITY = 1
 
+# Mechanical capacity estimate (used when the claude steward can't run): how many
+# CPU cores and how much memory we assume one agent/command job consumes. Agent jobs
+# are memory-hungry (a `claude -p` + its toolchain), so we gate on BOTH cores and
+# memory and take the min — a many-core but memory-starved box shouldn't over-commit.
+_CORES_PER_JOB = 4          # ~4 cores per concurrent job
+_MEM_GB_PER_JOB = 4.0       # ~4 GB resident per concurrent job
+_MECHANICAL_CAP_MAX = 8     # never auto-estimate above this without the agent's judgment
+
+
+def mechanical_capacity(facts: dict[str, Any]) -> int:
+    """Deterministic capacity estimate from machine facts, used when the claude
+    steward is unavailable (no claude / call failed). Replaces the old flat fail-safe
+    of 1 so a big idle box isn't capped at 1 just because it has no claude.
+
+    Derived from CPU cores and available memory (both gate concurrency), minus jobs
+    already running, bounded to [1, _MECHANICAL_CAP_MAX]. The agentic steward remains
+    the primary path when claude IS present — this is only the graceful-degradation
+    floor. Pure + total; safe on missing/garbage facts."""
+    try:
+        cpus = int(facts.get("cpus") or 1)
+    except (TypeError, ValueError):
+        cpus = 1
+    by_cpu = max(1, cpus // _CORES_PER_JOB)
+
+    # Prefer live available memory; fall back to total RAM; else don't gate on memory.
+    mem_gb: Optional[float] = None
+    for key in ("mem_available_gb", "mem_total_gb"):
+        v = facts.get(key)
+        if v is not None:
+            try:
+                mem_gb = float(v)
+                break
+            except (TypeError, ValueError):
+                pass
+    by_mem = max(1, int(mem_gb // _MEM_GB_PER_JOB)) if mem_gb is not None else by_cpu
+
+    # MAX concurrency (total), matching the agentic steward's contract — the server
+    # gates placement on free slots (capacity - running), so we must NOT subtract
+    # running_jobs here or it would be double-counted.
+    est = min(by_cpu, by_mem, _MECHANICAL_CAP_MAX)
+    return max(FALLBACK_CAPACITY, est)
+
 
 # ---------- live machine facts (for the capacity prompt) ----------
 

@@ -133,6 +133,90 @@ def _detect_ram_gb() -> Optional[float]:
     return None
 
 
+# Fraction of system RAM advertised as usable "VRAM" on a Jetson/Tegra board.
+# Jetsons have NO dedicated VRAM — the GPU and CPU share the same physical memory
+# (unified memory). Advertising the FULL RAM would let a job request all of it as
+# GPU memory and starve the OS, so report a conservative fraction. Floored to a
+# small value so a tiny dev board still advertises *some* GPU memory.
+_TEGRA_VRAM_FRACTION = 0.5
+
+
+def _detect_tegra_gpu() -> list[dict]:
+    """Fallback GPU detection for NVIDIA Jetson (Tegra) boards.
+
+    On Jetson Orin/Xavier/Nano, `nvidia-smi --query-gpu=...` returns nothing usable
+    (the integrated `nvgpu` reports name "Orin (nvgpu)" with `[N/A]` memory), so the
+    standard discrete-GPU probe (`_detect_gpus`) yields an empty list and the node
+    advertises NO GPU — it then can't match `gpu` / `docker_gpu` / `gpu_vram_gb`
+    requirements despite being a real (integrated) GPU box.
+
+    This detects a Jetson via several signals (any one is sufficient) and, when found,
+    advertises a single integrated GPU. Jetsons share system RAM (unified memory), so
+    the "VRAM" figure is a conservative fraction of total RAM (see _TEGRA_VRAM_FRACTION).
+    Returns [] on non-Tegra hardware so discrete-GPU detection is unaffected."""
+    model = _tegra_model()
+    if model is None:
+        return []
+    ram = _detect_ram_gb()
+    # Unified memory: a conservative share of system RAM, floored so even a 4GB Nano
+    # advertises ~1GB. None RAM → modest default so the node still advertises a GPU.
+    if ram is not None:
+        vram_gb = round(max(1.0, ram * _TEGRA_VRAM_FRACTION), 1)
+    else:
+        vram_gb = 2.0
+    return [{
+        "name": model,
+        "vram_gb": vram_gb,
+        "driver": None,
+        "tegra": True,          # marker: integrated/unified-memory GPU, not discrete
+        "integrated": True,
+    }]
+
+
+def _tegra_model() -> Optional[str]:
+    """Return a human label for a Jetson/Tegra board if this is one, else None.
+
+    Signals (any one suffices):
+      * /etc/nv_tegra_release exists (the Tegra L4T release stamp)
+      * /proc/device-tree/model contains "Jetson"/"Orin"/"Xavier"/"Tegra"
+      * nvidia-smi output mentions an integrated `nvgpu` / "Orin"
+    Pure best-effort; never raises."""
+    # 1) L4T release stamp — present on every flashed Jetson.
+    if os.path.exists("/etc/nv_tegra_release"):
+        dt = _device_tree_model()
+        return dt or "Jetson (Tegra)"
+    # 2) Device-tree model node (e.g. "NVIDIA Jetson AGX Orin Developer Kit").
+    dt = _device_tree_model()
+    if dt and any(k in dt for k in ("Jetson", "Orin", "Xavier", "Tegra")):
+        return dt
+    # 3) nvidia-smi present but reporting an integrated nvgpu / Orin.
+    smi = _find_nvidia_smi()
+    if smi:
+        try:
+            out = subprocess.run(
+                [smi, "--query-gpu=name", "--format=csv,noheader"],
+                capture_output=True, text=True, timeout=5.0,
+            ).stdout
+        except (subprocess.SubprocessError, OSError):
+            out = ""
+        low = out.lower()
+        if "nvgpu" in low or "orin" in low or "tegra" in low:
+            return dt or out.strip().splitlines()[0].strip() or "Jetson (Tegra)"
+    return None
+
+
+def _device_tree_model() -> Optional[str]:
+    """The board model string from /proc/device-tree/model (NUL-terminated), or None.
+    On Jetson this reads e.g. "NVIDIA Jetson AGX Orin Developer Kit"."""
+    try:
+        with open("/proc/device-tree/model", "rb") as f:
+            raw = f.read()
+    except OSError:
+        return None
+    s = raw.split(b"\x00", 1)[0].decode("utf-8", errors="replace").strip()
+    return s or None
+
+
 def _free_vram_gb() -> Optional[float]:
     """Total free VRAM across GPUs, re-queried live (cheap; ~ms)."""
     nvidia_smi = _find_nvidia_smi()
@@ -221,14 +305,32 @@ def detect_capabilities(
     if ram is not None:
         caps["ram_gb"] = ram
     gpus = _detect_gpus()
+    # Jetson/Tegra fallback: the discrete-GPU probe returns nothing usable on an
+    # integrated nvgpu, so a real Jetson would advertise NO GPU. Only fall back when
+    # the standard probe found nothing, so discrete-GPU detection stays unchanged.
+    tegra = False
+    if not gpus:
+        tegra_gpus = _detect_tegra_gpu()
+        if tegra_gpus:
+            gpus = tegra_gpus
+            tegra = True
     if gpus:
         caps["gpu"] = [g["name"] for g in gpus]
         caps["gpu_count"] = len(gpus)
         caps["gpu_vram_gb"] = max(g["vram_gb"] for g in gpus)
         caps["gpus"] = gpus
+        if tegra:
+            # Marker so the matcher / triage know this is unified-memory (shared with
+            # the CPU), not dedicated VRAM — and that GPU work runs on a Jetson.
+            caps["tegra"] = True
     # Docker-as-executor capability: can this worker actually RUN containers
     # (daemon reachable), and can those containers see GPUs (nvidia runtime)?
     caps.update(_detect_docker())
+    # OS-level sandbox availability: bubblewrap lets us sandbox agent jobs on a
+    # NON-trusted worker even when `claude` lacks a `--sandbox` flag (see
+    # build_bwrap_argv / worker policy `sandbox: "bwrap"`).
+    if shutil.which("bwrap") is not None:
+        caps["bwrap"] = True
     declared = list(TOOL_PROBES.keys())
     if self_test:
         passed = [t for t in declared if _probe_tool(t)]
@@ -333,6 +435,7 @@ def build_command(
             can_dispatch=can_dispatch,
             triage_prompt=triage_prompt or "",
             tempfiles=tempfiles,
+            cwd=cwd,
         )
         return argv, cwd, tempfiles
 
@@ -358,6 +461,7 @@ def build_command(
             base_url=base_url, token=token,
             can_dispatch=can_dispatch,
             tempfiles=tempfiles,
+            cwd=cwd,
         )
         return argv, cwd, tempfiles
     if kind == "codex":
@@ -543,6 +647,77 @@ def _intersect(requested: list, allowed: Optional[list]) -> list:
     return [x for x in (requested or []) if x in a]
 
 
+def _claude_config_dir() -> Path:
+    """The directory `claude` reads its config + OAuth creds from: the isolated
+    CLAUDE_CONFIG_DIR if set (shared box), else ~/.claude. The sandbox must keep this
+    writable so claude can read creds AND refresh its rotating OAuth token."""
+    ccd = os.environ.get("CLAUDE_CONFIG_DIR")
+    return Path(ccd).expanduser() if ccd else (Path.home() / ".claude")
+
+
+def build_bwrap_argv(claude_argv: list[str], cwd: str) -> list[str]:
+    """Wrap a `claude` invocation in a conservative bubblewrap (`bwrap`) profile so an
+    agent job can be OS-sandboxed on a NON-trusted worker even though `claude` 2.1.x
+    has no `--sandbox` flag. Returns `[bwrap, <opts...>, --, claude, ...]`.
+
+    SECURITY PROFILE (v1 — conservative; expect field validation):
+      * `--ro-bind / /` — the entire host filesystem is mounted READ-ONLY by default,
+        so the job can read system libs/binaries it needs but cannot modify anything
+        outside the explicit read-write holes below.
+      * read-WRITE holes (bound AFTER the ro-bind, so they win):
+          - the job's cwd            — where the job does its work
+          - /tmp and /var/tmp        — scratch space (claude + toolchains write here)
+          - the claude config/creds dir (CLAUDE_CONFIG_DIR or ~/.claude) — claude must
+            read creds AND rewrite its rotating OAuth token, so it needs RW here.
+      * `--dev /dev`, `--proc /proc` — minimal pseudo-filesystems claude/node need.
+      * NETWORK IS KEPT (no `--unshare-net`): claude must reach the Anthropic API.
+        We DO unshare PID/UTS/IPC so the job can't see or signal host processes.
+      * `--die-with-parent` — the sandbox dies if the worker tears the job down.
+      * `--new-session` — detach the controlling TTY (defense against TIOCSTI tricks).
+
+    ASSUMPTIONS / LIMITS (documented honestly for a v1):
+      * This is a FILESYSTEM + namespace sandbox, NOT a network egress filter — a
+        compromised job can still talk to the network (it has to, for the API). Pair
+        with network policy if you need egress control.
+      * The claude config dir is RW, so a malicious job in the sandbox could in
+        principle read/rewrite the OAuth token there. That's the same trust surface as
+        running claude at all; bwrap here is about protecting the REST of the host
+        (cwd-scoping writes), not about hiding creds from claude itself.
+      * Binds are skipped silently if a path doesn't exist (e.g. no /var/tmp), so the
+        profile is portable across distros."""
+    cfg_dir = _claude_config_dir()
+    argv: list[str] = ["bwrap"]
+    # Whole host read-only first; RW holes layered on top so they take precedence.
+    argv += ["--ro-bind", "/", "/"]
+    argv += ["--dev", "/dev", "--proc", "/proc"]
+    # Read-write holes. Only bind paths that exist so the profile is portable.
+    rw_paths: list[str] = []
+    cwd_p = str(Path(cwd).resolve(strict=False)) if cwd else os.getcwd()
+    for p in (cwd_p, "/tmp", "/var/tmp", str(cfg_dir.resolve(strict=False))):
+        if p and p not in rw_paths and os.path.exists(p):
+            rw_paths.append(p)
+    for p in rw_paths:
+        argv += ["--bind", p, p]
+    # Namespace isolation: hide host processes/IPC/hostname, but DO NOT unshare net
+    # (claude needs the Anthropic API). Tie lifetime to the worker; drop the TTY.
+    argv += [
+        "--unshare-pid", "--unshare-uts", "--unshare-ipc",
+        "--die-with-parent", "--new-session",
+    ]
+    argv += ["--"]
+    argv += claude_argv
+    return argv
+
+
+def _bwrap_policy_enabled(worker_policy: dict) -> bool:
+    """Whether the worker policy opts IN to the OS-level bwrap sandbox fallback.
+    OFF by default — accepts `sandbox: "bwrap"` (preferred) or a boolean `bwrap: true`."""
+    sb = worker_policy.get("sandbox")
+    if isinstance(sb, str) and sb.strip().lower() == "bwrap":
+        return True
+    return bool(worker_policy.get("bwrap"))
+
+
 def _build_claude_argv(
     spec: dict,
     job_id: str,
@@ -552,6 +727,7 @@ def _build_claude_argv(
     token: Optional[str],
     can_dispatch: bool,
     tempfiles: list[Path],
+    cwd: Optional[str] = None,
 ) -> list[str]:
     intent = spec.get("intent")
     if not intent:
@@ -563,6 +739,11 @@ def _build_claude_argv(
     perms = spec.get("permissions") or {}
     trust_skip = worker_policy.get("trust_skip_perms", False)
 
+    # When we OS-sandbox via bwrap below, claude runs inside the sandbox and the host
+    # is already protected, so we let claude act freely (skip-permissions) INSIDE the
+    # jail rather than crash on the unknown --sandbox flag or be neutered to read-only.
+    bwrap_wrap = False
+
     # Sandbox preference (Decision security): default sandbox unless trusted worker
     # is asked to skip permissions. `--sandbox` only exists on some Claude Code
     # builds (e.g. absent on 2.1.x); passing it where unsupported makes claude
@@ -573,6 +754,14 @@ def _build_claude_argv(
     elif perms.get("sandbox", True):
         if _claude_supports_sandbox():
             argv.append("--sandbox")
+        elif _bwrap_policy_enabled(worker_policy) and shutil.which("bwrap") is not None:
+            # OPT-IN OS-level sandbox: claude lacks --sandbox, but the worker policy
+            # enables bwrap and bubblewrap is installed. Run claude with skip-permissions
+            # INSIDE a conservative bwrap jail (see build_bwrap_argv) so a NON-trusted
+            # worker can still run agent jobs sandboxed — instead of either crashing or
+            # silently falling back to an UNsandboxed skip-permissions on the bare host.
+            argv.append("--dangerously-skip-permissions")
+            bwrap_wrap = True
         elif trust_skip:
             # Trusted personal worker without --sandbox support: run unsandboxed
             # but functional rather than crash on an unknown flag.
@@ -618,6 +807,12 @@ def _build_claude_argv(
 
     if spec.get("args"):
         argv += list(spec["args"])
+
+    # If we chose the OS-level sandbox above, wrap the whole claude invocation in a
+    # conservative bwrap jail now (after all claude flags are assembled). The MCP
+    # config tempfile lives under /tmp (RW in the profile), so roost-mcp still works.
+    if bwrap_wrap:
+        argv = build_bwrap_argv(argv, cwd or os.getcwd())
     return argv
 
 
@@ -715,6 +910,7 @@ def _build_auto_argv(
     can_dispatch: bool,
     triage_prompt: str,
     tempfiles: list[Path],
+    cwd: Optional[str] = None,
 ) -> list[str]:
     """Bare-worker triage: run a claude agent whose system prompt tells it to
     self-assess fit and either do the task or decline. The task is the `-p` prompt;
@@ -736,10 +932,19 @@ def _build_auto_argv(
         base_url=base_url, token=token,
         can_dispatch=can_dispatch,
         tempfiles=tempfiles,
+        cwd=cwd,
     )
-    # argv[:3] == ["claude", "-p", task]; inject the triage system prompt after it.
+    # Inject the triage system prompt right after `claude -p <task>`. Locate the
+    # `claude` token rather than assuming index 0 — the argv may be wrapped in a
+    # bwrap jail (`bwrap ... -- claude -p <task> ...`), in which case `claude` is not
+    # at the front.
     if triage_prompt:
-        argv = argv[:3] + ["--append-system-prompt", triage_prompt] + argv[3:]
+        try:
+            ci = argv.index("claude")
+        except ValueError:
+            ci = 0
+        cut = ci + 3  # ["claude", "-p", task]
+        argv = argv[:cut] + ["--append-system-prompt", triage_prompt] + argv[cut:]
     return argv
 
 
@@ -1063,9 +1268,12 @@ class Worker:
         )
         cap = steward.parse_capacity(raw)
         if cap is None:
-            cap = steward.FALLBACK_CAPACITY
+            # Claude steward couldn't run / parse: don't collapse a big idle box to 1.
+            # Degrade gracefully to a MECHANICAL estimate from the machine facts we
+            # already gathered (cores + available memory), bounded, min 1.
+            cap = steward.mechanical_capacity(facts)
             print("[roost] capacity steward unavailable/unparseable; "
-                  f"fail-safe capacity={cap}", flush=True)
+                  f"mechanical estimate capacity={cap}", flush=True)
         else:
             print(f"[roost] capacity steward → max_concurrent={cap} "
                   f"(running={self._running})", flush=True)
