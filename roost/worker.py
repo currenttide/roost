@@ -2,7 +2,7 @@
 
 Long-running, supervisor-friendly. Each loop iteration:
 
-  * heartbeat (15s) — renews lease on the assigned job (if any)
+  * heartbeat (15s) — renews the lease on every job this worker is currently running
   * long-poll (≤ 30s) — picks up new work
   * execute — spawns subprocess for ``command`` jobs, ``claude -p`` for
     ``intent`` jobs (with sandbox + model routing + optional roost-mcp);

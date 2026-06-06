@@ -70,8 +70,8 @@ What makes it more than a job queue:
 ## Plug your agent in
 
 Roost is the building; your agent app is the front door. Point any agent at one control
-plane and it gets the whole verb surface — **run · verify · transfer · observe ·
-schedule** (serve/publish is landing).
+plane and it gets the whole verb surface — **run · verify · transfer · serve/publish · observe ·
+schedule**.
 
 - **Claude Code (CLI):** `claude mcp add roost -- roost mcp` (with `ROOST_URL`/`ROOST_TOKEN`).
 - **Claude app / desktop:** the same MCP server as a remote connector (needs a reachable
@@ -220,7 +220,7 @@ inbox of recent runs), **`roost_result`** (the verified outcome + evidence for a
 ## Job kinds & precise control
 
 `roost do` covers the common case. When you want exact control, write a spec and
-`roost submit spec.yaml` (add `--detach` to not block). There are four kinds:
+`roost submit spec.yaml` (add `--detach` to not block). There are five kinds:
 
 | Kind | What it runs | Where it lands |
 |------|--------------|----------------|
@@ -371,7 +371,7 @@ mac-app/build.sh http://<control-plane-host>:8787 "<admin-token>"
 
 ```bash
 uv tool install --python 3.12 --with pytest .    # or: pip install -e ".[dev]"
-python -m pytest -q                               # 161 tests
+python -m pytest -q                               # 347 tests
 ```
 
 Contributions welcome. Keep credentials and machine-specific config out of commits

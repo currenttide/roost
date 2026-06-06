@@ -787,9 +787,9 @@ def _score_worker_row(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def _inflight_count(conn: sqlite3.Connection, worker_id: str) -> int:
-    """Number of non-terminal jobs currently owned by this worker
-    (assigned/running/leased — i.e. ACTIVE_STATES). This is the work in flight
-    that gates capacity-based assignment."""
+    """Number of in-flight jobs currently owned by this worker
+    (state IN assigned/running). This is the work in flight that gates
+    capacity-based assignment."""
     row = conn.execute(
         "SELECT COUNT(*) AS n FROM jobs "
         "WHERE worker_id=? AND state IN ('assigned','running')",
@@ -1491,7 +1491,7 @@ class HeartbeatPayload(BaseModel):
 
 
 class JobEvent(BaseModel):
-    type: str  # started | succeeded | failed | progress
+    type: str  # started | succeeded | failed | progress | declined
     attempt: Optional[int] = None
     exit_code: Optional[int] = None
     result: Any = None

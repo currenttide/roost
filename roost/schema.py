@@ -11,7 +11,7 @@ import sqlite3
 
 CURRENT_VERSION = 11
 
-# Full V1 schema for fresh installs.
+# Full current (V11) schema for fresh installs.
 SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS workers (
     id              TEXT PRIMARY KEY,
