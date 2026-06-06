@@ -44,6 +44,10 @@ from . import verify as verify_mod
 POLL_TIMEOUT = 25.0
 HEARTBEAT_INTERVAL = 15.0
 HEARTBEAT_FAIL_THRESHOLD = 3      # consecutive failures before re-registering
+# [R3] A locally-running job the server no longer attributes to us is aborted on
+# reconcile — but only after this grace (> the server's 60s LEASE_TTL), so a job
+# leased moments after the server built its heartbeat snapshot is never reaped.
+LEASE_LOST_GRACE = 90.0
 CREDS_REFRESH_INTERVAL = 1200.0  # re-pull Claude creds every 20 min (they rotate)
 CAPACITY_REFRESH_INTERVAL = 180.0  # re-judge worker capacity at most every few min
 CAPACITY_AGENT_TIMEOUT = 30.0    # cap the steward capacity call (fail-safe to 1)
@@ -1231,11 +1235,18 @@ class Worker:
                     # The server reports which of our running jobs were cancelled;
                     # tear them down (process + docker container) promptly.
                     try:
-                        for jid in (r.json().get("cancel") or []):
+                        body = r.json()
+                        for jid in (body.get("cancel") or []):
                             if jid in self._active:
                                 print(f"[roost] job {jid} cancelled by server; killing",
                                       flush=True)
                                 await self._kill_active_job(jid, "cancelled")
+                        # [R3] Lease reconciliation: abort local attempts the
+                        # server no longer attributes to us (requeued during a
+                        # CP outage past the lease TTL). Absent on older servers.
+                        owned = body.get("owned")
+                        if owned is not None:
+                            await self._reconcile_owned(set(owned))
                     except (ValueError, KeyError, AttributeError):
                         pass
             except httpx.HTTPError as e:
@@ -1519,6 +1530,9 @@ class Worker:
                 job = await self.poll_once()
                 if not job:
                     continue
+                # [R3] If this is a re-lease of a job we're still running, tear
+                # down the stale attempt before starting the new one.
+                await self._reap_stale_attempt(job["id"])
                 self._spawn_job(job)
         finally:
             self._stop.set()
@@ -1532,6 +1546,42 @@ class Worker:
                     await t
                 except asyncio.CancelledError:
                     pass
+
+    async def _reconcile_owned(self, owned: set[str]) -> None:
+        """[R3] Abort any locally-running job the server no longer attributes to
+        us. Chosen semantics: ABORT local work on reconcile (vs. report-and-dedupe)
+        — the server has already requeued the job, so finishing the orphaned
+        attempt can only duplicate side effects and burn tokens; its terminal
+        report would be rejected as stale anyway. Only entries older than
+        LEASE_LOST_GRACE are eligible, so a job leased after the server built its
+        heartbeat snapshot is never reaped."""
+        now = time.monotonic()
+        for jid, entry in list(self._active.items()):
+            if jid in owned or entry.get("cancelled"):
+                continue
+            if now - float(entry.get("since") or now) < LEASE_LOST_GRACE:
+                continue
+            print(f"[roost] job {jid} lease lost (server no longer attributes "
+                  "it to us); aborting local attempt", flush=True)
+            await self._kill_active_job(jid, "lease_lost")
+
+    async def _reap_stale_attempt(self, job_id: str) -> None:
+        """[R3] The same job re-leased to us while a previous attempt still runs
+        locally (CP outage → sweep → requeue → we won the new lease): the old
+        attempt lost its lease by definition. Kill it and wait for its task to
+        fully unwind (its done-callback pops _job_tasks/_active) BEFORE starting
+        the new attempt — both maps are keyed by job_id, so starting early would
+        cross the attempts' tracking entries."""
+        old = self._job_tasks.get(job_id)
+        if old is None or old.done():
+            return
+        print(f"[roost] job {job_id} re-leased while a stale local attempt is "
+              "still running; aborting the stale attempt", flush=True)
+        await self._kill_active_job(job_id, "lease_lost")
+        try:
+            await old
+        except Exception:  # noqa: BLE001 — old attempt's failure is not ours
+            pass
 
     def _spawn_job(self, job: dict) -> None:
         """[BUG1] Launch run_job as a tracked background task so the loop can keep
@@ -1697,7 +1747,8 @@ class Worker:
             return
 
         is_docker = (spec.get("kind") or "").lower() == "docker"
-        self._active[job_id] = {"process": process, "is_docker": is_docker, "cancelled": None}
+        self._active[job_id] = {"process": process, "is_docker": is_docker,
+                                "cancelled": None, "since": time.monotonic()}
 
         tokens_used = 0
         declined = False
@@ -1786,20 +1837,28 @@ class Worker:
         # NOTE: do NOT pop _active yet — keep the entry alive through the verify/
         # self-heal phase so a server cancel still routes to _kill_active_job (which
         # tears down the in-flight aux verifier/fix subprocess too). Popped below.
+        def _teardown_reason() -> Optional[str]:
+            """[R3] 'cancelled' (server cancel) or 'lease_lost' (lease
+            reconciliation after a CP outage / re-lease): either way this attempt
+            is torn down — report no terminal event, the server has moved on.
+            'timeout' is NOT a teardown; the timed_out branch reports it."""
+            r = (self._active.get(job_id) or {}).get("cancelled")
+            return r if r in ("cancelled", "lease_lost") else None
+
         def _is_cancelled() -> bool:
-            return (self._active.get(job_id) or {}).get("cancelled") == "cancelled"
+            return _teardown_reason() is not None
 
         cancelled = _is_cancelled()
 
         exit_code = process.returncode
         terminal: dict[str, Any] = {"attempt": attempt, "tokens_used": tokens_used}
         if cancelled:
-            # The control plane already moved the job to 'cancelled'; report a
-            # terminal event it will ignore (terminal-state guard) but which
-            # keeps our accounting honest. Skip posting to avoid clobbering.
+            # Torn down (server cancel, or lease lost to a newer attempt): the
+            # control plane has moved on — post nothing, just unwind accounting.
+            reason = _teardown_reason()
             self._active.pop(job_id, None)
             self._running = max(0, self._running - 1)
-            print(f"[roost] job {job_id} torn down (cancelled)", flush=True)
+            print(f"[roost] job {job_id} torn down ({reason})", flush=True)
             return
         if timed_out:
             # [R2] Distinct error tokens so a timeout is tellable from an ordinary
@@ -1872,9 +1931,10 @@ class Worker:
                             job_id, goal, result_text, timeout_s=cap)
                         tokens_used += vtok
                 if _is_cancelled():
+                    reason = _teardown_reason()
                     self._active.pop(job_id, None)
                     self._running = max(0, self._running - 1)
-                    print(f"[roost] job {job_id} torn down (cancelled during verify)", flush=True)
+                    print(f"[roost] job {job_id} torn down ({reason} during verify)", flush=True)
                     return
                 terminal["tokens_used"] = tokens_used
                 if budget_exhausted_note:

@@ -56,7 +56,11 @@ Under the hood it's a **pull-based** orchestrator: workers long-poll the control
 lease a job, heartbeat while running, and report results — so a Pi on home Wi-Fi and a
 cloud VM behind NAT both join with **no inbound ports** and no firewall holes. Each job
 lands on a capable, free worker, and because jobs report liveness you can actually *see*
-whether each one is healthy, stuck, or failed.
+whether each one is healthy, stuck, or failed. If a control-plane outage outlives a
+job's lease (60s), the job is requeued — and when the original worker reconnects, it
+**aborts** its now-orphaned attempt (each heartbeat returns the jobs the server still
+attributes to that worker) rather than finishing it twice; stale reports are rejected
+by attempt number either way.
 
 What makes it more than a job queue:
 

@@ -431,6 +431,70 @@ def test_run_job_explicit_budget_keeps_wallclock_error():
     asyncio.run(go())
 
 
+# ---------- [R3] lease reconciliation on the worker ----------
+
+
+async def _start_sleeper(w, jid, seconds=30):
+    """Drive the real run_job until its process is registered in _active."""
+    task = asyncio.create_task(
+        w.run_job({"id": jid, "spec": {"kind": "command",
+                                       "command": f"sleep {seconds}"}}))
+    for _ in range(200):
+        if jid in w._active:
+            return task
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"{jid} never became active")
+
+
+def test_reconcile_owned_kills_orphan_spares_fresh_and_owned():
+    """An active job the server no longer owns is killed once past the grace;
+    a fresh (just-leased) job and a still-owned old job are spared."""
+    async def go():
+        w, events, _logs = _mk_runjob_worker({})
+        t_orphan = await _start_sleeper(w, "orphan")
+        t_owned = await _start_sleeper(w, "still-owned")
+        t_fresh = await _start_sleeper(w, "fresh")
+        # Age the orphan and the owned entry past the grace; "fresh" stays new.
+        from roost.worker import LEASE_LOST_GRACE
+        w._active["orphan"]["since"] -= LEASE_LOST_GRACE + 10
+        w._active["still-owned"]["since"] -= LEASE_LOST_GRACE + 10
+        await w._reconcile_owned({"still-owned"})
+        assert w._active["orphan"]["cancelled"] == "lease_lost"
+        assert w._active["still-owned"]["cancelled"] is None
+        assert w._active["fresh"]["cancelled"] is None
+        # The orphan's run_job unwinds with NO terminal event (server moved on).
+        await asyncio.wait_for(t_orphan, timeout=10.0)
+        orphan_terminals = [e for e in events
+                            if e.get("type") in ("succeeded", "failed")]
+        assert orphan_terminals == []
+        # Clean up the two live jobs.
+        await w._kill_active_job("still-owned", "cancelled")
+        await w._kill_active_job("fresh", "cancelled")
+        await asyncio.wait_for(asyncio.gather(t_owned, t_fresh), timeout=10.0)
+        await w.close()
+
+    asyncio.run(go())
+
+
+def test_reap_stale_attempt_unwinds_before_new_attempt():
+    """A re-leased job kills the stale local attempt and waits for it to fully
+    unwind (entries popped) before the new attempt may start."""
+    async def go():
+        w, events, _logs = _mk_runjob_worker({})
+        task = await _start_sleeper(w, "j1")
+        w._job_tasks["j1"] = task  # what _spawn_job would have recorded
+        await asyncio.wait_for(w._reap_stale_attempt("j1"), timeout=10.0)
+        assert "j1" not in w._active  # old attempt fully unwound
+        assert task.done()
+        terminals = [e for e in events if e.get("type") in ("succeeded", "failed")]
+        assert terminals == []  # torn down silently — no stale terminal report
+        # And a no-op when nothing is running:
+        await w._reap_stale_attempt("j1")
+        await w.close()
+
+    asyncio.run(go())
+
+
 def test_run_job_quick_job_unaffected_by_default_cap():
     """A fast job under the default cap succeeds normally."""
     async def go():

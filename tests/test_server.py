@@ -362,6 +362,71 @@ def test_liveness_capable_workers_fact(client: TestClient):
     assert j2["capable_workers"] == 1
 
 
+# ---------- [R3] lease reconciliation: owned-jobs heartbeat signal ----------
+
+
+def test_owned_job_ids_tracks_lease(tmp_path: Path):
+    db = tmp_path / "roost.db"
+    server._init_db(db)
+    w = server._register_worker(db, "w", {"tools": ["python3"]})["id"]
+    job = server._insert_job(db, {"command": "true"})
+    assert server._owned_job_ids(db, w) == []
+    assigned = server._try_assign_one(db, w)
+    assert assigned["id"] == job["id"]
+    assert server._owned_job_ids(db, w) == [job["id"]]
+    # Lease expires during a CP outage; the sweeper requeues → no longer ours.
+    with server._connect(db) as conn:
+        conn.execute("UPDATE jobs SET lease_expires_at=1 WHERE id=?", (job["id"],))
+    server._sweep(db)
+    assert server._owned_job_ids(db, w) == []
+
+
+def test_heartbeat_endpoint_returns_owned(client: TestClient):
+    wid, cred = _enroll_worker(client, {"tools": ["python3"]})
+    r = client.post("/jobs", json={"command": "true"})
+    jid = r.json()["id"]
+    # Lease it to the worker, then heartbeat: response must list it as owned.
+    r = client.get(f"/workers/{wid}/poll", params={"timeout": 0.0},
+                   headers={"Authorization": f"Bearer {cred}"})
+    assert r.status_code == 200 and r.json()["id"] == jid
+    r = client.post(f"/workers/{wid}/heartbeat", json={},
+                    headers={"Authorization": f"Bearer {cred}"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["owned"] == [jid]
+    assert body["cancel"] == []
+
+
+def test_outage_past_ttl_requeues_and_rejects_stale_reporter(tmp_path: Path):
+    """Simulates a CP outage past LEASE_TTL: w1's lease expires (no heartbeats
+    land), the sweeper requeues, w2 wins the new lease. On reconnect w1 must see
+    an empty owned set, and its stale terminal report must be rejected."""
+    db = tmp_path / "roost.db"
+    server._init_db(db)
+    w1 = server._register_worker(db, "w1", {"tools": ["python3"]})["id"]
+    w2 = server._register_worker(db, "w2", {"tools": ["python3"]})["id"]
+    job = server._insert_job(db, {"command": "sleep 99", "max_attempts": 3})
+    a1 = server._try_assign_one(db, w1)
+    assert a1["id"] == job["id"] and a1["attempt"] == 1
+    # Outage: w1 unreachable — its lease lapses and its liveness goes stale →
+    # offline; the sweeper requeues the job.
+    with server._connect(db) as conn:
+        conn.execute("UPDATE jobs SET lease_expires_at=1 WHERE id=?", (job["id"],))
+        conn.execute("UPDATE workers SET last_seen=1 WHERE id=?", (w1,))
+    assert server._sweep(db)["requeued"] == 1
+    # w2 polls first and wins the new lease (attempt 2).
+    a2 = server._try_assign_one(db, w2)
+    assert a2 is not None and a2["id"] == job["id"] and a2["attempt"] == 2
+    # w1 reconnects: heartbeat owned-set no longer lists the job → it aborts.
+    assert server._owned_job_ids(db, w1) == []
+    assert server._owned_job_ids(db, w2) == [job["id"]]
+    # And if w1's orphaned attempt still tried to report, it is rejected.
+    with pytest.raises(PermissionError):
+        server._apply_event(db, job["id"], w1,
+                            {"type": "succeeded", "attempt": 1, "exit_code": 0})
+    assert server._get_job(db, job["id"])["state"] == "assigned"  # w2's, untouched
+
+
 def test_stale_worker_recovers_to_idle_on_heartbeat(tmp_path: Path):
     # Regression: a worker the sweeper marked 'stale' must return to 'idle'
     # once it heartbeats again — not stay stale forever.
