@@ -33,6 +33,15 @@ object Parsers {
             }
         } else null
 
+    private fun JSONObject.lngOrNull(key: String): Long? =
+        if (has(key) && !isNull(key)) {
+            when (val v = opt(key)) {
+                is Number -> v.toLong()
+                is String -> v.toLongOrNull()
+                else -> null
+            }
+        } else null
+
     private fun JSONObject.boolOrNull(key: String): Boolean? =
         if (has(key) && !isNull(key)) {
             when (val v = opt(key)) {
@@ -231,6 +240,35 @@ object Parsers {
             logs = o.optJSONArray("logs").objs().map(::parseLogLine),
         )
     }
+
+    // ---- publish (API.md §6) -------------------------------------------------------
+
+    fun parseBlob(json: String): StagedBlob {
+        val o = JSONObject(json)
+        return StagedBlob(
+            id = o.str("id") ?: "",
+            name = o.str("name") ?: "",
+            size = o.lngOrNull("size") ?: 0L,
+            sha256 = o.str("sha256"),
+            state = o.str("state") ?: "pending",
+            createdAt = o.dbl("created_at") ?: 0.0,
+            expiresAt = o.dbl("expires_at") ?: 0.0,
+        )
+    }
+
+    fun parseSite(o: JSONObject): Site = Site(
+        slug = o.str("slug") ?: "",
+        url = o.str("url") ?: "",
+        publicUrl = o.str("public_url"),
+        files = o.intOrNull("files") ?: 0,
+        size = o.lngOrNull("size") ?: 0L,
+        createdAt = o.dbl("created_at") ?: 0.0,
+        updatedAt = o.dbl("updated_at") ?: 0.0,
+    )
+
+    fun parseSite(json: String): Site = parseSite(JSONObject(json))
+
+    fun parseSites(json: String): List<Site> = JSONArray(json).objs().map(::parseSite)
 
     // ---- SSE event payloads (data: line already extracted) -----------------------
 

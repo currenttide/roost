@@ -286,6 +286,52 @@ struct CancelResponse: Codable, Equatable {
     let cancelled: Int
 }
 
+// MARK: - Publish (API.md §6)
+
+/// Staged bundle — `POST /blobs` response (`blob_upload_response.json`).
+/// Step 1 of publish; only `id` and `state` matter to the flow.
+struct BlobUploadResponse: Codable, Equatable {
+    let id: String
+    let name: String
+    let size: Int
+    let sha256: String?
+    let state: String          // "ready" once the body landed
+    let createdAt: Double
+    let expiresAt: Double      // blob TTL, NOT site TTL (API.md §6)
+    let getUrl: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, size, sha256, state
+        case createdAt = "created_at"
+        case expiresAt = "expires_at"
+        case getUrl = "get_url"
+    }
+}
+
+/// A published site — `POST /publish` / `GET /publish` rows
+/// (`publish_response.json`, `publish_list.json`).
+struct Site: Codable, Equatable, Identifiable {
+    let slug: String
+    let url: String            // LAN URL, always present
+    let publicUrl: String?     // only when the CP has a publish domain
+    let files: Int
+    let size: Int
+    let createdAt: Double
+    let updatedAt: Double
+
+    var id: String { slug }
+
+    /// Best link to offer the user: internet-facing when available.
+    var shareUrl: String { publicUrl ?? url }
+
+    enum CodingKeys: String, CodingKey {
+        case slug, url, files, size
+        case publicUrl = "public_url"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+    }
+}
+
 // MARK: - Error envelope (API.md §1)
 
 struct ErrorEnvelope: Codable, Equatable {

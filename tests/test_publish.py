@@ -189,6 +189,45 @@ def test_client_token_can_publish_but_not_delete(client: TestClient, db: Path):
     assert r.status_code == 403
 
 
+def test_mobile_scope_publishes_end_to_end(client: TestClient):
+    # [R6] The mobile-app contract (mobile-app/API.md §6) pins this: a
+    # mobile-scoped pair token publishes through the SAME client permission
+    # set as agent scope — scope is an audit label, not a privilege boundary
+    # (see the scope→verbs matrix in server.py). Phone agents publish too.
+    tok = client.post("/pair-tokens", json={"label": "phone"}).json()
+    assert tok["scope"] == "mobile"  # the default scope
+    mh = {"Authorization": f"Bearer {tok['token']}"}
+
+    # stage the bundle AS the phone (not as admin)
+    r = client.post("/blobs?name=phone-site.tar.gz",
+                    content=_tar_gz({"index.html": b"<h1>from phone</h1>"}),
+                    headers=mh)
+    assert r.status_code == 200, r.text
+    blob = r.json()
+    assert blob["state"] == "ready"
+
+    # publish AS the phone; response is the §6 site shape
+    r = client.post("/publish", json={"blob_id": blob["id"]}, headers=mh)
+    assert r.status_code == 200, r.text
+    site = r.json()
+    assert site["slug"] == "phone-site"  # defaulted from the blob name stem
+    assert site["url"].endswith("/pub/phone-site/")
+    assert site["files"] == 1 and site["size"] > 0
+
+    # list AS the phone
+    r = client.get("/publish", headers=mh)
+    assert r.status_code == 200
+    assert [s["slug"] for s in r.json()] == ["phone-site"]
+
+    # the published site is live, unauthenticated
+    r = client.get("/pub/phone-site/", headers={"Authorization": ""})
+    assert r.status_code == 200 and b"from phone" in r.content
+
+    # delete stays admin-only for mobile too
+    r = client.delete("/publish/phone-site", headers=mh)
+    assert r.status_code == 403
+
+
 def test_unauthenticated_public_serving(client: TestClient):
     _publish(client, _tar_gz({"index.html": b"public"}), "demo")
     # serving needs no bearer
