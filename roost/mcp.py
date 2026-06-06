@@ -348,6 +348,39 @@ TOOLS: list[dict[str, Any]] = [
         ),
         "inputSchema": {"type": "object", "properties": {}},
     },
+    {
+        "name": "roost_schedule",
+        "description": (
+            "Run work on an interval — the schedule verb. The control plane enqueues "
+            "a job from the spec every interval (first run one interval after "
+            "creation); if the previous run is still going that beat is SKIPPED (no "
+            "pile-up), and beats missed while the CP was down are not back-filled. "
+            "action: create (goal or spec, + every), list, remove, enable, disable. "
+            "Gotchas: `every` accepts seconds or '<N>[smhd]' (min 30s); a plain "
+            "`goal` schedules a kind:auto task (worker self-selects, verifier "
+            "checks); re-enabling restarts the clock one interval out."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string",
+                           "enum": ["create", "list", "remove", "enable", "disable"],
+                           "default": "list"},
+                "goal": {"type": "string",
+                         "description": "Plain-language goal to run each interval "
+                                        "(kind: auto). Alternative to `spec`."},
+                "spec": {"type": "object",
+                         "description": "Full job spec to enqueue each run "
+                                        "(same shape as roost_submit)."},
+                "every": {"type": "string",
+                          "description": "Interval: '30m', '6h', or seconds. "
+                                         "Required for create."},
+                "name": {"type": "string", "description": "Label for the schedule."},
+                "schedule_id": {"type": "string",
+                                "description": "Target for remove/enable/disable."},
+            },
+        },
+    },
 ]
 
 
@@ -789,6 +822,38 @@ def tool_list_staged(_args: dict) -> dict:
     ]}
 
 
+def tool_roost_schedule(args: dict) -> dict:
+    action = args.get("action") or "list"
+    with _client() as c:
+        if action == "create":
+            spec = args.get("spec")
+            if not spec and args.get("goal"):
+                spec = {"kind": "auto", "task": args["goal"]}
+            if not spec:
+                return {"error": "bad_args", "detail": "create needs `goal` or `spec`"}
+            if not args.get("every"):
+                return {"error": "bad_args", "detail": "create needs `every` (e.g. '30m')"}
+            r = c.post("/schedules", json={"spec": spec, "every": args["every"],
+                                           "name": args.get("name")})
+        elif action == "list":
+            r = c.get("/schedules")
+        elif action in ("remove", "enable", "disable"):
+            sid = args.get("schedule_id")
+            if not sid:
+                return {"error": "bad_args", "detail": f"{action} needs `schedule_id`"}
+            if action == "remove":
+                r = c.delete(f"/schedules/{sid}")
+            else:
+                r = c.patch(f"/schedules/{sid}",
+                            json={"enabled": action == "enable"})
+        else:
+            return {"error": "bad_args", "detail": f"unknown action {action!r}"}
+        if r.status_code >= 400:
+            return {"error": f"http_{r.status_code}", "detail": r.text}
+        body = r.json()
+        return {"schedules": body} if isinstance(body, list) else body
+
+
 TOOL_IMPL = {
     "roost_do":           tool_roost_do,
     "roost_runs":         tool_roost_runs,
@@ -805,6 +870,7 @@ TOOL_IMPL = {
     "send_file":     tool_send_file,
     "fetch_file":    tool_fetch_file,
     "list_staged":   tool_list_staged,
+    "roost_schedule": tool_roost_schedule,
 }
 
 

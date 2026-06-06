@@ -19,6 +19,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import secrets
 import sqlite3
 import time
@@ -59,6 +60,9 @@ PLACEMENT_GRACE = 3.0
 # (the genuine "no node can do this" case) — never while a capable node is just busy.
 # A backstop guards against pathological flapping (workers churning in/out).
 MAX_DECLINES = 10
+# Schedule verb: the CP tick enqueues a job per due schedule. Floor keeps a
+# typo'd "every 1s" from turning the queue into a firehose.
+SCHEDULE_MIN_INTERVAL_SEC = 30.0
 # Log retention (M1): the sweeper prunes job_logs on a throttle so the DB
 # doesn't grow unbounded. Keep ~24h of log lines and cap per-job rows.
 LOG_PRUNE_INTERVAL = 1800.0   # seconds between prune passes (~30 min)
@@ -226,6 +230,121 @@ def _insert_job(
                 conn.execute("ROLLBACK")
             raise
     return _row_to_job(row)
+
+
+# ---------- Schedules (the `schedule` verb: interval jobs) ----------
+
+
+_EVERY_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([smhd])\s*$")
+
+
+def parse_every(every: Any) -> Optional[float]:
+    """'30m' / '6h' / '90s' / '1d' / bare seconds (number or string) → seconds.
+
+    Returns None when it can't be parsed (caller decides the error)."""
+    if isinstance(every, bool):
+        return None
+    if isinstance(every, (int, float)):
+        return float(every)
+    if isinstance(every, str):
+        m = _EVERY_RE.match(every.lower())
+        if m:
+            mult = {"s": 1, "m": 60, "h": 3600, "d": 86400}[m.group(2)]
+            return float(m.group(1)) * mult
+        try:
+            return float(every)
+        except ValueError:
+            return None
+    return None
+
+
+def _validate_job_spec(spec: dict[str, Any]) -> None:
+    """The submit-shape rules, shared by POST /jobs and schedule creation."""
+    kind = (spec.get("kind") or "").lower()
+    if kind == "auto" and not spec.get("task") and not spec.get("intent"):
+        raise HTTPException(400, "kind: auto job requires `task`")
+    if (kind != "auto" and not spec.get("intent") and not spec.get("command")
+            and not (kind == "docker" and spec.get("image"))):
+        raise HTTPException(
+            400, "job must have either `intent`, `command`, (kind: docker + `image`), "
+                 "or (kind: auto + `task`)")
+
+
+def _schedule_to_public(row: dict[str, Any]) -> dict[str, Any]:
+    try:
+        spec = json.loads(row["spec"])
+    except (TypeError, ValueError):
+        spec = {}  # a corrupt row must not 500 the list endpoint
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "spec": spec,
+        "interval_sec": row["interval_sec"],
+        "enabled": bool(row["enabled"]),
+        "next_run_at": row["next_run_at"],
+        "last_run_at": row["last_run_at"],
+        "last_job_id": row["last_job_id"],
+        "created_at": row["created_at"],
+    }
+
+
+def _tick_schedules(db_path: Path) -> int:
+    """Enqueue a job for each due schedule; returns how many were enqueued.
+
+    Policies (documented in INTEGRATIONS.md):
+    - one job per due schedule per tick — an overdue schedule (CP was down for
+      several intervals) does NOT back-fill missed runs; ``next_run_at``
+      advances in whole intervals so the original cadence is preserved;
+    - no pile-up: if the schedule's previous job is still in flight
+      (queued/assigned/running), this beat is skipped and the clock still
+      advances;
+    - a broken spec logs and skips — it never breaks the sweep loop.
+    """
+    now = time.time()
+    launched = 0
+    with _connect(db_path) as conn:
+        due = [dict(r) for r in conn.execute(
+            "SELECT * FROM schedules WHERE enabled=1 AND next_run_at <= ?",
+            (now,),
+        ).fetchall()]
+    for sched in due:
+        interval = float(sched["interval_sec"])
+        missed = int((now - sched["next_run_at"]) // interval) + 1
+        next_run = sched["next_run_at"] + missed * interval
+        new_job_id = None
+        in_flight = False
+        if sched["last_job_id"]:
+            with _connect(db_path) as conn:
+                prev = conn.execute(
+                    "SELECT state FROM jobs WHERE id=?", (sched["last_job_id"],)
+                ).fetchone()
+            in_flight = (prev is not None
+                         and prev["state"] in ("queued", "assigned", "running"))
+        if not in_flight:
+            try:
+                spec = json.loads(sched["spec"])
+                spec["schedule_id"] = sched["id"]  # provenance on every run
+                job = _insert_job(db_path, spec)
+                new_job_id = job["id"]
+                launched += 1
+            except Exception as e:  # noqa: BLE001 — never break the sweep loop
+                print(f"[roost] schedule {sched['id']} enqueue error: {e}",
+                      flush=True)
+        with _connect(db_path) as conn:
+            if new_job_id is not None:
+                conn.execute(
+                    "UPDATE schedules SET next_run_at=?, last_run_at=?, "
+                    "last_job_id=? WHERE id=?",
+                    (next_run, now, new_job_id, sched["id"]),
+                )
+            else:
+                # Skipped beat (in-flight previous run or broken spec): the
+                # clock still advances; last_run_at stays = last real enqueue.
+                conn.execute(
+                    "UPDATE schedules SET next_run_at=? WHERE id=?",
+                    (next_run, sched["id"]),
+                )
+    return launched
 
 
 def _list_jobs(
@@ -1477,6 +1596,17 @@ class JobSubmit(BaseModel):
     captain_root: bool = False  # anchor a captain plan's lineage/budget (V2-1)
 
 
+class ScheduleCreate(BaseModel):
+    spec: dict[str, Any]
+    every: Any  # seconds (number) or "<N>[smhd]" (e.g. "30m")
+    name: Optional[str] = None
+    enabled: bool = True
+
+
+class SchedulePatch(BaseModel):
+    enabled: bool
+
+
 class WorkerRegister(BaseModel):
     name: str
     capabilities: dict[str, Any] = Field(default_factory=dict)
@@ -1830,16 +1960,7 @@ def create_app(
 
     @app.post("/jobs")
     async def submit_job(payload: JobSubmit, principal: dict = Depends(require_any)):
-        kind = (payload.kind or "").lower()
-        is_docker = kind == "docker"
-        is_auto = kind == "auto"
-        if is_auto and not payload.task and not payload.intent:
-            raise HTTPException(400, "kind: auto job requires `task`")
-        if (not is_auto and not payload.intent and not payload.command
-                and not (is_docker and payload.image)):
-            raise HTTPException(
-                400, "job must have either `intent`, `command`, (kind: docker + `image`), "
-                     "or (kind: auto + `task`)")
+        _validate_job_spec(payload.model_dump(exclude_none=False))
         parent_dict: Optional[dict] = None
         if payload.parent_job_id:
             parent_dict = await asyncio.to_thread(_get_job, db, payload.parent_job_id)
@@ -2254,6 +2375,106 @@ def create_app(
         row = await asyncio.to_thread(_install)
         return publishlib.public_dict(row, str(request.base_url), publish_domain)
 
+    # ---- schedules (the `schedule` verb: interval jobs) ----
+    # The CP tick (_tick_schedules, riding the sweep loop) enqueues a job from
+    # the stored spec every interval. Client tokens may manage schedules (a
+    # phone or agent front door scheduling work is the point); the worker
+    # plane may not — a job shouldn't mint standing load.
+
+    def _require_scheduler(principal: dict) -> None:
+        if principal["kind"] not in ("shared", "none", "client"):
+            raise HTTPException(403, "schedules require admin or a client token")
+
+    @app.post("/schedules")
+    async def create_schedule(
+        payload: ScheduleCreate, principal: dict = Depends(require_any)
+    ):
+        """Create an interval schedule. First run fires one interval from now."""
+        _require_scheduler(principal)
+        interval = parse_every(payload.every)
+        if interval is None:
+            raise HTTPException(
+                400, "every must be seconds or '<N>[smhd]' (e.g. '30m')")
+        if interval < SCHEDULE_MIN_INTERVAL_SEC:
+            raise HTTPException(
+                400, f"every must be >= {SCHEDULE_MIN_INTERVAL_SEC:.0f}s")
+        spec = dict(payload.spec or {})
+        if spec.get("parent_job_id") or spec.get("captain_root"):
+            raise HTTPException(
+                400, "schedule specs are root jobs: no parent_job_id/captain_root")
+        _validate_job_spec(spec)
+        sched_id = uuid.uuid4().hex[:12]
+        now = time.time()
+
+        def _insert() -> dict:
+            with _connect(db) as conn:
+                conn.execute(
+                    "INSERT INTO schedules(id, name, spec, interval_sec, enabled, "
+                    "next_run_at, created_at, created_by) VALUES (?,?,?,?,?,?,?,?)",
+                    (sched_id, payload.name, json.dumps(spec), interval,
+                     int(payload.enabled), now + interval, now, principal["kind"]),
+                )
+                row = conn.execute(
+                    "SELECT * FROM schedules WHERE id=?", (sched_id,)).fetchone()
+            return dict(row)
+        return _schedule_to_public(await asyncio.to_thread(_insert))
+
+    @app.get("/schedules")
+    async def list_schedules(principal: dict = Depends(require_any)):
+        _require_scheduler(principal)
+
+        def _list() -> list[dict]:
+            with _connect(db) as conn:
+                return [dict(r) for r in conn.execute(
+                    "SELECT * FROM schedules ORDER BY created_at DESC").fetchall()]
+        return [_schedule_to_public(r) for r in await asyncio.to_thread(_list)]
+
+    @app.patch("/schedules/{sched_id}")
+    async def patch_schedule(
+        sched_id: str, payload: SchedulePatch,
+        principal: dict = Depends(require_any),
+    ):
+        """Enable/disable. Re-enabling restarts the clock: next run is one
+        interval from now (a long-disabled schedule must not fire instantly)."""
+        _require_scheduler(principal)
+
+        def _patch() -> Optional[dict]:
+            now = time.time()
+            with _connect(db) as conn:
+                row = conn.execute(
+                    "SELECT * FROM schedules WHERE id=?", (sched_id,)).fetchone()
+                if row is None:
+                    return None
+                if payload.enabled and not row["enabled"]:
+                    conn.execute(
+                        "UPDATE schedules SET enabled=1, next_run_at=? WHERE id=?",
+                        (now + row["interval_sec"], sched_id))
+                else:
+                    conn.execute(
+                        "UPDATE schedules SET enabled=? WHERE id=?",
+                        (int(payload.enabled), sched_id))
+                return dict(conn.execute(
+                    "SELECT * FROM schedules WHERE id=?", (sched_id,)).fetchone())
+        row = await asyncio.to_thread(_patch)
+        if row is None:
+            raise HTTPException(404, "schedule not found")
+        return _schedule_to_public(row)
+
+    @app.delete("/schedules/{sched_id}")
+    async def delete_schedule(
+        sched_id: str, principal: dict = Depends(require_any)
+    ):
+        _require_scheduler(principal)
+
+        def _delete() -> bool:
+            with _connect(db) as conn:
+                cur = conn.execute(
+                    "DELETE FROM schedules WHERE id=?", (sched_id,))
+                return cur.rowcount > 0
+        if not await asyncio.to_thread(_delete):
+            raise HTTPException(404, "schedule not found")
+        return {"deleted": True, "id": sched_id}
+
     @app.get("/publish", dependencies=[Depends(require_any)])
     async def list_sites_endpoint(request: Request):
         def _list() -> list[dict]:
@@ -2454,6 +2675,11 @@ async def _sweep_loop(db_path: Path) -> None:
             await asyncio.to_thread(_sweep, db_path)
         except Exception as e:  # noqa: BLE001
             print(f"[roost] sweeper error: {e}", flush=True)
+        # Schedule tick: enqueue jobs for due interval schedules (R8).
+        try:
+            await asyncio.to_thread(_tick_schedules, db_path)
+        except Exception as e:  # noqa: BLE001
+            print(f"[roost] schedule tick error: {e}", flush=True)
         if narrate:
             try:
                 await _narrate_pass(db_path)

@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import sqlite3
 
-CURRENT_VERSION = 11
+CURRENT_VERSION = 12
 
-# Full current (V11) schema for fresh installs.
+# Full current (V12) schema for fresh installs.
 SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS workers (
     id              TEXT PRIMARY KEY,
@@ -130,6 +130,20 @@ CREATE TABLE IF NOT EXISTS sites (
     updated_at  REAL NOT NULL,
     created_by  TEXT
 );
+
+CREATE TABLE IF NOT EXISTS schedules (
+    id            TEXT PRIMARY KEY,
+    name          TEXT,
+    spec          TEXT NOT NULL,            -- job spec JSON, enqueued verbatim each run
+    interval_sec  REAL NOT NULL,
+    enabled       INTEGER NOT NULL DEFAULT 1,
+    next_run_at   REAL NOT NULL,
+    last_run_at   REAL,
+    last_job_id   TEXT,                     -- most recently enqueued job (overlap guard)
+    created_at    REAL NOT NULL,
+    created_by    TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_schedules_due ON schedules(enabled, next_run_at);
 """
 
 # V8 → V9 (scoped client tokens: `roost pair` for the mobile apps).
@@ -171,6 +185,23 @@ CREATE TABLE IF NOT EXISTS sites (
     updated_at  REAL NOT NULL,
     created_by  TEXT
 );
+"""
+
+# V11 → V12 (schedule verb: interval jobs enqueued by the CP tick).
+_SCHEDULES_DDL = """
+CREATE TABLE IF NOT EXISTS schedules (
+    id            TEXT PRIMARY KEY,
+    name          TEXT,
+    spec          TEXT NOT NULL,
+    interval_sec  REAL NOT NULL,
+    enabled       INTEGER NOT NULL DEFAULT 1,
+    next_run_at   REAL NOT NULL,
+    last_run_at   REAL,
+    last_job_id   TEXT,
+    created_at    REAL NOT NULL,
+    created_by    TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_schedules_due ON schedules(enabled, next_run_at);
 """
 
 # V0 → V1 additive migration. Each entry is (column_name, full DDL fragment).
@@ -293,6 +324,10 @@ def migrate(conn: sqlite3.Connection) -> int:
     if version < 11:
         # V10 → V11: static publish (sites served at /pub/<slug>/).
         conn.executescript(_SITES_DDL)
+
+    if version < 12:
+        # V11 → V12: schedule verb (interval jobs enqueued by the CP tick).
+        conn.executescript(_SCHEDULES_DDL)
 
     conn.execute(f"PRAGMA user_version = {CURRENT_VERSION}")
     return CURRENT_VERSION

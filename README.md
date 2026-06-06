@@ -82,7 +82,8 @@ schedule**.
   LAN/tailscale URL).
 - **Codex / anything HTTP:** bearer token, `POST /jobs` with `{kind: "auto", task: …}`,
   then poll `GET /jobs/{id}` or stream `/jobs/{id}/stream`.
-- **Scripts / cron:** `roost do` / `roost exec` / `roost submit` one-liners.
+- **Scripts / cron:** `roost do` / `roost exec` / `roost submit` one-liners; or skip
+  cron — `roost schedule "<goal>" --every 6h` and the control plane runs it on the beat.
 
 Mint a scoped token for non-admin front doors with `roost pair`. Full copy-paste recipes
 per front door: **[docs/INTEGRATIONS.md](docs/INTEGRATIONS.md)**.
@@ -176,6 +177,7 @@ The lower-level forms, if you want them:
 | `roost run "<task>"` | One verified task on a self-selecting node (`kind: auto`). The single-task primitive `do` calls. |
 | `roost dispatch "<goal>"` | Split a multi-part goal across nodes via the captain agent. |
 | `roost submit <spec.yaml>` | The precise/expert escape hatch — exact `requires`, kind, container, budget. |
+| `roost schedule "<goal>" --every 6h` | Run work on an interval — the CP enqueues it each beat (no pile-up, no back-fill). |
 
 **Model policy:** Sonnet by default everywhere. Haiku is used only for tasks the router
 flags trivially simple (print a value, read a small file, report a hostname). The verifier
