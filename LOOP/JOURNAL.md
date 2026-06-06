@@ -46,3 +46,29 @@ Entries are written by the loop; humans read, never need to edit.
   `~/roost-fleet/admin_token` → `~/.config/roost/config.toml` (0600), never in
   the repo. The CP self-reports v0.2.0 while pyproject.toml says 0.1.0 —
   version drift noted to Proposed.
+
+## 2026-06-06 04:49 UTC — I1: Integrate outstanding feature branches into master
+- Verdict: shipped
+- Branch/PR: feat/agent-substrate → PR #8 (merged ece2d17); feat/mac-app → PR #5
+  retargeted to master (merged 9d5a990); PR #4 auto-resolved MERGED (ancestor);
+  PR #6 closed superseded (b7541e3 carries the same work)
+- What changed: master now contains both lines — the agent-substrate stack (blob
+  store, mobile thin clients, publish + roost.pub, MCP transfer tools, client
+  tokens, LOOP harness) and the native SwiftPM mac app (pywebview PoC deleted).
+  Conflict resolution: none needed — leg 1 was a fast-forward; leg 2's merge of
+  master into feat/mac-app auto-resolved (mac-app's footprint is mac-app/ + its
+  CI workflow + .gitignore Swift entries only).
+- Evidence:
+  - leg 1: `git merge-base --is-ancestor master 1dd840c` → FF; `python -m pytest -q` → 347 passed in 9.91s
+  - leg 2 (merge result 998b399): `python -m pytest -q` → 347 passed in 9.65s; `PATH=/tmp/swift-toolchain/usr/bin:$PATH swift test` (mac-app/) → 30/30, 0 failures, Swift 6.0.3 Linux
+  - pro-Swift check: mac-app/{panel_window.py,build.sh,launcher.sh} absent; SwiftPM layout present
+  - final master (9d5a990): `python -m pytest -q` → 347 passed in 9.79s; mac-app/Package.swift+Sources+Tests present → mobile-app/ios/README.md:137 "see mac-app for the pattern" now resolves
+- Judge: approve ×2 (one per merge leg, round 1 each) — leg 1: re-ran pytest
+  (347), FF check, secrets scan (rst-mob-* are synthetic fixtures), 0 deletions,
+  54 new test functions; leg 2: re-ran pytest (347) + swift test (30/30),
+  verified PoC deletions and mac-app-only footprint, no secrets.
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (both legs)
+- Notes: merges performed by the loop under the user's standing "Loop merges
+  (always)" authorization granted 2026-06-06 (AskUserQuestion). I0's deviation
+  is now healed — LOOP/ lives on master; this entry's PR targets master
+  normally. feat/mobile-app branch left in place (PR closed with note).
