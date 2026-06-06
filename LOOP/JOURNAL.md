@@ -154,8 +154,16 @@ Entries are written by the loop; humans read, never need to edit.
     - worker heartbeat reconcile: `lease lost (server no longer attributes it to us); aborting local attempt` → `torn down (lease_lost)` (worker.log)
     - job re-leased and `running` attempt 2; old attempt-1 process group confirmed dead (pgrep), exactly one fresh process tree
     - no stale terminal event posted (attempt 2 untouched by attempt 1's teardown)
-- Judge: (filled after verdict)
-- Models: implementer claude-opus-4-8 / judge (filled after verdict)
+- Judge: approve (round 1) — re-ran pytest (379) + the 5 new tests, walked the
+  race analysis (grace window vs heartbeat snapshot: no kill-healthy-work path),
+  confirmed killpg closes the relay pipes so _reap can't hang, and ran its OWN
+  live smoke (:8796) where the OTHER path fired first (`re-leased while a stale
+  local attempt is still running` → torn down → attempt 2) — both reconcile
+  mechanisms now verified live. One non-blocking nit: a malformed `owned`
+  (non-iterable) would raise TypeError outside the except tuple — same
+  exception scope as the pre-existing cancel path; noted, not fixed.
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (fenced
+  model-ID block enforced this round — slip fixed; keep the fenced format)
 - Notes: one test fix mid-iteration: outage-sim test originally left w1 online,
   and the placer kept preferring it — marking w1 offline (faithful to a real
   outage) fixed placement to w2. Wire change is additive (older workers ignore
