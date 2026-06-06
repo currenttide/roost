@@ -116,8 +116,18 @@ Entries are written by the loop; humans read, never need to edit.
     - unbudgeted `sleep 30` → state `failed`, error `default_runtime_cap_exceeded` (~2s)
     - `sleep 30` + `max_wallclock_sec: 1` → `failed`, `wallclock_exceeded` (unchanged path)
     - unbudgeted `echo quick-ok` → `succeeded`
-- Judge: (filled after verdict)
-- Models: implementer claude-opus-4-8 / judge (filled after verdict)
+- Judge: approve (round 1) — re-ran pytest (374 passed in 11.12s) and the live
+  smoke on its OWN scratch CP (:8798): default-cap kill, explicit-budget kill,
+  quick-job success all reproduced; verified `_budget_remaining`/verify-phase
+  semantics untouched, `roost exec` unaffected, zero-budget edge improved;
+  judged the distinct-error-token interpretation defensible and the cap values
+  (120/240/240/360m, overridable, opt-out) sound; R1 URL backfill ruled
+  acceptable bookkeeping.
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (explicit
+  `model: sonnet` override; verdict text again omitted the first-line model ID
+  despite a strengthened instruction — re-confirmed claude-sonnet-4-6 by probe.
+  Recurring formatting slip noted as an A4 debt: the judge prompt needs a
+  structural fix, e.g. demand the ID in a fenced first block.)
 - Notes: cap values are judgment calls (runaway breakers, not schedulers) —
   flagged for human review in the PR. R1's journal Branch/PR line backfilled
   with PR #10 in this commit (carry-over noted last iteration).
