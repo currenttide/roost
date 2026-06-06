@@ -850,6 +850,51 @@ MAX_FIX_ATTEMPTS = 2
 # [C4/H2] Default per-subprocess ceiling for verify/self-heal agents.
 VERIFY_HEAL_TIMEOUT = 300.0
 
+# [R2] Default wallclock caps (minutes) per job kind, applied only when the spec
+# sets no budget — an unbudgeted job must not hold a capacity slot forever.
+# Override per worker via policy `default_wallclock_min` (scalar for all kinds,
+# or a {kind: minutes} mapping); 0 or a negative value opts that kind out
+# (unbounded — an explicit, trusted choice). Generous on purpose: these are
+# runaway breakers, not schedulers.
+DEFAULT_WALLCLOCK_MIN: dict[str, float] = {
+    "command": 120.0,   # shell one-liners / scripts
+    "claude": 240.0,    # agent jobs: long but not infinite
+    "auto": 240.0,      # bare-worker triage+execute (an agent job underneath)
+    "docker": 360.0,    # containerized builds / GPU work run longest
+}
+DEFAULT_WALLCLOCK_FALLBACK_MIN = 240.0  # unknown kinds
+
+
+def _resolve_timeout(spec: dict, policy: Optional[dict]) -> tuple[Optional[float], str]:
+    """[R2] Resolve a job's wallclock cap. Returns (timeout_s, source) where
+    source is "budget" (explicit spec budget), "default" (per-kind cap above /
+    policy override), or "none" (policy opted the kind out). Pure + total; safe
+    on missing/garbage values (garbage budget falls through to the default cap,
+    garbage policy falls back to the built-in default)."""
+    budget = spec.get("budget") or {}
+    try:
+        if budget.get("max_wallclock_min"):
+            return float(budget["max_wallclock_min"]) * 60.0, "budget"
+        if budget.get("max_wallclock_sec"):
+            return float(budget["max_wallclock_sec"]), "budget"
+    except (TypeError, ValueError):
+        pass  # garbage budget → treat as unbudgeted, fall through to default
+
+    kind = (spec.get("kind") or "claude").lower()
+    default_min = DEFAULT_WALLCLOCK_MIN.get(kind, DEFAULT_WALLCLOCK_FALLBACK_MIN)
+    cfg = (policy or {}).get("default_wallclock_min")
+    if isinstance(cfg, dict):
+        cfg = cfg.get(kind, default_min)
+    if cfg is None:
+        cfg = default_min
+    try:
+        minutes = float(cfg)
+    except (TypeError, ValueError):
+        minutes = default_min
+    if minutes <= 0:
+        return None, "none"  # explicit opt-out: unbounded
+    return minutes * 60.0, "default"
+
 
 def _budget_remaining(
     budget: dict,
@@ -1621,11 +1666,16 @@ class Worker:
             env["CLAUDE_CODE_SUBAGENT_MODEL"] = spec["subagent_model"]
 
         budget = spec.get("budget") or {}
-        timeout_s: Optional[float] = None
-        if budget.get("max_wallclock_min"):
-            timeout_s = float(budget["max_wallclock_min"]) * 60.0
-        elif budget.get("max_wallclock_sec"):
-            timeout_s = float(budget["max_wallclock_sec"])
+        # [R2] No explicit budget → per-kind default cap (policy-overridable), so an
+        # unbudgeted job can't hold a capacity slot forever.
+        timeout_s, timeout_source = _resolve_timeout(spec, self.policy)
+        if timeout_source == "default":
+            await self._send_log(
+                job_id, "event",
+                f"no wallclock budget set; applying default cap {timeout_s:.0f}s "
+                f"for kind={spec.get('kind') or 'claude'} "
+                "(set budget.max_wallclock_min to override)",
+            )
 
         try:
             process = await asyncio.create_subprocess_exec(
@@ -1713,10 +1763,14 @@ class Worker:
                 await process.wait()
         except asyncio.TimeoutError:
             timed_out = True
-            await self._send_log(
-                job_id, "event",
-                f"wallclock budget exceeded ({timeout_s:.0f}s); killing",
-            )
+            # [R2] Say which cap fired: an explicit budget vs the default cap (the
+            # latter tells the operator how to opt for a longer run).
+            if timeout_source == "default":
+                msg = (f"default runtime cap exceeded ({timeout_s:.0f}s, no budget "
+                       "set); killing — set budget.max_wallclock_min to run longer")
+            else:
+                msg = f"wallclock budget exceeded ({timeout_s:.0f}s); killing"
+            await self._send_log(job_id, "event", msg)
             # Reuse the shared teardown (kills process + docker container).
             await self._kill_active_job(job_id, "timeout")
             try:
@@ -1748,7 +1802,13 @@ class Worker:
             print(f"[roost] job {job_id} torn down (cancelled)", flush=True)
             return
         if timed_out:
-            terminal.update(type="failed", error="wallclock_exceeded", exit_code=exit_code)
+            # [R2] Distinct error tokens so a timeout is tellable from an ordinary
+            # failure — and a default-cap kill from an explicit-budget one.
+            terminal.update(
+                type="failed",
+                error=("default_runtime_cap_exceeded" if timeout_source == "default"
+                       else "wallclock_exceeded"),
+                exit_code=exit_code)
         elif declined:
             # Self-declined: not a failure — the kernel requeues for a better-fit node.
             terminal.update(type="declined", reason=decline_reason or "declined")
