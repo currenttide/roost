@@ -86,7 +86,14 @@ Entries are written by the loop; humans read, never need to edit.
   field, volume entries, whitespace-masking, empties, and a legit-spec regression.
 - Evidence:
   - `python -m pytest -q` → 359 passed in 9.60s (was 347; +12 new, none removed)
-- Judge: (filled after verdict)
-- Models: implementer claude-opus-4-8 / judge (filled after verdict)
+- Judge: approve (round 1) — re-ran pytest (359 passed in 9.87s), verified no
+  test deletions, confirmed all 8 argv positions guarded incl. the
+  `container.image` fallback, probed adversarially (whitespace/newline/tab
+  masks, bare "-", unicode dashes, NUL byte, env path) and found no bypass;
+  command-exemption rationale verified empirically.
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (explicit
+  `model: sonnet` override; the judge's verdict text dropped its mandatory
+  first-line model ID — a same-override probe re-confirmed claude-sonnet-4-6;
+  logged as a formatting slip, not a model substitution)
 - Notes: scope held to Done-when; no drive-bys. Env keys/values were already
   positionally safe (consumed by `-e`) and policy-filtered by `_sanitize_env`.
