@@ -32,3 +32,7 @@ admin_token
 *.swp
 .idea/
 .vscode/
+
+# Swift (mac-app)
+.build/
+.swiftpm/
