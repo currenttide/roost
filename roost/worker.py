@@ -572,6 +572,22 @@ def _validate_container(container: Optional[dict], policy: Optional[dict]) -> No
         )
 
 
+def _argv_value(what: str, value: Any) -> str:
+    """[R1] Validate a spec-sourced value bound for the `docker run` argv: reject
+    empty/whitespace-only values and values whose first non-space char is '-' —
+    docker's CLI parser would read those as flags, not arguments (e.g.
+    `image: "--privileged"` lands after the option flags and silently grants the
+    container host privileges). Returns the value as a str."""
+    s = str(value)
+    if not s.strip():
+        raise ValueError(f"docker job: `{what}` must not be empty")
+    if s.lstrip().startswith("-"):
+        raise ValueError(
+            f"docker job: refusing {what}={s!r} — a leading '-' would be parsed "
+            "by docker as a flag, not a value")
+    return s
+
+
 def _build_docker_argv(spec: dict, job_id: str, policy: Optional[dict] = None) -> list[str]:
     """Build a `docker run` argv for a `kind: docker` job.
 
@@ -605,19 +621,19 @@ def _build_docker_argv(spec: dict, job_id: str, policy: Optional[dict] = None) -
     if not gpus and (req.get("docker_gpu") or req.get("gpu_vram_gb") or req.get("gpu")):
         gpus = "all"
     if gpus:
-        argv += ["--gpus", str(gpus)]
+        argv += ["--gpus", _argv_value("container.gpus", gpus)]
     if c.get("cpus"):
-        argv += ["--cpus", str(c["cpus"])]
+        argv += ["--cpus", _argv_value("container.cpus", c["cpus"])]
     if c.get("memory"):
-        argv += ["--memory", str(c["memory"])]
+        argv += ["--memory", _argv_value("container.memory", c["memory"])]
     if c.get("shm_size"):
-        argv += ["--shm-size", str(c["shm_size"])]
+        argv += ["--shm-size", _argv_value("container.shm_size", c["shm_size"])]
     if c.get("network"):
-        argv += ["--network", str(c["network"])]
+        argv += ["--network", _argv_value("container.network", c["network"])]
     if c.get("workdir"):
-        argv += ["-w", str(c["workdir"])]
+        argv += ["-w", _argv_value("container.workdir", c["workdir"])]
     for vol in c.get("volumes") or []:
-        argv += ["-v", str(vol)]
+        argv += ["-v", _argv_value("container.volumes entry", vol)]
     # [M4-parity] The in-container env is attacker-controllable too — a docker job
     # could set ANTHROPIC_*/*_PROXY/NODE_OPTIONS inside the container to redirect creds
     # or inject code. Apply the SAME blocked-key policy as the subprocess env, honoring
@@ -628,7 +644,12 @@ def _build_docker_argv(spec: dict, job_id: str, policy: Optional[dict] = None) -
               f"{', '.join(sorted(dropped_ctr_env))}", flush=True)
     for key, val in ctr_env.items():
         argv += ["-e", f"{key}={val}"]
-    argv.append(str(image))
+    # [R1] `image` is the first positional after the option flags — the highest-value
+    # injection point (a leading-dash image becomes a docker flag and the first
+    # command element silently becomes the image). In-container `command` elements
+    # are NOT restricted: they land after the image, where docker stops flag
+    # parsing, and leading dashes there are legitimate (e.g. ["ls", "-la"]).
+    argv.append(_argv_value("image", image))
     cmd = spec.get("command")
     if cmd:
         if isinstance(cmd, str):

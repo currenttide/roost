@@ -47,7 +47,7 @@ feat/mac-app) — verify it after the merge.
 
 ## Ranked
 
-### R1. Harden docker argv assembly against flag injection — `open`
+### R1. Harden docker argv assembly against flag injection — `done` *(2026-06-06)*
 Surface: backend/security. *(Re-scoped 2026-06-05: verified no shell injection — `_build_docker_argv` builds an argv list with `_validate_container` mount/network guards and `_sanitize_env`.)* Residual: `argv.append(str(image))` lands after the option flags (roost/worker.py:~640), so a leading-dash `image`, `volumes`, `network`, or `workdir` value (e.g. `image: "--privileged"`) is parsed by `docker run` as a flag, not an argument.
 Done-when: leading-dash (and empty) values rejected for all spec-sourced argv positions; malicious-spec tests added; pytest green.
 

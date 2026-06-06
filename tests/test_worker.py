@@ -190,6 +190,72 @@ def test_docker_argv_container_env_policy_opt_in():
     assert "ANTHROPIC_BASE_URL=http://x" in argv
 
 
+# ---------- [R1] flag injection via spec-sourced argv positions ----------
+
+
+def test_docker_argv_rejects_leading_dash_image():
+    # `image: "--privileged"` would be parsed by docker as a flag, promoting the
+    # first command element to the image — privilege escalation via spec.
+    with pytest.raises(ValueError, match="leading '-'"):
+        _build_docker_argv(
+            {"image": "--privileged", "command": ["alpine", "sh", "-c", "id"]},
+            "job1", None)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("gpus", "--privileged"),
+    ("cpus", "-1"),
+    ("memory", "--pid=host"),
+    ("shm_size", "--cap-add=ALL"),
+    ("network", "--privileged"),
+    ("workdir", "--volume=/:/host"),
+])
+def test_docker_argv_rejects_leading_dash_container_fields(field, value):
+    with pytest.raises(ValueError, match="leading '-'"):
+        _build_docker_argv(
+            {"image": "alpine", "container": {field: value}}, "job1", None)
+
+
+def test_docker_argv_rejects_leading_dash_volume():
+    with pytest.raises(ValueError, match="leading '-'"):
+        _build_docker_argv(
+            {"image": "alpine", "container": {"volumes": ["--privileged"]}},
+            "job1", None)
+
+
+def test_docker_argv_rejects_whitespace_masked_dash():
+    # Leading whitespace must not smuggle the dash past the check.
+    with pytest.raises(ValueError, match="leading '-'"):
+        _build_docker_argv(
+            {"image": "  --privileged", "command": ["alpine"]}, "job1", None)
+
+
+def test_docker_argv_rejects_empty_volume_entry():
+    with pytest.raises(ValueError, match="must not be empty"):
+        _build_docker_argv(
+            {"image": "alpine", "container": {"volumes": [""]}}, "job1", None)
+
+
+def test_docker_argv_rejects_whitespace_only_workdir():
+    with pytest.raises(ValueError, match="must not be empty"):
+        _build_docker_argv(
+            {"image": "alpine", "container": {"workdir": "  "}}, "job1", None)
+
+
+def test_docker_argv_legit_specs_still_build():
+    # Ordinary values keep working, and in-container command flags stay legal —
+    # they land after the image where docker stops flag parsing.
+    argv = _build_docker_argv(
+        {"image": "alpine:3.20",
+         "command": ["ls", "-la", "/data"],
+         "container": {"cpus": "2", "memory": "1g", "workdir": "/data",
+                       "network": "bridge", "volumes": ["/data:/data:ro"]}},
+        "job1", None)
+    i = argv.index("alpine:3.20")
+    assert argv[i + 1:] == ["ls", "-la", "/data"]
+    assert "--cpus" in argv and "bridge" in argv
+
+
 # ---------- [C4/H2] verify/self-heal budget bounding ----------
 
 
