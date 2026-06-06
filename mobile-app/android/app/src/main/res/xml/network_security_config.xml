@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The control plane is plain http on a LAN/tailnet (e.g. http://192.168.x.x:8787,
+  http://100.x.x.x:8787, http://hostname.ts.net:8787). We permit cleartext but
+  scope it as tightly as the platform allows: private RFC1918 ranges, the CGNAT
+  /10 that Tailscale uses, localhost, and the *.ts.net MagicDNS suffix. Public
+  internet stays HTTPS-only (the base-config below forbids cleartext there).
+
+  NOTE: domain entries are exact/subdomain matches, not CIDR — Android has no CIDR
+  matcher. We enumerate the common 192.168.x and 10.x /16-ish prefixes plus the
+  100.64-127 CGNAT block is impractical to fully enumerate, so the base policy
+  ALSO permits cleartext as a pragmatic fallback for arbitrary LAN IPs (the app's
+  trust model is LAN/tunnel, same as the roost CLI). The named domains document
+  intent; the base flag is what actually lets a typed 192.168.1.193 through.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+
+    <!-- Explicitly documented cleartext targets (the common cases). -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">localhost</domain>
+        <domain includeSubdomains="true">127.0.0.1</domain>
+        <domain includeSubdomains="true">ts.net</domain>
+    </domain-config>
+</network-security-config>

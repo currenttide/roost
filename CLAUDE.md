@@ -14,6 +14,7 @@ report results. Jobs are `command`, `claude` (agent), or `docker` (isolated/GPU)
 - `roost/service.py` — durable worker/CP services (systemd / launchd).
 - `.claude/skills/` — `roost-quickstart` (first-run setup), `roost-onboard` (add a node), `roost-oversee` (monitor).
 - `docker/` — worker container + full stack. `mac-app/` — optional macOS control app. `examples/` — runnable job specs.
+- `mobile-app/` — iPhone/Android thin clients (`ios/` SwiftUI, `android/` Compose) + the pinned `API.md` contract and golden `fixtures/` both build against. Pure-logic layers are testable on Linux (see each README).
 
 ## Working here
 - Run the tests after any code change: `python -m pytest -q`.

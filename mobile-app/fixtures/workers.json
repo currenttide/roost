@@ -1,0 +1,21 @@
+[
+  {
+    "capabilities": {
+      "cpus": 4,
+      "tools": [
+        "python3"
+      ]
+    },
+    "capacity": 1,
+    "enroll_id": "4a3b5a881e198ebab6b392bd00b3969e1f8159afd4a5dc31b9f6cbd5a6cfef44",
+    "id": "bcc9246037a2",
+    "last_assigned_at": 1780712190.559938,
+    "last_seen": 1780712190.5762603,
+    "name": "fixture-node",
+    "policy": {},
+    "registered_at": 1780712190.4945385,
+    "revoked": 0,
+    "running": 1,
+    "status": "busy"
+  }
+]

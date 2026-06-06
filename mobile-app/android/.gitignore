@@ -1,0 +1,12 @@
+*.iml
+.gradle/
+/local.properties
+/.idea/
+.DS_Store
+/build
+/app/build
+/captures
+.externalNativeBuild
+.cxx
+# Wrapper jar is generated locally, not committed (see README).
+gradle/wrapper/gradle-wrapper.jar

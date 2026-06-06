@@ -1,0 +1,212 @@
+[
+  {
+    "assigned_at": null,
+    "attempt": 0,
+    "capable_workers": 0,
+    "created_at": 1780712190.5824282,
+    "decline_count": 0,
+    "declined_by": null,
+    "depth": 0,
+    "diagnosis": null,
+    "error": null,
+    "eta_sec": null,
+    "exit_code": null,
+    "finished_at": null,
+    "id": "f02797a2e030",
+    "intent": "train on the gpu box",
+    "last_activity": null,
+    "last_activity_at": null,
+    "lease_expires_at": null,
+    "max_attempts": 2,
+    "max_depth": 3,
+    "model": null,
+    "narrated_at": null,
+    "narration": null,
+    "parent_job_id": null,
+    "progress": null,
+    "queued_sec": 0.0,
+    "requires": {
+      "gpu_vram_gb": ">=24"
+    },
+    "result": null,
+    "root_job_id": "f02797a2e030",
+    "spec": {
+      "args": null,
+      "budget": {},
+      "captain_root": false,
+      "command": null,
+      "container": null,
+      "cwd": null,
+      "env": null,
+      "hierarchy": {
+        "can_dispatch": true
+      },
+      "image": null,
+      "intent": "train on the gpu box",
+      "kind": "claude",
+      "max_attempts": null,
+      "model": null,
+      "parent_job_id": null,
+      "permissions": {},
+      "prefer": null,
+      "requires": {
+        "gpu_vram_gb": ">=24"
+      },
+      "subagent_model": null,
+      "success_criteria": null,
+      "target": null,
+      "task": null,
+      "verify": null
+    },
+    "started_at": null,
+    "state": "queued",
+    "subagent_model": null,
+    "tokens_used": 0,
+    "tree_budget_spent": 0,
+    "tree_budget_tokens": null,
+    "worker_id": null
+  },
+  {
+    "assigned_at": 1780712190.559938,
+    "attempt": 1,
+    "created_at": 1780712190.5528014,
+    "decline_count": 0,
+    "declined_by": null,
+    "depth": 0,
+    "diagnosis": null,
+    "error": null,
+    "eta_sec": null,
+    "exit_code": null,
+    "finished_at": null,
+    "id": "f4eaad7db81d",
+    "idle_sec": 0.0,
+    "intent": "bump deps and run the test suite",
+    "last_activity": "uv lock --upgrade ...",
+    "last_activity_at": 1780712190.5744524,
+    "lease_expires_at": 1780712250.5762603,
+    "max_attempts": 2,
+    "max_depth": 3,
+    "model": null,
+    "narrated_at": null,
+    "narration": null,
+    "parent_job_id": null,
+    "progress": null,
+    "requires": {
+      "tools": [
+        "python3"
+      ]
+    },
+    "result": null,
+    "root_job_id": "f4eaad7db81d",
+    "spec": {
+      "args": null,
+      "budget": {},
+      "captain_root": false,
+      "command": null,
+      "container": null,
+      "cwd": null,
+      "env": null,
+      "hierarchy": {
+        "can_dispatch": true
+      },
+      "image": null,
+      "intent": "bump deps and run the test suite",
+      "kind": "claude",
+      "max_attempts": null,
+      "model": null,
+      "parent_job_id": null,
+      "permissions": {},
+      "prefer": null,
+      "requires": {
+        "tools": [
+          "python3"
+        ]
+      },
+      "subagent_model": null,
+      "success_criteria": null,
+      "target": null,
+      "task": null,
+      "verify": null
+    },
+    "started_at": 1780712190.5660014,
+    "state": "running",
+    "subagent_model": null,
+    "tokens_used": 0,
+    "tree_budget_spent": 0,
+    "tree_budget_tokens": null,
+    "worker_id": "bcc9246037a2"
+  },
+  {
+    "assigned_at": 1780712190.508045,
+    "attempt": 1,
+    "created_at": 1780712190.5024521,
+    "decline_count": 0,
+    "declined_by": null,
+    "depth": 0,
+    "diagnosis": null,
+    "error": null,
+    "eta_sec": null,
+    "exit_code": 0,
+    "finished_at": 1780712190.5448084,
+    "id": "8173e1180fb5",
+    "intent": "fix the flaky auth test in roost-oss",
+    "last_activity": "re-running: all green",
+    "last_activity_at": 1780712190.547404,
+    "lease_expires_at": null,
+    "max_attempts": 2,
+    "max_depth": 3,
+    "model": null,
+    "narrated_at": null,
+    "narration": null,
+    "parent_job_id": null,
+    "progress": null,
+    "requires": {
+      "tools": [
+        "python3"
+      ]
+    },
+    "result": {
+      "evidence": "pytest -q: 255 passed",
+      "output": "fixed: tests green",
+      "verified": true
+    },
+    "root_job_id": "8173e1180fb5",
+    "spec": {
+      "args": null,
+      "budget": {},
+      "captain_root": false,
+      "command": null,
+      "container": null,
+      "cwd": null,
+      "env": null,
+      "hierarchy": {
+        "can_dispatch": true
+      },
+      "image": null,
+      "intent": "fix the flaky auth test in roost-oss",
+      "kind": "claude",
+      "max_attempts": null,
+      "model": null,
+      "parent_job_id": null,
+      "permissions": {},
+      "prefer": null,
+      "requires": {
+        "tools": [
+          "python3"
+        ]
+      },
+      "subagent_model": null,
+      "success_criteria": null,
+      "target": null,
+      "task": null,
+      "verify": null
+    },
+    "started_at": 1780712190.512915,
+    "state": "succeeded",
+    "subagent_model": null,
+    "tokens_used": 48213,
+    "tree_budget_spent": 48213,
+    "tree_budget_tokens": null,
+    "worker_id": "bcc9246037a2"
+  }
+]

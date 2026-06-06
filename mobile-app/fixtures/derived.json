@@ -1,0 +1,120 @@
+{
+  "fleet_verdict": {
+    "level": "alert",
+    "summary": "1 need attention \u2014 unplaceable: train on the gpu box"
+  },
+  "generated_at": 1780712190.592601,
+  "runs": [
+    {
+      "capable_workers": 0,
+      "cost": {
+        "cost_est_usd": 0.0,
+        "tokens_used": 0
+      },
+      "created_at": 1780712190.5824282,
+      "decline_count": 0,
+      "diagnosis": null,
+      "eta_sec": null,
+      "evidence": null,
+      "finished_at": null,
+      "goal": "train on the gpu box",
+      "health": {
+        "reason": "no online worker satisfies requires",
+        "status": "unplaceable"
+      },
+      "idle_sec": null,
+      "last_activity": null,
+      "narration": null,
+      "phase": "queued",
+      "progress": null,
+      "queued_sec": 0.0,
+      "result": "",
+      "root_job_id": "f02797a2e030",
+      "run_id": "f02797a2e030",
+      "state": "queued",
+      "verified": null,
+      "worker": null
+    },
+    {
+      "capable_workers": null,
+      "cost": {
+        "cost_est_usd": 0.0,
+        "tokens_used": 0
+      },
+      "created_at": 1780712190.5528014,
+      "decline_count": 0,
+      "diagnosis": null,
+      "eta_sec": null,
+      "evidence": null,
+      "finished_at": null,
+      "goal": "bump deps and run the test suite",
+      "health": {
+        "reason": "uv lock --upgrade ...",
+        "status": "running"
+      },
+      "idle_sec": 0.0,
+      "last_activity": "uv lock --upgrade ...",
+      "narration": "uv lock --upgrade ...",
+      "phase": "running",
+      "progress": null,
+      "queued_sec": null,
+      "result": "",
+      "root_job_id": "f4eaad7db81d",
+      "run_id": "f4eaad7db81d",
+      "state": "running",
+      "verified": null,
+      "worker": "bcc9246037a2"
+    },
+    {
+      "capable_workers": null,
+      "cost": {
+        "cost_est_usd": 0.3073,
+        "tokens_used": 48213
+      },
+      "created_at": 1780712190.5024521,
+      "decline_count": 0,
+      "diagnosis": null,
+      "eta_sec": null,
+      "evidence": "pytest -q: 255 passed",
+      "finished_at": 1780712190.5448084,
+      "goal": "fix the flaky auth test in roost-oss",
+      "health": {
+        "reason": "pytest -q: 255 passed",
+        "status": "verified"
+      },
+      "idle_sec": null,
+      "last_activity": "re-running: all green",
+      "narration": "re-running: all green",
+      "phase": "succeeded",
+      "progress": null,
+      "queued_sec": null,
+      "result": "fixed: tests green",
+      "root_job_id": "8173e1180fb5",
+      "run_id": "8173e1180fb5",
+      "state": "succeeded",
+      "verified": true,
+      "worker": "bcc9246037a2"
+    }
+  ],
+  "workers": [
+    {
+      "capabilities": {
+        "cpus": 4,
+        "tools": [
+          "python3"
+        ]
+      },
+      "capacity": 1,
+      "enroll_id": "4a3b5a881e198ebab6b392bd00b3969e1f8159afd4a5dc31b9f6cbd5a6cfef44",
+      "id": "bcc9246037a2",
+      "last_assigned_at": 1780712190.559938,
+      "last_seen": 1780712190.5762603,
+      "name": "fixture-node",
+      "policy": {},
+      "registered_at": 1780712190.4945385,
+      "revoked": 0,
+      "running": 1,
+      "status": "busy"
+    }
+  ]
+}
