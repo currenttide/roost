@@ -9,6 +9,8 @@ import oss.roost.mobile.model.Job
 import oss.roost.mobile.model.LogPage
 import oss.roost.mobile.model.Parsers
 import oss.roost.mobile.model.Run
+import oss.roost.mobile.model.Site
+import oss.roost.mobile.model.StagedBlob
 import oss.roost.mobile.model.Worker
 import org.json.JSONObject
 import java.io.BufferedReader
@@ -95,6 +97,45 @@ class ApiClient(
         }
         return Parsers.parseJob(requestText("POST", "/jobs", body.toString()))
     }
+
+    // ---- publish (API.md §6) -------------------------------------------------------
+
+    /** Stage a site bundle (raw tar.gz bytes) — publish step 1. */
+    suspend fun uploadBlob(name: String, bytes: ByteArray): StagedBlob =
+        withContext(Dispatchers.IO) {
+            val conn = open("/blobs?name=${enc(name)}")
+            try {
+                conn.requestMethod = "POST"
+                conn.connectTimeout = 10_000
+                conn.readTimeout = 60_000   // bundles are bigger than JSON bodies
+                token?.let { conn.setRequestProperty("Authorization", "Bearer $it") }
+                conn.setRequestProperty("Content-Type", "application/octet-stream")
+                conn.doOutput = true
+                conn.outputStream.use { it.write(bytes) }
+                val code = conn.responseCode
+                if (code in 200..299) {
+                    Parsers.parseBlob(readBody(conn) ?: "")
+                } else {
+                    val err = readError(conn) ?: ""
+                    throw Parsers.parseError(code, err)
+                        .let { ApiException(it.status, it.detail) }
+                }
+            } finally {
+                conn.disconnect()
+            }
+        }
+
+    /**
+     * Publish a staged bundle — step 2. `name` optional (server defaults it to the
+     * blob name minus its tar suffix, then slugifies).
+     */
+    suspend fun publish(blobId: String, name: String? = null): Site {
+        val body = JSONObject().put("blob_id", blobId)
+        if (name != null) body.put("name", name)
+        return Parsers.parseSite(requestText("POST", "/publish", body.toString()))
+    }
+
+    suspend fun sites(): List<Site> = Parsers.parseSites(getText("/publish"))
 
     // ---- HTTP plumbing -----------------------------------------------------------
 

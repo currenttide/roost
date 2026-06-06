@@ -50,13 +50,14 @@ enum Fixtures {
 
     /// Every fixture file in the directory, for the "decode them all" sweep.
     static let allJSON = [
-        "derived.json", "error_401.json", "error_403_admin_endpoint.json",
-        "error_404_job.json", "healthz.json", "job_cancel_response.json",
-        "job_derived_running.json", "job_detail_queued.json",
-        "job_detail_running.json", "job_detail_succeeded.json",
-        "job_logs.json", "job_logs_since_2.json", "jobs_list.json",
-        "job_submit_response.json", "job_tree.json",
-        "pair_token_response.json", "workers.json",
+        "blob_upload_response.json", "derived.json", "error_401.json",
+        "error_403_admin_endpoint.json", "error_404_job.json", "healthz.json",
+        "job_cancel_response.json", "job_derived_running.json",
+        "job_detail_queued.json", "job_detail_running.json",
+        "job_detail_succeeded.json", "job_logs.json", "job_logs_since_2.json",
+        "jobs_list.json", "job_submit_response.json", "job_tree.json",
+        "pair_token_response.json", "publish_list.json",
+        "publish_response.json", "workers.json",
     ]
 }
 

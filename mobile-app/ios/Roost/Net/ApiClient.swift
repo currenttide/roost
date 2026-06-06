@@ -139,4 +139,29 @@ struct ApiClient {
         return try await send(request("jobs/\(id)", query: query, method: "DELETE"),
                               as: CancelResponse.self)
     }
+
+    // MARK: Publish (API.md §6)
+
+    /// Stage a site bundle (raw tar.gz body) — publish step 1.
+    func uploadBlob(name: String, data: Data) async throws -> BlobUploadResponse {
+        var req = request("blobs", query: [.init(name: "name", value: name)],
+                          method: "POST")
+        req.httpBody = data
+        req.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        return try await send(req, as: BlobUploadResponse.self)
+    }
+
+    /// Publish a staged bundle — step 2. `name` optional (defaults server-side
+    /// to the blob name minus its tar suffix, then slugified).
+    func publish(blobId: String, name: String? = nil) async throws -> Site {
+        var payload = ["blob_id": blobId]
+        if let name { payload["name"] = name }
+        let body = try JSONEncoder().encode(payload)
+        return try await send(request("publish", method: "POST", body: body),
+                              as: Site.self)
+    }
+
+    func sites() async throws -> [Site] {
+        try await send(request("publish"), as: [Site].self)
+    }
 }

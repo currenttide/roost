@@ -13,8 +13,10 @@ app-side decode tests tell you exactly what broke.
 """
 from __future__ import annotations
 
+import io
 import json
 import sys
+import tarfile
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -129,6 +131,22 @@ def main() -> None:
         # Cancel response (cancel the queued one, as mobile).
         _dump("job_cancel_response.json",
               c.delete(f"/jobs/{queued_id}", headers=mh).json())
+
+        # -- publish (API.md §6) — entirely AS the mobile token ------------
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+            page = b"<h1>shipped from the phone</h1>"
+            info = tarfile.TarInfo("index.html")
+            info.size = len(page)
+            tar.addfile(info, io.BytesIO(page))
+        r = c.post("/blobs", params={"name": "phone-site.tar.gz"},
+                   content=buf.getvalue(), headers=mh)
+        blob = r.json()
+        _dump("blob_upload_response.json", blob)
+        _dump("publish_response.json",
+              c.post("/publish", json={"blob_id": blob["id"]},
+                     headers=mh).json())
+        _dump("publish_list.json", c.get("/publish", headers=mh).json())
 
         # Error shapes the apps must handle.
         _dump("error_401.json",

@@ -156,3 +156,30 @@ sealed interface StreamEvent {
 
 /** Response to POST /jobs minting a pair token preview etc. (not all used by UI). */
 data class CancelAck(val cancelled: Int)
+
+/** Staged bundle — POST /blobs response (publish step 1, API.md §6). */
+data class StagedBlob(
+    val id: String,
+    val name: String,
+    val size: Long,
+    val sha256: String?,
+    val state: String,        // "ready" once the body landed
+    val createdAt: Double,
+    val expiresAt: Double,    // blob TTL, NOT site TTL (API.md §6)
+) {
+    val isReady: Boolean get() = state == "ready"
+}
+
+/** A published site — POST /publish / GET /publish rows (API.md §6). */
+data class Site(
+    val slug: String,
+    val url: String,          // LAN URL, always present
+    val publicUrl: String?,   // only when the CP has a publish domain
+    val files: Int,
+    val size: Long,
+    val createdAt: Double,
+    val updatedAt: Double,
+) {
+    /** Best link to offer the user: internet-facing when available. */
+    val shareUrl: String get() = publicUrl ?: url
+}

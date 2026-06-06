@@ -168,3 +168,74 @@ Entries are written by the loop; humans read, never need to edit.
   and the placer kept preferring it — marking w1 offline (faithful to a real
   outage) fixed placement to w2. Wire change is additive (older workers ignore
   `owned`; older servers send none and the worker skips reconcile).
+
+## 2026-06-06 22:34 UTC — R4: Escape job intent in verifier prompt
+- Verdict: blocked (cut by human)
+- Branch/PR: loop/r4-verifier-prompt-injection (deleted) / -
+- What changed: nothing landed. Human direction mid-iteration: "delete r4, go
+  straight to r5". Uncommitted work (50 lines of prompt-injection regression
+  tests in tests/test_verify.py asserting FENCE_BEGIN/FENCE_END delimiters and
+  marker redaction in render_user — implementation not yet written) discarded;
+  branch deleted.
+- Evidence:
+  - `git checkout -- tests/test_verify.py && git branch -D loop/r4-verifier-prompt-injection` → clean master @ d150da1
+- Judge: n/a — human cut precedes the judge gate.
+- Models: implementer claude-opus-4-8 / judge n/a
+- Notes: R5 was already closed `invalid` (2026-06-05 — prune_expired exists,
+  roost/blobs.py:134, wired into the server sweep), so the next live Ranked
+  item is R6 (publish from mobile). Bookkeeping rides the R6 branch (direct
+  master push is permission-gated in this session).
+
+## 2026-06-06 23:05 UTC — rescue: two live-CP fixes off the deleted R4 branch
+- Verdict: shipped (PR open, awaiting HUMAN merge)
+- Branch/PR: fix/cp-204-publish-router / https://github.com/currenttide/roost/pull/13
+- What changed: nothing new — d150da1 (bare 204 on idle worker poll; was
+  JSONResponse(204, content=None) → body b"null" w/ Content-Length 4) and
+  af35c8d (publish host guard rewritten BaseHTTPMiddleware → pure-ASGI
+  _PublicHostRouter; stops the ~12k/90min Content-Length crash storm) were
+  riding the R4 branch but were never R4 scope. Rescued to their own branch
+  before the human-ordered branch delete; remote R4 branch then deleted.
+- Evidence:
+  - `python -m pytest -q` (on the rescue branch) → 380 passed in 12.33s
+- Judge: approve (round 1) — re-ran pytest (380), confirmed both bugs on
+  master (server.py:2305 JSONResponse-204; :1585 BaseHTTPMiddleware), zero
+  test deletions, and verified the ASGI router's security equivalence (a
+  publish-domain Host can never reach API routes; test pins /workers → 404).
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6
+- Notes: merge left to the human — the standing loop-merge authorization
+  covers judge-approved backlog-item PRs, and the permission classifier
+  (correctly) flagged this rescue as outside it. The rescue itself was forced
+  by "delete r4" colliding with unmerged human fixes on that branch.
+
+## 2026-06-06 23:20 UTC — R6: Publish from mobile: API + contract
+- Verdict: shipped
+- Branch/PR: loop/r6-mobile-publish / https://github.com/currenttide/roost/pull/14
+- What changed: scope decision made explicit and PINNED — mobile+agent scopes
+  share one client permission set (scope = audit label, server.py:~1353), so a
+  mobile pair token already publishes; zero server changes. New
+  test_mobile_scope_publishes_end_to_end drives upload→publish→list as the
+  phone and pins DELETE at 403. API.md gains §6 Publish (staging → publish →
+  list, error matrix, blob-TTL ≠ site-TTL) + extended §1 verb table.
+  record_fixtures.py records the flow as the mobile token → 3 new goldens.
+  iOS: BlobUploadResponse+Site, uploadBlob/publish/sites, testPublish.
+  Android: StagedBlob+Site, parseBlob/parseSite/parseSites (+lngOrNull),
+  uploadBlob/publish/sites, publishFlow. UI wiring deferred per Done-when.
+- Evidence:
+  - `python -m pytest -q` → 380 passed in 11.77s (was 379; +1, none removed)
+  - iOS Linux: `ROOST_FIXTURES=… swift test` → 33 tests, 0 failures (was 32)
+  - Android pure-layer: kotlinc + JUnitCore → OK (27 tests) (was 26)
+  - Android full: `gradle :app:testDebugUnitTest` (JDK17) → 32 tests, 0 failures
+- Judge: approve (round 1) — re-ran pytest (380), iOS (33/33), Android
+  pure-layer (27 OK) itself; verified the scope test is a real end-to-end pin,
+  fixture regen additive-only (no keys removed), API.md §6 cross-read against
+  server.py:2135–2230, zero assertions removed, claims capped (no UI claim).
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (explicit
+  `model: sonnet` override; verdict text omitted the fenced first-line model
+  ID again — re-confirmed by same-override probe. The A4 debt from R2 stands:
+  the fenced-ID instruction holds only intermittently.)
+- Notes: the backlog's premise ("mobile scope can't reach publish") was
+  refuted — the gap was contract+clients only; honest re-scope, not server
+  work. Full fixture regen churns sibling fixtures (values-only; verified).
+  Proposed: publish UI wiring (iOS/Android screens) as follow-up. PR #13
+  (rescued CP fixes) still awaits the human; R6 branched before it — merge
+  order is safe (no overlapping edits).

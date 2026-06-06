@@ -29,7 +29,11 @@ Every request: `Authorization: Bearer <token>`. The token is **mobile-scoped**:
 
 | Allowed | Denied (403) |
 |---|---|
-| All reads below, `POST /jobs`, `DELETE /jobs/{id}` | enroll-token mint, pair-token mint/list/revoke, worker delete/prune/register, `/claude-creds`, worker lease plane, job finalize |
+| All reads below, `POST /jobs`, `DELETE /jobs/{id}`, `POST /blobs`, `POST /publish`, `GET /publish` (§6) | enroll-token mint, pair-token mint/list/revoke, worker delete/prune/register, `/claude-creds`, worker lease plane, job finalize, `DELETE /publish/{slug}`, `DELETE /blobs/{id}` |
+
+Scope note (pinned by `tests/test_publish.py::test_mobile_scope_publishes_end_to_end`):
+`mobile` and `agent` scopes share ONE client permission set — the scope is an
+audit label, not a privilege boundary. Publishing needs no special token.
 
 Error envelope everywhere (FastAPI): `{"detail": "<message>"}` — fixtures
 `error_401.json`, `error_403_admin_endpoint.json`, `error_404_job.json`.
@@ -147,7 +151,49 @@ a single line of JSON. Hand-rolled parser rules: split frames on blank line, tak
 4. Duplicate suppression: drop any `log` with `seq <= last seen` (the boundary
    between catch-up page and stream attach can overlap).
 
-## 6. Golden fixtures
+## 6. Publish — built thing → live URL
+
+A phone (or a phone-driven agent) ships a static site in two calls; the token
+from §1 is all it needs.
+
+1. **Stage the bundle** — `POST /blobs?name=<site>.tar.gz`, raw `tar.gz` body
+   (`Content-Type: application/octet-stream`). Fixture: `blob_upload_response.json`:
+
+```
+{
+  "id": "d71603a73f9b", "name": "phone-site.tar.gz",
+  "size": <bytes>, "sha256": "<hex>", "state": "ready",
+  "created_at": <epoch>, "expires_at": <epoch>,   // staged blobs expire (~24 h default)
+  "get_url": "<presigned download URL>"           // not needed for publishing
+}
+```
+
+2. **Publish it** — `POST /publish` with `{"blob_id": "<id>", "name": "<site name>"?}`.
+   `name` is optional: it defaults to the blob name minus `.tar.gz`/`.tgz`/`.tar`,
+   then is slugified (`^[a-z0-9][a-z0-9-]{0,39}$`; 400 if it can't be).
+   Re-publishing an existing slug replaces the site atomically.
+   Fixture: `publish_response.json`:
+
+```
+{
+  "slug": "phone-site",
+  "url": "http://<cp>/pub/phone-site/",     // LAN URL, always present
+  "public_url": "https://phone-site.<domain>/",  // ONLY when the CP has a publish domain
+  "files": <int>, "size": <bytes>,
+  "created_at": <epoch>, "updated_at": <epoch>
+}
+```
+
+3. **List sites** — `GET /publish` → array of the same site shape
+   (fixture `publish_list.json`). Sorted by `updated_at` desc.
+
+Errors: 400 missing `blob_id`/bad name · 404 blob unknown or expired ·
+409 blob upload unfinished · 410 blob file missing · 403 on
+`DELETE /publish/{slug}` (unpublish is admin-only; don't offer it in the app).
+The blob expires after publish — the site lives on; don't surface blob TTL
+as site TTL.
+
+## 7. Golden fixtures
 
 | File | What it pins |
 |---|---|
@@ -162,9 +208,12 @@ a single line of JSON. Hand-rolled parser rules: split frames on blank line, tak
 | `workers.json`, `healthz.json` | fleet list, reachability probe |
 | `stream_succeeded.sse.txt` | full SSE transcript incl. `event` log rows + `done` |
 | `job_cancel_response.json` | cancel ack |
+| `blob_upload_response.json` | staged bundle (`POST /blobs`) |
+| `publish_response.json` | published site (`POST /publish`) |
+| `publish_list.json` | site list (`GET /publish`) |
 | `error_401/403/404*.json` | error envelope |
 
-## 7. Versioning
+## 8. Versioning
 
 The contract is additive-only: servers may ADD fields; apps must ignore unknown
 fields and unknown enum values (render, don't crash). Removing/renaming a field

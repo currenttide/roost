@@ -92,6 +92,26 @@ final class DecodeTests: XCTestCase {
         XCTAssertEqual(cancel.cancelled, 1)
     }
 
+    func testPublish() throws {
+        // Staged bundle (publish step 1).
+        let blob = try dec.decode(BlobUploadResponse.self,
+                                  from: Fixtures.data("blob_upload_response.json"))
+        XCTAssertEqual(blob.state, "ready")
+        XCTAssertEqual(blob.name, "phone-site.tar.gz")
+        XCTAssertFalse(blob.id.isEmpty)
+        XCTAssertGreaterThan(blob.expiresAt, blob.createdAt)
+        // Published site (step 2): slug defaulted from the blob name stem.
+        let site = try dec.decode(Site.self, from: Fixtures.data("publish_response.json"))
+        XCTAssertEqual(site.slug, "phone-site")
+        XCTAssertTrue(site.url.hasSuffix("/pub/phone-site/"))
+        XCTAssertNil(site.publicUrl)        // fixture CP has no publish domain
+        XCTAssertEqual(site.shareUrl, site.url)
+        XCTAssertEqual(site.files, 1)
+        // List shape.
+        let list = try dec.decode([Site].self, from: Fixtures.data("publish_list.json"))
+        XCTAssertEqual(list.map(\.slug), ["phone-site"])
+    }
+
     func testErrorEnvelopes() throws {
         for name in ["error_401.json", "error_403_admin_endpoint.json",
                      "error_404_job.json"] {

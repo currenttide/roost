@@ -132,4 +132,25 @@ class ParserFixtureTest {
     @Test fun cancelAck() {
         assertEquals(1, Parsers.parseCancel(Fixtures.read("job_cancel_response.json")).cancelled)
     }
+
+    @Test fun publishFlow() {
+        // Staged bundle (publish step 1, API.md §6).
+        val blob = Parsers.parseBlob(Fixtures.read("blob_upload_response.json"))
+        assertTrue(blob.isReady)
+        assertEquals("phone-site.tar.gz", blob.name)
+        assertTrue(blob.id.isNotEmpty())
+        assertTrue(blob.expiresAt > blob.createdAt)
+
+        // Published site (step 2): slug defaulted from the blob name stem.
+        val site = Parsers.parseSite(Fixtures.read("publish_response.json"))
+        assertEquals("phone-site", site.slug)
+        assertTrue(site.url.endsWith("/pub/phone-site/"))
+        assertNull(site.publicUrl)          // fixture CP has no publish domain
+        assertEquals(site.url, site.shareUrl)
+        assertEquals(1, site.files)
+
+        // List shape.
+        val sites = Parsers.parseSites(Fixtures.read("publish_list.json"))
+        assertEquals(listOf("phone-site"), sites.map { it.slug })
+    }
 }

@@ -1,7 +1,7 @@
 {
   "assigned_at": null,
   "attempt": 0,
-  "created_at": 1780712549.7172608,
+  "created_at": 1780785952.5093372,
   "decline_count": 0,
   "declined_by": null,
   "depth": 0,
@@ -10,7 +10,7 @@
   "eta_sec": null,
   "exit_code": null,
   "finished_at": null,
-  "id": "f7b1e29932b7",
+  "id": "3d588c7fa2ae",
   "intent": "fix the flaky auth test in roost-oss",
   "last_activity": null,
   "last_activity_at": null,
@@ -28,7 +28,7 @@
     ]
   },
   "result": null,
-  "root_job_id": "f7b1e29932b7",
+  "root_job_id": "3d588c7fa2ae",
   "spec": {
     "args": null,
     "budget": {},

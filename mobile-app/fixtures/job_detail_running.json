@@ -1,7 +1,7 @@
 {
-  "assigned_at": 1780712549.7735503,
+  "assigned_at": 1780785952.5694427,
   "attempt": 1,
-  "created_at": 1780712549.7668097,
+  "created_at": 1780785952.5625553,
   "decline_count": 0,
   "declined_by": null,
   "depth": 0,
@@ -10,12 +10,12 @@
   "eta_sec": null,
   "exit_code": null,
   "finished_at": null,
-  "id": "122f4a8dc8c9",
+  "id": "0350969c6395",
   "idle_sec": 0.0,
   "intent": "bump deps and run the test suite",
   "last_activity": "uv lock --upgrade ...",
-  "last_activity_at": 1780712549.7876,
-  "lease_expires_at": 1780712609.7892048,
+  "last_activity_at": 1780785952.5850255,
+  "lease_expires_at": 1780786012.586749,
   "max_attempts": 2,
   "max_depth": 3,
   "model": null,
@@ -29,7 +29,7 @@
     ]
   },
   "result": null,
-  "root_job_id": "122f4a8dc8c9",
+  "root_job_id": "0350969c6395",
   "spec": {
     "args": null,
     "budget": {},
@@ -60,11 +60,11 @@
     "task": null,
     "verify": null
   },
-  "started_at": 1780712549.7794178,
+  "started_at": 1780785952.5759447,
   "state": "running",
   "subagent_model": null,
   "tokens_used": 0,
   "tree_budget_spent": 0,
   "tree_budget_tokens": null,
-  "worker_id": "2b18a6ff7587"
+  "worker_id": "224446b04761"
 }
