@@ -70,7 +70,7 @@ Survey claim was wrong: `prune_expired` exists (roost/blobs.py:134) and is wired
 Surface: publish/mobile. The publish verb exists server-side and **agent-scoped tokens can already publish** (verified 2026-06-05: scope→verb matrix in server.py); but `mobile-app/API.md` has no publish surface and the `mobile` scope can't reach it — phone agents can't publish, the positioning gap.
 Done-when: publish surface added to API.md + golden fixtures (regen via `record_fixtures.py`); scope decision made explicitly (extend `mobile` scope vs. publish-capable token); iOS + Android decode layers implemented with Linux-runnable tests; UI wiring may be a follow-up item, claims capped accordingly.
 
-### R7. Atomic publish call — `open`
+### R7. Atomic publish call — `done` *(2026-06-06, PR #15 — one-shot `POST /publish?name=` with the bundle as the body; no blob ever staged)*
 Surface: publish. Today: upload blobs, then a separate `POST /publish`; a flap between them leaves dangling staged blobs until TTL expiry (the R5 sweeper bounds the damage to the 24h default TTL — this item is about the UX gap, not disk leak).
 Done-when: publish either accepts content in one transactional call or reconciles/retries dangling staged blobs; failure-injection test; pytest green.
 
@@ -134,3 +134,4 @@ first iteration on that ratchet measures and records it here (no code changes).
 - Mac app follow-ups (the native SwiftPM app lands with I1; webview wrapper is the deleted PoC — never resurrect it)
 - Version drift: running CP self-reports 0.2.0, pyproject.toml says 0.1.0 — single-source the version (found during I0, 2026-06-06)
 - Publish UI wiring: iOS/Android screens for pick-bundle → upload → publish → share-link (decode layers + contract landed with R6, PR #14, 2026-06-06)
+- Mobile one-shot publish parity: expose `POST /publish?name=` (raw body) in API.md §6 + fixtures + decode layers (server side landed with R7, PR #15, 2026-06-06)

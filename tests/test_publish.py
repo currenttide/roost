@@ -189,6 +189,111 @@ def test_client_token_can_publish_but_not_delete(client: TestClient, db: Path):
     assert r.status_code == 403
 
 
+def _publish_oneshot(client: TestClient, bundle: bytes, name: str = "demo",
+                     **kw):
+    return client.post("/publish", params={"name": name}, content=bundle,
+                       headers={"Content-Type": "application/octet-stream"},
+                       **kw)
+
+
+def test_one_shot_publish_roundtrip(client: TestClient, db: Path):
+    # [R7] The bundle IS the body — one transactional call, no staged blob.
+    r = _publish_oneshot(client, _tar_gz({"index.html": b"<h1>one shot</h1>"}),
+                         "oneshot")
+    assert r.status_code == 200, r.text
+    site = r.json()
+    assert site["slug"] == "oneshot"
+    assert site["files"] == 1 and site["size"] > 0
+
+    assert client.get("/pub/oneshot/").content == b"<h1>one shot</h1>"
+    # The whole point: NO blob row ever existed.
+    assert client.get("/blobs").json() == []
+    # And no temp upload file is left next to the site.
+    leftovers = [p.name for p in publishlib.sites_dir(db).iterdir()
+                 if p.name.startswith(".")]
+    assert leftovers == []
+
+
+def test_one_shot_republish_replaces(client: TestClient):
+    _publish_oneshot(client, _tar_gz({"index.html": b"v1"}), "demo")
+    r = _publish_oneshot(client, _tar_gz({"index.html": b"v2"}), "demo")
+    assert r.status_code == 200
+    assert client.get("/pub/demo/").content == b"v2"
+
+
+def test_one_shot_failure_injection_leaves_no_residue(client: TestClient, db: Path):
+    # [R7] failure injection: a body that is not a tar.gz fails extraction —
+    # nothing may survive it: no blob row, no site dir, no temp file, no row.
+    r = _publish_oneshot(client, b"definitely not a tar archive", "broken")
+    assert r.status_code == 400
+    assert "not a valid tar.gz" in r.json()["detail"]
+    assert client.get("/blobs").json() == []
+    assert client.get("/publish").json() == []
+    assert not publishlib.site_path(db, "broken").exists()
+    assert list(publishlib.sites_dir(db).iterdir()) == []
+
+
+def test_one_shot_oversized_leaves_no_residue(client: TestClient, db: Path,
+                                              monkeypatch):
+    # Body cap enforced mid-stream; temp file cleaned up.
+    monkeypatch.setattr("roost.blobs.BLOB_MAX_BYTES", 64)
+    r = _publish_oneshot(client, b"x" * 1024, "big")
+    assert r.status_code == 413
+    assert list(publishlib.sites_dir(db).iterdir()) == []
+
+
+def test_one_shot_requires_name(client: TestClient):
+    r = client.post("/publish", content=_tar_gz({"index.html": b"x"}),
+                    headers={"Content-Type": "application/octet-stream"})
+    assert r.status_code == 400
+    assert "name" in r.json()["detail"]
+
+
+def test_one_shot_bad_name_rejected(client: TestClient, db: Path):
+    r = _publish_oneshot(client, _tar_gz({"index.html": b"x"}), "bad/slug!")
+    assert r.status_code == 400
+    assert list(publishlib.sites_dir(db).iterdir()) == []
+
+
+def test_one_shot_empty_body_rejected(client: TestClient, db: Path):
+    r = _publish_oneshot(client, b"", "empty")
+    assert r.status_code == 400
+    assert "empty body" in r.json()["detail"]
+    assert list(publishlib.sites_dir(db).iterdir()) == []
+
+
+def test_one_shot_client_token_can_publish(client: TestClient):
+    # Same client permission set as the two-step path (scope = audit label).
+    tok = client.post("/pair-tokens", json={"label": "phone"}).json()
+    r = client.post("/publish", params={"name": "phone-shot"},
+                    content=_tar_gz({"index.html": b"hi"}),
+                    headers={"Content-Type": "application/octet-stream",
+                             "Authorization": f"Bearer {tok['token']}"})
+    assert r.status_code == 200, r.text
+    assert r.json()["slug"] == "phone-shot"
+
+
+def test_one_shot_unauthenticated_rejected(client: TestClient, db: Path):
+    r = client.post("/publish", params={"name": "nope"},
+                    content=_tar_gz({"index.html": b"x"}),
+                    headers={"Content-Type": "application/octet-stream",
+                             "Authorization": ""})
+    assert r.status_code == 401
+    assert list(publishlib.sites_dir(db).iterdir()) == []
+
+
+def test_two_step_invalid_json_body(client: TestClient):
+    # The JSON path now parses the body manually: garbage JSON → clean 400
+    # (was a framework 422), still no publish.
+    r = client.post("/publish", content=b"{not json",
+                    headers={"Content-Type": "application/json"})
+    assert r.status_code == 400
+    assert "invalid JSON" in r.json()["detail"]
+    r = client.post("/publish", json=["a", "list"])
+    assert r.status_code == 400
+    assert "object" in r.json()["detail"]
+
+
 def test_mobile_scope_publishes_end_to_end(client: TestClient):
     # [R6] The mobile-app contract (mobile-app/API.md §6) pins this: a
     # mobile-scoped pair token publishes through the SAME client permission

@@ -3,9 +3,11 @@ user's own control plane.
 
 The publishing loop for someone who just *built* something (vibe coding) is the
 bottleneck — they don't know how to put it online. Roost makes it one command:
-``roost publish ./my-site`` tars the directory, uploads it via the blob store,
-and the CP extracts it into ``<data_dir>/sites/<slug>/``, live immediately at
-``GET /pub/<slug>/``.
+``roost publish ./my-site`` tars the directory and POSTs it straight to
+``/publish`` (one transactional call — nothing staged, nothing to dangle), and
+the CP extracts it into ``<data_dir>/sites/<slug>/``, live immediately at
+``GET /pub/<slug>/``. Publishing from an already-staged blob (two-step flow)
+remains for worker-side jobs that uploaded via presign.
 
 This module holds the pure helpers (slug normalization, safe extraction with
 caps, the ``sites`` table rows, safe path resolution for serving). The

@@ -1466,13 +1466,19 @@ def publish(ctx: click.Context, directory: Optional[str], name: Optional[str],
 
         slug_name = name or src.resolve().name
         bundle = _tar_site(src)
-        up = c.post(f"/blobs?name={slug_name}.tar.gz", content=bundle)
-        if up.status_code >= 400:
-            raise click.ClickException(
-                f"upload failed: HTTP {up.status_code}: {up.text}")
-        blob_id = up.json()["id"]
-
-        r = c.post("/publish", json={"name": slug_name, "blob_id": blob_id})
+        # One transactional call: the bundle IS the request body, so nothing
+        # is staged — a flap mid-publish can't leave a dangling blob behind.
+        r = c.post("/publish", params={"name": slug_name}, content=bundle,
+                   headers={"Content-Type": "application/octet-stream"})
+        if r.status_code == 422:
+            # Older control plane (pre one-shot /publish rejects a raw body
+            # with a validation 422): fall back to the two-step blob flow.
+            up = c.post(f"/blobs?name={slug_name}.tar.gz", content=bundle)
+            if up.status_code >= 400:
+                raise click.ClickException(
+                    f"upload failed: HTTP {up.status_code}: {up.text}")
+            r = c.post("/publish",
+                       json={"name": slug_name, "blob_id": up.json()["id"]})
         if r.status_code == 403:
             raise _admin_403("publish")
         if r.status_code >= 400:
