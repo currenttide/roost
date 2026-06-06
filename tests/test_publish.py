@@ -239,3 +239,96 @@ def test_site_survives_fresh_app(client: TestClient, db: Path):
         r = c2.get("/pub/demo/")
         assert r.status_code == 200
         assert r.content == b"durable"
+
+
+# ---------- publish domain: host routing + the public-edge guard ----------
+
+
+@pytest.fixture()
+def domain_client(db: Path):
+    """A CP configured with a public publish domain (as behind the tunnel)."""
+    app = server.create_app(
+        db_path=db, token=TOKEN, run_sweeper=False, publish_domain="roost.pub")
+    with TestClient(app, base_url="http://testserver") as c:
+        c.headers.update({"Authorization": f"Bearer {TOKEN}"})
+        yield c
+
+
+def _publish_members(client: TestClient, slug: str, members: dict[str, bytes]) -> dict:
+    blob_id = _upload(client, _tar_gz(members))
+    r = client.post("/publish", json={"name": slug, "blob_id": blob_id})
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_public_url_in_responses(domain_client: TestClient):
+    site = _publish_members(domain_client, "demo", {"index.html": b"<h1>hi</h1>"})
+    assert site["public_url"] == "https://demo.roost.pub/"
+    listed = domain_client.get("/publish").json()
+    assert listed[0]["public_url"] == "https://demo.roost.pub/"
+
+
+def test_host_routing_serves_site_at_root(domain_client: TestClient):
+    _publish_members(domain_client, "demo", {
+        "index.html": b"<h1>hi</h1>",
+        "assets/app.js": b"console.log(1)",
+    })
+    r = domain_client.get("/", headers={"host": "demo.roost.pub"})
+    assert r.status_code == 200 and b"<h1>hi</h1>" in r.content
+    r = domain_client.get("/assets/app.js", headers={"host": "demo.roost.pub"})
+    assert r.status_code == 200 and b"console.log" in r.content
+    # port suffix and case are normalized
+    r = domain_client.get("/", headers={"host": "Demo.Roost.PUB:443"})
+    assert r.status_code == 200
+
+
+def test_public_edge_guard_blocks_api(domain_client: TestClient):
+    """Under the publish domain the fleet API must be unreachable — even with
+    a valid admin bearer token (tunnel traffic is hostile by assumption)."""
+    _publish_members(domain_client, "demo", {"index.html": b"x"})
+    for path in ("/derived", "/jobs", "/workers", "/blobs", "/publish",
+                 "/healthz", "/enroll-tokens", "/claude-creds"):
+        r = domain_client.get(path, headers={"host": "demo.roost.pub"})
+        assert r.status_code in (200, 404), (path, r.status_code)
+        # 200 only if the site happens to have such a file — it doesn't:
+        if r.status_code == 200:
+            assert b"x" == r.content or b"<" in r.content  # site content, not API JSON
+            assert "application/json" not in r.headers.get("content-type", "")
+    # writes are flatly refused
+    r = domain_client.post("/jobs", headers={"host": "demo.roost.pub"},
+                           json={"task": "evil", "kind": "auto"})
+    assert r.status_code == 405
+    r = domain_client.request("DELETE", "/jobs/abc",
+                              headers={"host": "demo.roost.pub"})
+    assert r.status_code == 405
+
+
+def test_apex_and_unknown_hosts(domain_client: TestClient):
+    _publish_members(domain_client, "demo", {"index.html": b"x"})
+    # apex: landing on /, 404 elsewhere, never the API
+    r = domain_client.get("/", headers={"host": "roost.pub"})
+    assert r.status_code == 200 and b"roost.pub" in r.content
+    assert domain_client.get("/derived", headers={"host": "roost.pub"}).status_code == 404
+    # unknown slug subdomain → 404
+    assert domain_client.get("/", headers={"host": "nope.roost.pub"}).status_code == 404
+    # nested label is not a site
+    assert domain_client.get("/", headers={"host": "a.demo.roost.pub"}).status_code == 404
+    # unrelated host: API works normally
+    assert domain_client.get("/healthz", headers={"host": "hubbase:8787"}).status_code == 200
+
+
+def test_lan_paths_still_work_with_domain_set(domain_client: TestClient):
+    _publish_members(domain_client, "demo", {"index.html": b"<h1>hi</h1>"})
+    r = domain_client.get("/pub/demo/")
+    assert r.status_code == 200 and b"<h1>hi</h1>" in r.content
+
+
+def test_slug_for_host():
+    f = publishlib.slug_for_host
+    assert f("demo.roost.pub", "roost.pub") == "demo"
+    assert f("Demo.Roost.Pub:443", "roost.pub") == "demo"
+    assert f("roost.pub", "roost.pub") is None
+    assert f("a.b.roost.pub", "roost.pub") is None
+    assert f("demo.roost.pub.evil.com", "roost.pub") is None
+    assert f("demo.notroost.pub", "roost.pub") is None
+    assert f("UPPER_bad.roost.pub", "roost.pub") is None

@@ -229,9 +229,11 @@ def delete_site(db_path: Path, conn: sqlite3.Connection, slug: str) -> bool:
 # ---------- public shapes ----------
 
 
-def public_dict(row: dict[str, Any], base_url: str) -> dict[str, Any]:
+def public_dict(
+    row: dict[str, Any], base_url: str, publish_domain: Optional[str] = None
+) -> dict[str, Any]:
     base = base_url.rstrip("/")
-    return {
+    out = {
         "slug": row["slug"],
         "url": f"{base}/pub/{row['slug']}/",
         "files": row["file_count"],
@@ -239,3 +241,25 @@ def public_dict(row: dict[str, Any], base_url: str) -> dict[str, Any]:
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
+    if publish_domain:
+        # The internet-facing address (slug-as-subdomain through the tunnel).
+        out["public_url"] = f"https://{row['slug']}.{publish_domain}/"
+    return out
+
+
+def slug_for_host(host: str, publish_domain: str) -> Optional[str]:
+    """Map a public Host header to a site slug, or None.
+
+    ``demo.roost.pub`` → ``demo``; the apex and anything that isn't exactly
+    ``<valid-slug>.<publish_domain>`` returns None. Slugs are already valid DNS
+    labels by construction (^[a-z0-9][a-z0-9-]{0,39}$), so this is a pure
+    suffix-strip + re-validation — no registry lookup needed to *route*.
+    """
+    hostname = host.split(":", 1)[0].strip().lower().rstrip(".")
+    suffix = "." + publish_domain.lower()
+    if not hostname.endswith(suffix):
+        return None
+    label = hostname[: -len(suffix)]
+    if "." in label:  # only one level deep: a.b.roost.pub is not a site
+        return None
+    return label if _SLUG_RE.match(label) else None

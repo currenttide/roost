@@ -404,8 +404,13 @@ def cli(ctx: click.Context, url: Optional[str], token: Optional[str]) -> None:
 @click.option("--provision-auth/--no-provision-auth", default=True, show_default=True,
               help="On enroll, install Claude Code on the worker and provision auth "
                    "by copying this host's credentials (v1 default).")
+@click.option("--publish-domain", default=None,
+              help="Public domain for published sites (e.g. roost.pub): requests for "
+                   "<slug>.<domain> serve that site ONLY (the fleet API is unreachable "
+                   "under it), and `roost publish` prints https://<slug>.<domain>/. "
+                   "Default: env ROOST_PUBLISH_DOMAIN.")
 def serve(host: str, port: int, db_path: Optional[str], serve_token: Optional[str],
-          provision_auth: bool) -> None:
+          provision_auth: bool, publish_domain: Optional[str]) -> None:
     """Run the control plane."""
     from . import server as _server
 
@@ -415,7 +420,7 @@ def serve(host: str, port: int, db_path: Optional[str], serve_token: Optional[st
         click.echo("[roost] WARNING: starting with no auth token; "
                    "anyone who can reach this port can submit jobs.", err=True)
     _server.run(host=host, port=port, db_path=db, token=token,
-                provision_claude_auth=provision_auth)
+                provision_claude_auth=provision_auth, publish_domain=publish_domain)
 
 
 # ---------- one-command on-ramp ----------
@@ -1475,9 +1480,13 @@ def publish(ctx: click.Context, directory: Optional[str], name: Optional[str],
                 f"publish failed: HTTP {r.status_code}: {r.text}")
         site = r.json()
 
-    click.echo(f"live: {site['url']}")
+    if site.get("public_url"):
+        click.echo(f"live: {site['public_url']}   ← shareable with anyone")
+        click.echo(f"      (LAN: {site['url']})")
+    else:
+        click.echo(f"live: {site['url']}")
     click.echo(f"      {site['files']} files, {site['size'] / 1024:.0f} KB")
-    if any(h in url for h in ("127.0.0.1", "localhost")):
+    if not site.get("public_url") and any(h in url for h in ("127.0.0.1", "localhost")):
         click.echo("note: control plane URL is loopback — only reachable from this "
                    "machine.\n      re-run with --url http://<LAN-or-tailscale-address>:8787 "
                    "to share it.")

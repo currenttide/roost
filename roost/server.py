@@ -1529,9 +1529,18 @@ def create_app(
     *,
     run_sweeper: bool = True,
     provision_claude_auth: bool = True,
+    publish_domain: Optional[str] = None,
 ) -> FastAPI:
     db = Path(db_path or os.environ.get("ROOST_DB", DEFAULT_DB))
     shared_token = token if token is not None else os.environ.get("ROOST_TOKEN", "")
+    # When set (e.g. "roost.pub"), published sites are addressable as
+    # https://<slug>.<domain>/ through a tunnel, and requests arriving under
+    # that domain can ONLY reach site content (see the host middleware below).
+    publish_domain = (
+        publish_domain
+        if publish_domain is not None
+        else os.environ.get("ROOST_PUBLISH_DOMAIN") or None
+    )
     _init_db(db)
 
     @asynccontextmanager
@@ -1550,6 +1559,45 @@ def create_app(
     app = FastAPI(title="Roost", version="0.2.0", lifespan=lifespan)
     app.state.db_path = db
     app.state.shared_token = shared_token
+    app.state.publish_domain = publish_domain
+
+    if publish_domain:
+        # PUBLIC-EDGE GUARD + host routing. The tunnel (cloudflared) forwards
+        # *.<publish_domain> to this same origin, so the Host header is the
+        # only thing separating "the internet" from "the LAN API". Any request
+        # arriving under the publish domain is answered HERE — site content
+        # only — and never falls through to the fleet API. A request for
+        # demo.<domain> serves sites/demo/ at the root.
+        @app.middleware("http")
+        async def public_host_router(request: Request, call_next):
+            host = request.headers.get("host", "")
+            hostname = host.split(":", 1)[0].strip().lower().rstrip(".")
+            apex = publish_domain.lower()
+            if hostname != apex and not hostname.endswith("." + apex):
+                return await call_next(request)  # LAN/API traffic: untouched
+
+            if request.method not in ("GET", "HEAD"):
+                return PlainTextResponse("method not allowed", status_code=405)
+
+            if hostname == apex:
+                # Apex: a one-line landing. Deliberately no site listing —
+                # published slugs are shared by their owners, not enumerated.
+                if request.url.path == "/":
+                    return HTMLResponse(
+                        "<!doctype html><title>roost</title>"
+                        "<body style='font-family:system-ui;text-align:center;"
+                        "padding-top:4rem'><h3>🐦 roost.pub</h3>"
+                        "<p>Sites published from someone's own fleet.</p>")
+                return PlainTextResponse("not found", status_code=404)
+
+            slug = publishlib.slug_for_host(hostname, publish_domain)
+            if slug is None:
+                return PlainTextResponse("not found", status_code=404)
+            served = await asyncio.to_thread(
+                publishlib.resolve_served_path, db, slug, request.url.path)
+            if served is None:
+                return PlainTextResponse("not found", status_code=404)
+            return FileResponse(served)
 
     def authenticate(request: Request, authorization: Optional[str] = Header(None)) -> dict:
         """Returns dict with at least {kind: 'shared'|'worker'|'client'|'none',
@@ -2128,7 +2176,7 @@ def create_app(
                 return publishlib.upsert_site(
                     conn, slug, size, files, principal["kind"])
         row = await asyncio.to_thread(_install)
-        return publishlib.public_dict(row, str(request.base_url))
+        return publishlib.public_dict(row, str(request.base_url), publish_domain)
 
     @app.get("/publish", dependencies=[Depends(require_any)])
     async def list_sites_endpoint(request: Request):
@@ -2136,7 +2184,8 @@ def create_app(
             with _connect(db) as conn:
                 return publishlib.list_sites(conn)
         rows = await asyncio.to_thread(_list)
-        return [publishlib.public_dict(r, str(request.base_url)) for r in rows]
+        return [publishlib.public_dict(r, str(request.base_url), publish_domain)
+                for r in rows]
 
     @app.delete("/publish/{slug}", dependencies=[Depends(require_admin)])
     async def unpublish_site(slug: str):
@@ -2458,6 +2507,7 @@ def run(
     token: Optional[str] = None,
     provision_claude_auth: bool = True,
     insecure: bool = False,
+    publish_domain: Optional[str] = None,
 ) -> None:
     import uvicorn
 
@@ -2497,5 +2547,6 @@ def run(
             flush=True,
         )
     app = create_app(db_path=db_path, token=token,
-                     provision_claude_auth=provision_claude_auth)
+                     provision_claude_auth=provision_claude_auth,
+                     publish_domain=publish_domain)
     uvicorn.run(app, host=host, port=port, log_level="info")
