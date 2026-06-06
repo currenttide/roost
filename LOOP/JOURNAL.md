@@ -273,3 +273,42 @@ Entries are written by the loop; humans read, never need to edit.
 - Notes: mobile one-shot parity deliberately NOT claimed — API.md §6 keeps
   the two-step as the documented mobile flow; parity filed to Proposed.
   R5's sweeper remains useful for the presign/worker path.
+
+## 2026-06-07 00:50 UTC — R8: `schedule` verb (interval jobs)
+- Verdict: shipped
+- Branch/PR: loop/r8-schedule-verb / https://github.com/currenttide/roost/pull/16
+- What changed: the biggest documented-but-missing verb now exists. Schema V12
+  `schedules` table (fresh + V11→V12 additive migration). `_tick_schedules`
+  rides the sweep loop in its own try/except: one job per due schedule per
+  tick, NO back-fill (next_run_at advances whole intervals on the original
+  cadence grid), NO pile-up (beat skipped while the previous job is in flight;
+  clock advances), broken spec logs+skips; every run carries schedule_id in
+  its spec. API: POST/GET/PATCH/DELETE /schedules (every = seconds|<N>[smhd],
+  30s floor; spec shape shared with POST /jobs via new _validate_job_spec —
+  submit_job refactored onto it; root jobs only; client tokens may manage,
+  worker plane 403; re-enable restarts the clock). CLI `roost schedule`
+  (goal → kind:auto task, --spec/--list/--rm/--enable/--disable). MCP
+  `roost_schedule` tool. README + INTEGRATIONS.md document the semantics —
+  the verb table row no longer punts to external cron.
+- Evidence:
+  - `python -m pytest -q` → 404 passed in 13.78s (was 390; +14, none removed)
+  - live smoke (scratch CP :8793, sweeper ON, REAL `roost worker`): 30s
+    schedule via CLI → beat 1 enqueued by the tick and RUN (succeeded,
+    stdout `r8-beat-1780789486`, spec.schedule_id set) → beat 2 at +30s
+    (2 jobs) → `--disable` held a 70s window at zero new beats → `--enable`
+    restarted the clock ("next run in 30s") → `--rm` → "no schedules"
+- Judge: approve (round 1) — re-ran pytest (404), ran its OWN live smoke
+  (:8792, own worker: beat ran succeeded with provenance; disable/enable/rm
+  exercised), verified the V11→V12 migration against a synthetic V11 DB and
+  SCHEMA_V1/_SCHEDULES_DDL column parity, proved the cadence math can never
+  yield next_run <= now (100k randomized cases + the on-grid edge), confirmed
+  the _validate_job_spec refactor is byte-identical on all 9 shape cases,
+  schedule_id extra key is harmless downstream (pydantic extra='ignore'),
+  permissions hold (worker 403 / unauth 401 / client 200), interval immutable
+  post-create.
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (fenced
+  first-line model-ID block present)
+- Notes: scheduling a plain goal uses the roost-do shape (kind:auto task) so
+  scheduled runs get self-selection + the verifier. Mobile parity stays in
+  Proposed (pre-existing entry). Cosmetic mid-iteration fix: CLI interval
+  display rounded 30s to "0m" — _fmt_interval added before the judge round.

@@ -74,7 +74,7 @@ Done-when: publish surface added to API.md + golden fixtures (regen via `record_
 Surface: publish. Today: upload blobs, then a separate `POST /publish`; a flap between them leaves dangling staged blobs until TTL expiry (the R5 sweeper bounds the damage to the 24h default TTL — this item is about the UX gap, not disk leak).
 Done-when: publish either accepts content in one transactional call or reconciles/retries dangling staged blobs; failure-injection test; pytest green.
 
-### R8. `schedule` verb (interval jobs) — `open`
+### R8. `schedule` verb (interval jobs) — `done` *(2026-06-06, PR #16 — schedules table + CP tick + CLI/MCP; no-backfill, no-pile-up semantics)*
 Surface: backend/feature. README.md:74 and docs/INTEGRATIONS.md:124 promise "schedule" as a product verb; nothing implements it. Biggest documented-but-missing feature.
 Done-when: minimal honest slice — schema for schedules, CP tick that enqueues due jobs, `roost schedule` CLI + MCP tool, docs updated; tests for due/overdue/disabled schedules; pytest green. (Mobile parity goes to Proposed.)
 
