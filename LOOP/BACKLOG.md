@@ -31,7 +31,7 @@ Done-when: the four remaining proven with evidence in the journal; the Mac path 
 end-to-end or is marked `blocked` with the concrete obstacle, and every mac/iOS
 backlog item below inherits that block honestly.
 
-### I1. Integrate outstanding feature branches into master — `open`
+### I1. Integrate outstanding feature branches into master — `done` *(2026-06-06, PRs #8 #5; #4 auto-resolved, #6 closed superseded)*
 Surface: git. The loop targets `master`, but master (27ffdb1) is behind: `feat/agent-substrate`
 (blob store + mobile + publish/substrate, tip 406d079) and `feat/mac-app` (native SwiftPM
 menu-bar app, 2c41ae7 — deletes the old pywebview wrapper this branch still carries) are
