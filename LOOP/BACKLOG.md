@@ -66,7 +66,7 @@ Done-when: intent is delimited/escaped (e.g. fenced with clear instruction frami
 ### R5. Blob expiry sweeper — `invalid` *(closed 2026-06-05)*
 Survey claim was wrong: `prune_expired` exists (roost/blobs.py:134) and is wired into the server's periodic sweep (roost/server.py:2395–2398). Nothing to do.
 
-### R6. Publish from mobile: API + contract — `open`
+### R6. Publish from mobile: API + contract — `done` *(2026-06-06, PR #14; premise re-scoped: mobile scope could already publish server-side — gap was contract+clients)*
 Surface: publish/mobile. The publish verb exists server-side and **agent-scoped tokens can already publish** (verified 2026-06-05: scope→verb matrix in server.py); but `mobile-app/API.md` has no publish surface and the `mobile` scope can't reach it — phone agents can't publish, the positioning gap.
 Done-when: publish surface added to API.md + golden fixtures (regen via `record_fixtures.py`); scope decision made explicitly (extend `mobile` scope vs. publish-capable token); iOS + Android decode layers implemented with Linux-runnable tests; UI wiring may be a follow-up item, claims capped accordingly.
 
@@ -133,3 +133,4 @@ first iteration on that ratchet measures and records it here (no code changes).
 - Interactive follow-up to running agent jobs (DESIGN.md §3.2, v2)
 - Mac app follow-ups (the native SwiftPM app lands with I1; webview wrapper is the deleted PoC — never resurrect it)
 - Version drift: running CP self-reports 0.2.0, pyproject.toml says 0.1.0 — single-source the version (found during I0, 2026-06-06)
+- Publish UI wiring: iOS/Android screens for pick-bundle → upload → publish → share-link (decode layers + contract landed with R6, PR #14, 2026-06-06)
