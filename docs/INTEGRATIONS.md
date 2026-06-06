@@ -136,11 +136,14 @@ roost publish --list                   # see published sites + URLs
 roost publish --unpublish demo         # take one down (admin)
 ```
 
-The CLI tars the directory, uploads it via the blob store (`POST /blobs`), and the
-control plane extracts the bundle into `<data_dir>/sites/<slug>/`, live immediately at
-`GET /pub/<slug>/`. Rebuild and re-run to republish — the same name atomically replaces
-the site. Bundles are extracted with Python's `tarfile` `data` filter (no path escape)
-and capped (256 MB / 5000 files).
+The CLI tars the directory and POSTs the bundle straight to
+`POST /publish?name=<site>` — one transactional call (nothing is staged, so a dropped
+connection can't leave a dangling blob) — and the control plane extracts it into
+`<data_dir>/sites/<slug>/`, live immediately at `GET /pub/<slug>/`. Publishing a
+previously-staged blob still works (`POST /publish` with JSON `{"blob_id", "name"?}` —
+the flow worker-side jobs use after a presigned upload). Rebuild and re-run to
+republish — the same name atomically replaces the site. Bundles are extracted with
+Python's `tarfile` `data` filter (no path escape) and capped (256 MB / 5000 files).
 
 Agents publish too — a scoped **client** token (`roost token --scope agent`) may
 `POST /publish`; unpublishing stays admin-only. Served sites are **unauthenticated** —

@@ -2134,21 +2134,82 @@ def create_app(
 
     # ---- static publish (built thing → real URL on your own CP) ----
     # The publishing loop is the bottleneck for people who just built something:
-    # `roost publish ./site` tars the dir, uploads a blob, and POST /publish
+    # `roost publish ./site` tars the dir and POSTs it straight to /publish
+    # (one transactional call — the bundle IS the body, nothing staged), which
     # extracts it into <data_dir>/sites/<slug>/ — live at GET /pub/<slug>/.
+    # The two-step flow (stage a blob, then publish by blob_id) remains for
+    # callers that already have a blob in flight (worker-side jobs, presign).
     # Agents publish too — that's the point — so a client (agent-scoped) token
     # may POST /publish; deletion stays admin-only (janitorial, like blobs).
 
     @app.post("/publish")
     async def publish_site(
         request: Request,
-        payload: dict[str, Any],
+        name: Optional[str] = Query(None),
         principal: dict = Depends(require_any),
     ):
-        """Extract a previously-uploaded tar.gz blob into a live static site."""
+        """Publish a static site, two ways (dispatch on Content-Type):
+
+        - raw tar.gz body (anything but application/json) + ?name=<site>:
+          ONE transactional call — no staged blob exists at any point, so a
+          connection flap can't leave residue (the R7 dangling-blob window).
+        - application/json {"blob_id", "name"?}: extract a previously-staged
+          blob (the original two-step flow).
+        """
         if principal["kind"] not in ("shared", "none", "client"):
             raise HTTPException(403, "publish requires admin or a client token")
-        blob_id = (payload or {}).get("blob_id")
+
+        ctype = (request.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+        if ctype != "application/json":
+            # ---- one-shot path: the body IS the bundle ----
+            if not name:
+                raise HTTPException(
+                    400, "name query parameter is required when POSTing the "
+                         "bundle directly (e.g. POST /publish?name=my-site)")
+            slug = publishlib.normalize_slug(name)
+            if slug is None:
+                raise HTTPException(
+                    400, "invalid site name: slug must match ^[a-z0-9][a-z0-9-]{0,39}$")
+            # Stream to a private temp file next to the sites dir; removed in
+            # `finally`, so a failure at ANY point (cap, bad tar, extract error,
+            # dropped connection) leaves nothing behind.
+            tmp_path = (publishlib.sites_dir(db)
+                        / f".upload-{slug}-{secrets.token_hex(6)}.tar.gz")
+            try:
+                size = 0
+                with open(tmp_path, "wb") as f:
+                    async for chunk in request.stream():
+                        size += len(chunk)
+                        if size > blobstore.BLOB_MAX_BYTES:
+                            raise HTTPException(
+                                413, f"bundle exceeds {blobstore.BLOB_MAX_BYTES} bytes")
+                        f.write(chunk)
+                if size == 0:
+                    raise HTTPException(
+                        400, "empty body: send the tar.gz bundle as the request body")
+
+                def _install_oneshot() -> dict:
+                    try:
+                        bsize, files = publishlib.extract_bundle(db, slug, tmp_path)
+                    except publishlib.PublishError as e:
+                        raise HTTPException(e.status, e.detail)
+                    with _connect(db) as conn:
+                        return publishlib.upsert_site(
+                            conn, slug, bsize, files, principal["kind"])
+                row = await asyncio.to_thread(_install_oneshot)
+                return publishlib.public_dict(
+                    row, str(request.base_url), publish_domain)
+            finally:
+                tmp_path.unlink(missing_ok=True)
+
+        # ---- two-step path: JSON referencing a staged blob ----
+        try:
+            payload = await request.json()
+        except Exception:
+            raise HTTPException(400, "invalid JSON body")
+        if not isinstance(payload, dict):
+            raise HTTPException(400, "JSON body must be an object")
+        blob_id = payload.get("blob_id")
         if not blob_id:
             raise HTTPException(400, "blob_id is required")
 
@@ -2170,8 +2231,10 @@ def create_app(
                 break
         else:
             default_name = Path(default_name).stem
-        name = (payload or {}).get("name") or default_name or "site"
-        slug = publishlib.normalize_slug(name)
+        # JSON `name` field wins; the ?name= query is honored for symmetry
+        # with the one-shot path; else default from the blob name.
+        site_name = payload.get("name") or name or default_name or "site"
+        slug = publishlib.normalize_slug(site_name)
         if slug is None:
             raise HTTPException(
                 400, "invalid site name: slug must match ^[a-z0-9][a-z0-9-]{0,39}$")
