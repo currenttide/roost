@@ -67,3 +67,21 @@ mechanisms:
   Backed by `POST /workers/prune?older_than_days=N`. A live node is never touched (its
   `last_seen` is recent); a recently-asleep node (e.g. a laptop that slept an hour ago)
   is kept and shown on the panel as **offline** rather than dropped.
+
+## Public publishing edge (roost.pub)
+
+Published sites are world-reachable via a Cloudflare tunnel on hubbase
+(separate from the root-owned daytether tunnel):
+
+| What | Where |
+|------|-------|
+| Tunnel | `roost` (221099bb-…), user-owned |
+| Config | `~/.cloudflared/config-roost.yml` (yang) |
+| Service | `systemctl --user status cloudflared-roost` (linger on) |
+| DNS | `roost.pub` + `*.roost.pub` → tunnel CNAMEs (Cloudflare zone) |
+
+**The CP must be deployed with `ROOST_PUBLISH_DOMAIN=roost.pub`** (add it to the
+deploy env alongside ROOST_TOKEN/ROOST_DATA_DIR) — that's what turns on the
+host router and the public-edge guard (requests under roost.pub can only reach
+site content, never the API). Forgetting it = published sites lose their
+public URLs but nothing is exposed; the tunnel just 404s via the apex rule.
