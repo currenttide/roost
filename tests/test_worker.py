@@ -9,12 +9,15 @@ from pathlib import Path
 import pytest
 
 from roost.worker import (
+    DEFAULT_WALLCLOCK_FALLBACK_MIN,
+    DEFAULT_WALLCLOCK_MIN,
     VERIFY_HEAL_TIMEOUT,
     Worker,
     _auto_prefilter,
     _budget_remaining,
     _build_claude_argv,
     _build_docker_argv,
+    _resolve_timeout,
     _sanitize_env,
     _validate_container,
     build_bwrap_argv,
@@ -302,6 +305,144 @@ def test_budget_remaining_garbage_values_safe():
     rem, exhausted = _budget_remaining(
         {"max_tokens": "nan", "max_wallclock_min": "x"}, elapsed_s=5.0, tokens_used=10)
     assert exhausted is False and rem == VERIFY_HEAL_TIMEOUT
+
+
+# ---------- [R2] default runtime cap for jobs with no wallclock budget ----------
+
+
+def test_resolve_timeout_explicit_budget_wins():
+    # An explicit budget always beats the default cap, whatever the kind.
+    t, src = _resolve_timeout(
+        {"kind": "docker", "budget": {"max_wallclock_min": 5}}, None)
+    assert (t, src) == (300.0, "budget")
+    t, src = _resolve_timeout({"budget": {"max_wallclock_sec": 90}}, None)
+    assert (t, src) == (90.0, "budget")
+
+
+@pytest.mark.parametrize("kind", ["command", "claude", "auto", "docker"])
+def test_resolve_timeout_default_per_kind(kind):
+    t, src = _resolve_timeout({"kind": kind}, None)
+    assert src == "default"
+    assert t == DEFAULT_WALLCLOCK_MIN[kind] * 60.0
+
+
+def test_resolve_timeout_unknown_kind_uses_fallback():
+    t, src = _resolve_timeout({"kind": "weird"}, None)
+    assert src == "default"
+    assert t == DEFAULT_WALLCLOCK_FALLBACK_MIN * 60.0
+
+
+def test_resolve_timeout_missing_kind_is_claude():
+    t, src = _resolve_timeout({}, None)
+    assert src == "default"
+    assert t == DEFAULT_WALLCLOCK_MIN["claude"] * 60.0
+
+
+def test_resolve_timeout_policy_scalar_override():
+    t, src = _resolve_timeout({"kind": "command"}, {"default_wallclock_min": 10})
+    assert (t, src) == (600.0, "default")
+
+
+def test_resolve_timeout_policy_per_kind_override():
+    pol = {"default_wallclock_min": {"docker": 30}}
+    t, src = _resolve_timeout({"kind": "docker"}, pol)
+    assert (t, src) == (1800.0, "default")
+    # Kinds absent from the mapping keep their built-in default.
+    t, src = _resolve_timeout({"kind": "command"}, pol)
+    assert t == DEFAULT_WALLCLOCK_MIN["command"] * 60.0 and src == "default"
+
+
+def test_resolve_timeout_policy_zero_opts_out():
+    t, src = _resolve_timeout({"kind": "command"}, {"default_wallclock_min": 0})
+    assert (t, src) == (None, "none")
+    t, src = _resolve_timeout(
+        {"kind": "docker"}, {"default_wallclock_min": {"docker": -1}})
+    assert (t, src) == (None, "none")
+
+
+def test_resolve_timeout_garbage_budget_falls_to_default():
+    t, src = _resolve_timeout(
+        {"kind": "command", "budget": {"max_wallclock_min": "soon"}}, None)
+    assert src == "default" and t == DEFAULT_WALLCLOCK_MIN["command"] * 60.0
+
+
+def test_resolve_timeout_garbage_policy_falls_to_default():
+    t, src = _resolve_timeout(
+        {"kind": "command"}, {"default_wallclock_min": "lots"})
+    assert src == "default" and t == DEFAULT_WALLCLOCK_MIN["command"] * 60.0
+
+
+def _mk_runjob_worker(policy):
+    """Worker with the network stubbed out, for driving the REAL run_job."""
+    w = Worker("http://127.0.0.1:9", "tok", "w1", self_test=False)
+    w.policy = policy
+    events: list[dict] = []
+    logs: list[tuple[str, str]] = []
+
+    async def fake_post_event(job_id, event):
+        events.append(event)
+
+    async def fake_send_log(job_id, stream, data):
+        logs.append((stream, data))
+
+    async def fake_diagnose(spec, **kw):
+        return {"summary": "stub", "category": "stub", "retriable": False}
+
+    w._post_event = fake_post_event  # type: ignore[assignment]
+    w._send_log = fake_send_log  # type: ignore[assignment]
+    w._diagnose_failure = fake_diagnose  # type: ignore[assignment]
+    return w, events, logs
+
+
+def test_run_job_default_cap_kills_unbudgeted_job():
+    """A no-budget job is killed by the per-kind default cap and reports the
+    R2-distinct error token (not plain wallclock_exceeded)."""
+    async def go():
+        # 0.01 min = 0.6s cap via policy override; job would run 30s unbounded.
+        w, events, logs = _mk_runjob_worker({"default_wallclock_min": 0.01})
+        await asyncio.wait_for(
+            w.run_job({"id": "jt1", "spec": {"kind": "command", "command": "sleep 30"}}),
+            timeout=15.0)
+        await w.close()
+        terminal = [e for e in events if e.get("type") in ("succeeded", "failed")]
+        assert terminal and terminal[-1]["type"] == "failed"
+        assert terminal[-1]["error"] == "default_runtime_cap_exceeded"
+        assert any("default runtime cap exceeded" in d for s, d in logs if s == "event")
+        assert any("no wallclock budget set; applying default cap" in d
+                   for s, d in logs if s == "event")
+
+    asyncio.run(go())
+
+
+def test_run_job_explicit_budget_keeps_wallclock_error():
+    """An explicit budget that fires still reports wallclock_exceeded (unchanged)."""
+    async def go():
+        w, events, logs = _mk_runjob_worker({})
+        await asyncio.wait_for(
+            w.run_job({"id": "jt2", "spec": {
+                "kind": "command", "command": "sleep 30",
+                "budget": {"max_wallclock_sec": 0.5}}}),
+            timeout=15.0)
+        await w.close()
+        terminal = [e for e in events if e.get("type") in ("succeeded", "failed")]
+        assert terminal and terminal[-1]["type"] == "failed"
+        assert terminal[-1]["error"] == "wallclock_exceeded"
+
+    asyncio.run(go())
+
+
+def test_run_job_quick_job_unaffected_by_default_cap():
+    """A fast job under the default cap succeeds normally."""
+    async def go():
+        w, events, _logs = _mk_runjob_worker({})
+        await asyncio.wait_for(
+            w.run_job({"id": "jt3", "spec": {"kind": "command", "command": "true"}}),
+            timeout=15.0)
+        await w.close()
+        terminal = [e for e in events if e.get("type") in ("succeeded", "failed")]
+        assert terminal and terminal[-1]["type"] == "succeeded"
+
+    asyncio.run(go())
 
 
 def test_validate_container_rejects_claude_config_dir(monkeypatch, tmp_path):
