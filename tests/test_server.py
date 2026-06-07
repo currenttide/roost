@@ -1459,3 +1459,88 @@ def test_oversize_event_slimmed_not_rejected(client: TestClient):
     assert last["stream"] == "event"
     parsed = json.loads(last["data"])
     assert parsed == {"type": "succeeded", "truncated": True}
+
+
+# ---------- decline/requeue bookkeeping (R19) ----------
+
+
+def _auto_job_and_worker(client: TestClient):
+    worker_id, cred = _enroll_worker(client, {"tools": ["python3"]})
+    wh = {"Authorization": f"Bearer {cred}"}
+    job = client.post("/jobs", json={
+        "kind": "auto", "task": "t",
+        "requires": {"tools": ["python3"]}}).json()
+    return worker_id, wh, job
+
+
+def test_decline_requeue_restarts_placement_grace(client: TestClient):
+    # [R19a] A job already older than PLACEMENT_GRACE is handed out via
+    # anti-starvation; after a decline the grace window must RESTART so the
+    # next placement round is competitive again.
+    worker_id, wh, job = _auto_job_and_worker(client)
+    with server._connect(client.app.state.db_path) as conn:
+        conn.execute("UPDATE jobs SET created_at = created_at - 10 WHERE id=?",
+                     (job["id"],))
+    a = client.get(f"/workers/{worker_id}/poll", params={"timeout": 0},
+                   headers=wh).json()
+    assert a["id"] == job["id"]
+    client.post(f"/workers/{worker_id}/jobs/{job['id']}/event",
+                json={"type": "declined", "attempt": a["attempt"],
+                      "reason": "poor fit"}, headers=wh)
+    with server._connect(client.app.state.db_path) as conn:
+        row = conn.execute("SELECT requeued_at, created_at FROM jobs WHERE id=?",
+                           (job["id"],)).fetchone()
+    assert row["requeued_at"] is not None
+    # The grace clock now runs from requeued_at — effectively zero age...
+    assert time.time() - row["requeued_at"] < server.PLACEMENT_GRACE
+    # ...while created_at stays truthful for display/queued_sec.
+    assert time.time() - row["created_at"] >= 10
+
+
+def test_declines_do_not_consume_the_attempt_budget(client: TestClient):
+    # [R19b] Each assignment increments `attempt`; a decline must refund it,
+    # or two declines at default max_attempts=2 leave a REAL execution with
+    # zero retries (sweeper kills at attempt >= max_attempts).
+    worker_id, wh, job = _auto_job_and_worker(client)
+    a = client.get(f"/workers/{worker_id}/poll", params={"timeout": 0},
+                   headers=wh).json()
+    assert a["attempt"] == 1
+    client.post(f"/workers/{worker_id}/jobs/{job['id']}/event",
+                json={"type": "declined", "attempt": a["attempt"],
+                      "reason": "poor fit"}, headers=wh)
+    row = client.get(f"/jobs/{job['id']}").json()
+    assert row["state"] == "queued"
+    assert row["attempt"] == 0  # refunded
+    assert row["decline_count"] == 1  # decline bookkeeping intact
+
+    # A second capable worker takes it as a FRESH attempt 1 with the full
+    # retry budget; the decliner is still skipped.
+    w2, cred2 = _enroll_worker(client, {"tools": ["python3"]})
+    h2 = {"Authorization": f"Bearer {cred2}"}
+    a2 = client.get(f"/workers/{w2}/poll", params={"timeout": 0},
+                    headers=h2).json()
+    assert a2["id"] == job["id"]
+    assert a2["attempt"] == 1
+
+
+def test_decline_escalation_and_skip_still_hold(client: TestClient):
+    # Regression guard: the refund must not break decliner-skip or the
+    # declined-by-all escalation.
+    wa, ha, job = _auto_job_and_worker(client)
+    a = client.get(f"/workers/{wa}/poll", params={"timeout": 0}, headers=ha).json()
+    client.post(f"/workers/{wa}/jobs/{job['id']}/event",
+                json={"type": "declined", "attempt": a["attempt"],
+                      "reason": "no gpu"}, headers=ha)
+    # The decliner never re-grabs it.
+    r = client.get(f"/workers/{wa}/poll", params={"timeout": 0}, headers=ha)
+    assert r.status_code == 204
+    # Second (last capable) worker declines → declined-by-all escalation.
+    wb, credb = _enroll_worker(client, {"tools": ["python3"]})
+    hb = {"Authorization": f"Bearer {credb}"}
+    a2 = client.get(f"/workers/{wb}/poll", params={"timeout": 0}, headers=hb).json()
+    client.post(f"/workers/{wb}/jobs/{job['id']}/event",
+                json={"type": "declined", "attempt": a2["attempt"],
+                      "reason": "no gpu"}, headers=hb)
+    row = client.get(f"/jobs/{job['id']}").json()
+    assert row["state"] == "failed"
+    assert "declined by all 2" in row["error"]

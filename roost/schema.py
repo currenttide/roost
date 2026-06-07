@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import sqlite3
 
-CURRENT_VERSION = 12
+CURRENT_VERSION = 13
 
 # Full current (V12) schema for fresh installs.
 SCHEMA_V1 = """
@@ -69,7 +69,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     progress            INTEGER,                         -- rough 0-100, or NULL
     eta_sec             INTEGER,                         -- rough seconds remaining, or NULL
     -- agentic failure root-cause (V8) — worker-reported diagnosis on FAILED
-    diagnosis           TEXT                             -- root-cause string on a failed job, or NULL
+    diagnosis           TEXT,                            -- root-cause string on a failed job, or NULL
+    -- decline/requeue bookkeeping (V13) — placement grace restarts from here
+    requeued_at         REAL                             -- last decline-requeue time, or NULL
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_state       ON jobs(state);
 CREATE INDEX IF NOT EXISTS idx_jobs_created     ON jobs(created_at);
@@ -328,6 +330,11 @@ def migrate(conn: sqlite3.Connection) -> int:
     if version < 12:
         # V11 → V12: schedule verb (interval jobs enqueued by the CP tick).
         conn.executescript(_SCHEDULES_DDL)
+
+    if version < 13:
+        # V12 → V13: decline/requeue bookkeeping (R19) — the placement grace
+        # window restarts from requeued_at, not the original created_at.
+        _add_missing("jobs", [("requeued_at", "requeued_at REAL")])
 
     conn.execute(f"PRAGMA user_version = {CURRENT_VERSION}")
     return CURRENT_VERSION
