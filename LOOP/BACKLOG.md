@@ -135,7 +135,7 @@ Done-when: either (a) reproducing test written and FAILS on master, fix makes it
 Surface: backend/feature. North star #2 (operability). Cost estimates use a fixed rate (find it — grep worker.py/captain.py/server.py for the pricing constant); real fleets run mixed models and the estimate is wrong for most of them.
 Done-when: per-model pricing configurable (worker policy or CP config — pick the seam that matches where the estimate is computed; document the choice); sane defaults preserved (zero-config behavior unchanged); estimate uses the job's actual model; tests for default + override + unknown-model fallback; pytest green.
 
-### R45. Fix flaky backup temp-file test (xdist race) — `open` `self-promoted`
+### R45. Fix flaky backup temp-file test (xdist race) — `done` *(2026-06-07, PR #56)* `self-promoted`
 Surface: tests/robustness. A4 debt from R42's run: `test_backup_leaves_no_temp_file_behind` globs the SHARED system temp dir and races the adjacent backup test under parallel execution — failed once mid-run, passes in isolation. A flaky suite undermines every future judge gate.
 Done-when: the test isolates its temp observation (dedicated tmp_path-scoped dir for backup temps, or filter by this test's own marker); deterministic under repetition (`pytest tests/test_server.py -k backup -p no:randomly --count`-style or a tight loop) and under parallel runs; pytest green.
 

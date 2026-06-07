@@ -1345,3 +1345,21 @@ Entries are written by the loop; humans read, never need to edit.
   promoted as R45. Cycle #9 slate: R45 (flaky fix), R46 (MCP docstring examples —
   the captain reads these, direct tool-use accuracy win), + A1 hunt #4
   (captain/steward — last unhunted core area) whose findings feed cycle #10.
+
+## 2026-06-07 ~02:50 UTC — R45: flaky backup temp test fixed
+- Verdict: shipped
+- Branch/PR: loop/r45-flaky-backup-test / https://github.com/currenttide/roost/pull/56 (merged f2e0a49)
+- What changed: tests-only (+25/-4 in test_server.py; server.py zero net change,
+  verified). Both backup temp tests monkeypatch tempfile.tempdir → per-test
+  tmp_path: _backup_db's mkstemp honors tempfile.tempdir and the tests glob
+  gettempdir() (same value), so creation AND observation are test-scoped — the
+  shared-global race is structurally gone; monkeypatch auto-reverts.
+- Evidence:
+  - determinism: 30× tight loop + 20×2-parallel + 15×4-parallel (100 invocations) — all clean
+  - TEETH PROOF: cleanup replaced with pass → both tests FAIL with the leak
+    visible in the scoped dir; reverted byte-identical
+  - `python -m pytest -q` → 644 passed
+- Judge: approve (round 1) — independently re-ran the tight loop (30×), concurrent
+  stress, its OWN runtime teeth experiment, and the full suite
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only)
+- Notes: iteration #8 slot 1. R46 (MCP examples) + A1 hunt #4 in flight.
