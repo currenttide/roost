@@ -391,6 +391,66 @@ def test_lease_expiry_requeues_then_fails(tmp_path: Path):
     assert failed["error"] == "lease_expired"
 
 
+def test_lease_expiry_requeue_is_fast_retry_not_fresh_grace(tmp_path: Path):
+    # [R52] The analog of R19's decline fix, decided the OPPOSITE way.
+    #
+    # A decline restarts the placement-grace window (requeued_at=now) so the
+    # remaining fleet gets a fresh competitive round. A lease expiry is a real
+    # FAILURE, not a polite decline: the chosen semantics are fast-retry — leave
+    # requeued_at NULL so the grace clock keeps running from created_at and the
+    # fastest available capable worker re-grabs the failed job immediately,
+    # rather than waiting out a fresh window to re-shop for a marginally better
+    # fit. This test locks that decision against a "make it symmetric with R19"
+    # regression.
+    db = tmp_path / "roost.db"
+    server._init_db(db)
+    # A worse-fit (high loadavg) worker and a better-fit (low loadavg) one — the
+    # same fit differentiator as test_load_aware_picks_lower_loaded_worker.
+    worse = server._register_worker(
+        db, "worse", {"tools": ["python3"], "load": {"running": 0, "loadavg1": 8.0}}
+    )
+    better = server._register_worker(
+        db, "better", {"tools": ["python3"], "load": {"running": 0, "loadavg1": 0.1}}
+    )
+    job = server._insert_job(db, {"command": "true", "requires": {"tools": ["python3"]}})
+
+    # Baseline: on a FRESH job the worse fit defers (204) and the better fit wins
+    # — competitive placement is healthy when nothing has failed.
+    assert server._try_assign_one(db, worse["id"]) is None
+    got = server._try_assign_one(db, better["id"])
+    assert got is not None and got["worker_id"] == better["id"]
+
+    # The better-fit worker now holds an (expired) lease; the sweeper requeues.
+    with server._connect(db) as conn:
+        conn.execute("UPDATE jobs SET lease_expires_at=1 WHERE id=?", (job["id"],))
+    assert server._sweep(db)["requeued"] == 1
+
+    # Decision part 1: the sweeper leaves requeued_at NULL (unlike a decline).
+    with server._connect(db) as conn:
+        row = conn.execute(
+            "SELECT state, requeued_at FROM jobs WHERE id=?", (job["id"],)
+        ).fetchone()
+    assert row["state"] == "queued"
+    assert row["requeued_at"] is None
+
+    # Backdate created_at to reflect reality: a lease can only expire >= LEASE_TTL
+    # (60s) after creation, which is far past PLACEMENT_GRACE (3s). With
+    # requeued_at NULL the grace clock runs from created_at, so anti-starvation is
+    # (intentionally) armed.
+    with server._connect(db) as conn:
+        conn.execute(
+            "UPDATE jobs SET created_at = created_at - ? WHERE id=?",
+            (server.LEASE_TTL + 1, job["id"]),
+        )
+
+    # Decision part 2 (the behavioral consequence): the worse-fit worker polls
+    # first after the failure and takes the job IMMEDIATELY — fast retry, no fresh
+    # competitive round. (Contrast test_decline_requeue_restarts_placement_grace,
+    # where the same poller would have to defer.)
+    got = server._try_assign_one(db, worse["id"])
+    assert got is not None and got["worker_id"] == worse["id"]
+
+
 def test_liveness_capable_workers_fact(client: TestClient):
     # A queued job that no online worker can satisfy reports capable_workers=0 —
     # the mechanical fact behind a silently-unplaceable plan.
