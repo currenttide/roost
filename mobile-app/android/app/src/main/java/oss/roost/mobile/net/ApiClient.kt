@@ -9,6 +9,7 @@ import oss.roost.mobile.model.Job
 import oss.roost.mobile.model.LogPage
 import oss.roost.mobile.model.Parsers
 import oss.roost.mobile.model.Run
+import oss.roost.mobile.model.Schedule
 import oss.roost.mobile.model.Site
 import oss.roost.mobile.model.StagedBlob
 import oss.roost.mobile.model.Worker
@@ -166,6 +167,47 @@ class ApiClient(
         }
 
     suspend fun sites(): List<Site> = Parsers.parseSites(getText("/publish"))
+
+    // ---- schedules (API.md §7) -----------------------------------------------------
+
+    /** List interval schedules, newest first. */
+    suspend fun schedules(): List<Schedule> =
+        Parsers.parseSchedules(getText("/schedules"))
+
+    /**
+     * Create an interval schedule (API.md §7a). `every` is seconds or "<N>[smhd]"
+     * (e.g. "30m"; 30 s floor server-side). `spec` follows the §3 submit shape
+     * (root jobs only). Returns the new [Schedule]; first run is one interval out.
+     */
+    suspend fun createSchedule(
+        spec: Map<String, Any?>,
+        every: String,
+        name: String? = null,
+        enabled: Boolean = true,
+    ): Schedule {
+        val body = JSONObject()
+        body.put("spec", JSONObject(spec))
+        body.put("every", every)
+        body.put("enabled", enabled)
+        if (name != null) body.put("name", name)
+        return Parsers.parseSchedule(requestText("POST", "/schedules", body.toString()))
+    }
+
+    /**
+     * Enable/disable a schedule (API.md §7c). Re-enabling restarts the clock
+     * server-side. Returns the updated [Schedule].
+     */
+    suspend fun setScheduleEnabled(id: String, enabled: Boolean): Schedule {
+        val body = JSONObject().put("enabled", enabled)
+        return Parsers.parseSchedule(
+            requestText("PATCH", "/schedules/${enc(id)}", body.toString()))
+    }
+
+    /** Delete a schedule (API.md §7d). 404 if unknown → ApiException(404). */
+    suspend fun deleteSchedule(id: String): Boolean {
+        val json = requestText("DELETE", "/schedules/${enc(id)}", null)
+        return JSONObject(json).optBoolean("deleted", false)
+    }
 
     // ---- HTTP plumbing -----------------------------------------------------------
 

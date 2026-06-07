@@ -120,6 +120,27 @@ final class DecodeTests: XCTestCase {
         XCTAssertEqual(Set(list.map(\.slug)), ["phone-site", "phone-oneshot"])
     }
 
+    func testSchedules() throws {
+        // Created interval schedule (API.md §7a).
+        let sched = try dec.decode(Schedule.self,
+                                   from: Fixtures.data("schedule_create_response.json"))
+        XCTAssertFalse(sched.id.isEmpty)
+        XCTAssertEqual(sched.name, "nightly-tidy")
+        XCTAssertEqual(sched.intervalSec, 21600)   // "6h"
+        XCTAssertTrue(sched.enabled)
+        XCTAssertNil(sched.lastJobId)              // not yet fired
+        XCTAssertNil(sched.lastRunAt)
+        XCTAssertNotNil(sched.nextRunAt)
+        // The stored spec round-trips (the §3 submit shape).
+        XCTAssertEqual(sched.spec?.kind, "claude")
+        XCTAssertEqual(sched.spec?.intent, "nightly: tidy the repo and run the tests")
+        // List shape (API.md §7b).
+        let list = try dec.decode([Schedule].self,
+                                  from: Fixtures.data("schedules_list.json"))
+        XCTAssertEqual(list.count, 1)
+        XCTAssertEqual(list.first?.id, sched.id)
+    }
+
     func testErrorEnvelopes() throws {
         for name in ["error_401.json", "error_403_admin_endpoint.json",
                      "error_404_job.json"] {

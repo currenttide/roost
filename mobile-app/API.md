@@ -29,7 +29,7 @@ Every request: `Authorization: Bearer <token>`. The token is **mobile-scoped**:
 
 | Allowed | Denied (403) |
 |---|---|
-| All reads below, `POST /jobs`, `POST /jobs/{id}/input`, `DELETE /jobs/{id}`, `POST /blobs`, `POST /publish`, `GET /publish` (§6) | enroll-token mint, pair-token mint/list/revoke, worker delete/prune/register, `/claude-creds`, worker lease plane, job finalize, `DELETE /publish/{slug}`, `DELETE /blobs/{id}` |
+| All reads below, `POST /jobs`, `POST /jobs/{id}/input`, `DELETE /jobs/{id}`, `POST /blobs`, `POST /publish`, `GET /publish` (§6), `POST/GET/PATCH/DELETE /schedules` (§7) | enroll-token mint, pair-token mint/list/revoke, worker delete/prune/register, `/claude-creds`, worker lease plane, job finalize, `DELETE /publish/{slug}`, `DELETE /blobs/{id}` |
 
 Scope note (pinned by `tests/test_publish.py::test_mobile_scope_publishes_end_to_end`):
 `mobile` and `agent` scopes share ONE client permission set — the scope is an
@@ -260,7 +260,77 @@ Array of the `Site` shape above (fixture `publish_list.json`), sorted by
 `offset + len(page) >= X-Total-Count`). The body shape is unchanged — a client
 that ignores both params still gets a valid `Site` array (the first 100).
 
-## 7. Golden fixtures
+## 7. Schedules — interval jobs (`POST/GET/PATCH/DELETE /schedules`)
+
+The `schedule` verb: the control plane re-submits a stored job spec on a fixed
+interval (a phone front door scheduling recurring work is the point). A client
+token from §1 manages schedules through the **same** client permission set as
+publish — scope is an audit label, not a privilege boundary (pinned by
+`tests/test_schedules.py::test_mobile_scope_manages_schedules_end_to_end`).
+The worker plane may **not** (a job must not mint standing load): worker tokens
+get **403**.
+
+A `Schedule` object (fixtures `schedule_create_response.json`, `schedules_list.json`):
+
+```
+{
+  "id": "a1b2c3d4e5f6",
+  "name": "nightly-tidy"|null,
+  "spec": { … },               // echo of the stored job spec (the §3 submit shape)
+  "interval_sec": 1800,        // the parsed `every`, in seconds
+  "enabled": true,
+  "next_run_at": <epoch>,      // when the next job fires
+  "last_run_at": <epoch>|null, // last real enqueue (null until the first fires)
+  "last_job_id": "<job id>"|null,
+  "created_at": <epoch>
+}
+```
+
+### 7a. Create — `POST /schedules`
+
+```json
+{
+  "spec": {"intent": "tidy the repo", "kind": "claude", "requires": {},
+           "hierarchy": {"can_dispatch": true}},
+  "every": "30m",              // seconds (number) or "<N>[smhd]" — "90s"/"30m"/"6h"/"1d"/"1.5h"
+  "name": "nightly-tidy",      // optional label
+  "enabled": true              // optional, default true
+}
+```
+
+`spec` follows the §3 submit rules (must carry `intent`, or `command`, or
+`kind: docker` + `image`, or `kind: auto` + `task`). The **first run fires one
+interval from now** — never immediately. Returns the `Schedule` object.
+
+- **400** — `every` unparseable, `every` below the **30 s floor**, a `spec` that
+  fails the §3 shape rules, or a `spec` carrying `parent_job_id`/`captain_root`
+  (schedules mint **root** jobs only).
+- **403** — worker token. **401** — missing/invalid token.
+
+### 7b. List — `GET /schedules`
+
+Array of `Schedule`, newest-`created_at` first (fixture `schedules_list.json`).
+
+### 7c. Enable / disable — `PATCH /schedules/{id}`
+
+`{"enabled": true|false}` → the updated `Schedule`. **Re-enabling restarts the
+clock**: `next_run_at` becomes one interval from now, so a long-disabled
+schedule can't fire the instant it's re-enabled. **404** if the id is unknown.
+
+### 7d. Delete — `DELETE /schedules/{id}`
+
+→ `{"deleted": true, "id": "<id>"}`. **404** if the id is unknown.
+
+### Tick semantics (server-enforced; the app just renders the clock)
+
+The CP enqueues one job per due schedule per tick from the stored `spec` (each
+run's spec carries a `schedule_id` for provenance). **No backfill:** an overdue
+schedule (CP was down for several intervals) fires **once**, and `next_run_at`
+advances in whole intervals so the original cadence is preserved — not a burst.
+**No pile-up:** if the schedule's previous job is still in flight
+(queued/assigned/running) the beat is skipped, but the clock still advances.
+
+## 8. Golden fixtures
 
 | File | What it pins |
 |---|---|
@@ -279,9 +349,11 @@ that ignores both params still gets a valid `Site` array (the first 100).
 | `publish_response.json` | published site, two-step (`POST /publish` w/ `blob_id`) |
 | `publish_oneshot_response.json` | published site, one-shot (`POST /publish?name=` + body) |
 | `publish_list.json` | site list (`GET /publish`) |
+| `schedule_create_response.json` | created interval schedule (`POST /schedules`) |
+| `schedules_list.json` | schedule list (`GET /schedules`) |
 | `error_401/403/404*.json` | error envelope |
 
-## 8. Versioning
+## 9. Versioning
 
 The contract is additive-only: servers may ADD fields; apps must ignore unknown
 fields and unknown enum values (render, don't crash). Removing/renaming a field

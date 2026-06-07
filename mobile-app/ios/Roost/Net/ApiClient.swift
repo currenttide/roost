@@ -176,4 +176,38 @@ struct ApiClient {
     func sites() async throws -> [Site] {
         try await send(request("publish"), as: [Site].self)
     }
+
+    // MARK: Schedules (API.md §7)
+
+    /// List interval schedules, newest first.
+    func schedules() async throws -> [Schedule] {
+        try await send(request("schedules"), as: [Schedule].self)
+    }
+
+    /// Create an interval schedule. `every` is seconds or "<N>[smhd]" (e.g. "30m";
+    /// 30 s floor server-side). `spec` follows the §3 submit shape (root jobs only).
+    /// Returns the new `Schedule`; its first run fires one interval from now.
+    func createSchedule(spec: [String: JSONValue], every: String,
+                        name: String? = nil, enabled: Bool = true) async throws -> Schedule {
+        let body = try JSONEncoder().encode(
+            ScheduleCreate(spec: spec, every: every, name: name, enabled: enabled))
+        return try await send(request("schedules", method: "POST", body: body),
+                              as: Schedule.self)
+    }
+
+    /// Enable/disable a schedule (API.md §7c). Re-enabling restarts the clock
+    /// server-side. Returns the updated `Schedule`.
+    @discardableResult
+    func setScheduleEnabled(_ id: String, enabled: Bool) async throws -> Schedule {
+        let body = try JSONEncoder().encode(SchedulePatch(enabled: enabled))
+        return try await send(request("schedules/\(id)", method: "PATCH", body: body),
+                              as: Schedule.self)
+    }
+
+    /// Delete a schedule (API.md §7d) → `{"deleted": true, "id": …}`.
+    @discardableResult
+    func deleteSchedule(_ id: String) async throws -> ScheduleDeleteResponse {
+        try await send(request("schedules/\(id)", method: "DELETE"),
+                       as: ScheduleDeleteResponse.self)
+    }
 }

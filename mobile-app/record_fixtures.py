@@ -12,7 +12,7 @@ Both app test suites parse these files; if a shape drifts, regenerate and the
 app-side decode tests tell you exactly what broke. The drift GUARD
 (tests/test_fixture_drift.py) imports ``capture()`` below and compares a live
 run's shapes against the committed goldens on every pytest run — additive-only
-(API.md §8): the server may add fields, but a removed/renamed field fails CI.
+(API.md §9): the server may add fields, but a removed/renamed field fails CI.
 """
 from __future__ import annotations
 
@@ -157,6 +157,17 @@ def capture(db_path: Path) -> dict[str, Any]:
             headers={**mh, "Content-Type": "application/gzip"}).json()
 
         out["publish_list.json"] = c.get("/publish", headers=mh).json()
+
+        # -- schedules (API.md §7) — interval jobs, AS the mobile token --------
+        # The phone schedules a recurring agent job; the CP re-submits the spec
+        # every interval. Create (first run one interval out), then list.
+        r = c.post("/schedules", headers=mh, json={
+            "spec": {"intent": "nightly: tidy the repo and run the tests",
+                     "kind": "claude", "requires": {"tools": ["python3"]},
+                     "hierarchy": {"can_dispatch": True}},
+            "every": "6h", "name": "nightly-tidy"})
+        out["schedule_create_response.json"] = r.json()
+        out["schedules_list.json"] = c.get("/schedules", headers=mh).json()
 
         # Error shapes the apps must handle.
         out["error_401.json"] = c.get(
