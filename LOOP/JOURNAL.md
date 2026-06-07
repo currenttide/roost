@@ -1721,3 +1721,27 @@ Entries are written by the loop; humans read, never need to edit.
 - Notes: iteration #13 slot 1. Key finding logged: default worker capacity 1
   makes two-running-jobs-per-worker unreachable via the poll path — tests use
   queued jobs (input accepted on any non-terminal job). R61 last in flight.
+
+## 2026-06-07 ~12:00 UTC — R61: mobile schedules UI (both platforms)
+- Verdict: shipped
+- Branch/PR: loop/r61-mobile-schedules-ui / https://github.com/currenttide/roost/pull/72 (merged bf3f943)
+- What changed: schedules sheet/route on both clients reaching the four /schedules
+  calls that were unreachable client code since R40. Publish/notifications
+  precedent followed exactly (overflow item → sheet; pure logic in
+  Net/Schedules.swift + model/Schedules.kt mirrors). `every` grammar pinned to the
+  server: regex + bare-number fallback + 30s floor, formatter mirroring
+  cli._fmt_interval; CROSS-CONTRACT blocks copy accepted/rejected/floor literals
+  verbatim from tests/test_schedules.py — implementer separately verified every
+  literal against live parse_every (exact parity).
+- Evidence:
+  - iOS 74/74 (+16); Android kotlinc+JUnitCore green (+18) AND full AGP
+    compile+test+assembleDebug SUCCESSFUL; pytest 778 (server untouched)
+  - render claims capped (R53-style note); Mac bonus not pursued (contracted
+    evidence complete; mac-mini-m4 confirmed reachable+idle)
+- Judge: approve (round 1, 11/11 checks) — re-ran both harnesses + pytest + AGP,
+  adversarially probed the grammar against live parse_every
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only)
+- Notes: iteration #13 COMPLETE — R59 #71, R60 #70, R61 #72. Survey #2 fully
+  consumed. Cycle #15: R62 mac-app verbs (Tier-B call: menu-bar-natural trio),
+  R63 drift sweep #3 (PRs #65-#72), R64 hunt #5 (server lifecycle, concurrency
+  lens — protocol deepening).

@@ -201,9 +201,21 @@ Done-when: `_derive_run` includes `inputs: {queued, delivered, dropped}` present
 Surface: MCP/feature. A6 survey #2 finding 2 (judge-approved). 16 tools, none publishes; the server allows scoped agent tokens to publish (INTEGRATIONS.md:168-170) and CLI + both mobile apps expose it — only the captain can't. "Build a site and publish it" via roost_do dead-ends.
 Done-when: `roost_publish` (name + bundle path or blob_id, mirroring the CLI one-shot/two-step) in TOOLS + TOOL_IMPL with an R46-style worked example; INTEGRATIONS.md row; tools/call test returns a Site; pytest green.
 
-### R61. Mobile schedules UI (both platforms) — `open` `self-promoted` `feature`
+### R61. Mobile schedules UI (both platforms) — `done` *(2026-06-07, PR #72 — every-grammar cross-contract pinned; render claims capped)* `self-promoted` `feature`
 Surface: mobile/feature. A6 survey #2 PROPOSED→promoted on Tier-B loop judgment: the interaction design is resolved BY PRECEDENT — the dashboard-overflow→sheet pattern established by publish (R50/R53) and notifications (R55). Both ApiClients already implement all four schedule calls (iOS ApiClient.swift:183-211, Android ApiClient.kt:174-209) — unreachable code today. API.md §7 frames phone scheduling as the point.
 Done-when: Schedules sheet on both platforms (list + create with every-interval + enable/disable + delete), following the established sheet/viewmodel patterns; pure logic (interval parse/format, state machine) Linux-tested on both harnesses; UI-render claims capped per evidence table; pytest + both harnesses green.
+
+### R62. Mac-app verb expansion — `open` `self-promoted` `feature`
+Surface: mac-app/feature. Tier-B loop judgment on the survey-#2 Proposed note: north star #3 says complete surfaces, and the menu bar already submits/cancels — the missing verbs follow. Scope to the menu-bar-natural ones: publish (one-shot, file picker), schedules (list/toggle), send (steer a selected running job). Backup/history stay CLI (operator tasks, not menu-bar). RoostClient.swift + AppModel patterns established; mac-app has a Linux-runnable test suite (I1: swift test 30/30 on /tmp/swift-toolchain).
+Done-when: the three verbs reachable from the menu bar following existing section patterns; client calls + pure logic Linux-tested (mac-app swift test); UI-render claims capped per evidence table unless a Mac-node build+screenshot is run (bonus); pytest green (server untouched).
+
+### R63. Drift sweep #3 — PRs #65-#72 — `open` `self-promoted`
+Surface: docs. A3: eight PRs landed since R42's sweep (Android publish UI, cli coverage, push slice, survey, mcp/schema tests, config reference, input visibility, roost_publish, mobile schedules). Most were doc-disciplined in-PR; sweep for cross-surface misses: README feature claims, INTEGRATIONS verb matrix vs the 17-tool reality, API.md §7 schedules now having UI, DESIGN.md §8a accuracy, skills (oversee/quickstart) vs new capabilities.
+Done-when: every confirmed drift fixed additively with claims truth-checked; docs-drift ratchet stays 0; pytest green.
+
+### R64. A1 hunt #5 — server event/lifecycle paths, concurrency lens — `open` `self-promoted`
+Surface: hunt. Deepening per protocol: all core areas hunted once; re-hunt the server's event-ingestion/lifecycle seams (worker event POST → state transitions, finalize, cancel/tree-cancel, sweeper interactions with the new input queue + notify hook) with a CONCURRENCY lens — interleavings the per-area hunts didn't try (e.g. cancel racing finalize, input-ack racing terminal, two workers' stale events crossing). Reproducing test required per finding; cleared hypotheses are valid output.
+Done-when: repros (LOOP/repro-a1-hunt5.py) for confirmed bugs merged after judge verification, or an honest all-clear report; pytest green.
 
 ### R21. Make presigned blob PUT single-use and race-safe — `done` *(2026-06-07, PR #30)* `self-promoted`
 Surface: backend/security. A1 hunt #2 reproduced that a presigned `put_url`
