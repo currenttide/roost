@@ -495,6 +495,202 @@ def test_reap_stale_attempt_unwinds_before_new_attempt():
     asyncio.run(go())
 
 
+# ---------- [R67] stale done-callback must not evict a re-leased job's task ----
+#
+# _spawn_job's _done callback runs LATER (call_soon), after run_job's task
+# finishes. _reap_stale_attempt early-returns when the old task is already
+# done() WITHOUT draining that pending callback, so the loop installs the NEW
+# attempt's task at the same job_id before the OLD task's _done fires. An
+# unconditional pop would then evict the live NEW task; the fix is _done's
+# identity guard (only the task that still owns the entry may evict it). Harm if
+# regressed: capacity gate under-counts -> over-lease; orphaned task escapes
+# _shutdown_jobs; next re-lease's reap can't find it -> double execution.
+
+
+class _EOFStream:
+    """A stdout/stderr stand-in at EOF, so run_job's relay tasks finish at once."""
+
+    async def readline(self) -> bytes:
+        return b""
+
+
+class _QuickProc:
+    """An already-exited process: wait() returns 0 immediately."""
+
+    pid = 111
+    returncode = 0
+
+    def __init__(self) -> None:
+        self.stdout = _EOFStream()
+        self.stderr = _EOFStream()
+
+    async def wait(self) -> int:
+        return 0
+
+
+class _HangingProc:
+    """A still-alive process: wait() never returns, so the job keeps its slot."""
+
+    pid = 222
+    returncode = None
+
+    def __init__(self) -> None:
+        self.stdout = _EOFStream()
+        self.stderr = _EOFStream()
+
+    async def wait(self) -> int:
+        await asyncio.sleep(9999)
+        return 0
+
+
+def test_reap_early_return_lets_stale_callback_evict_new_task_entry():
+    """Promoted A1 hunt #6 repro. The OLD (finished) attempt's pending _done must
+    NOT evict the NEW attempt's _job_tasks entry once it has been re-installed."""
+    from unittest.mock import patch
+    import roost.worker as wmod
+
+    async def go():
+        w, _events, _logs = _mk_runjob_worker({})
+        w._capacity = 4
+        spec = {"id": "jX", "spec": {"kind": "command", "command": "x",
+                                     "verify": False}}
+
+        # Attempt 1 gets a quick (already-exited) process so its task finishes
+        # fast; attempt 2 (the re-lease) gets a HANGING process so it stays in
+        # _job_tasks — making an eviction unambiguously a bug (a live task lost
+        # from tracking) rather than a normal self-removal.
+        proc_seq = [_QuickProc, _HangingProc]
+
+        async def _fake_create(*_a, **_k):
+            return proc_seq.pop(0)()
+
+        with patch("asyncio.create_subprocess_exec", side_effect=_fake_create), \
+             patch.object(wmod, "build_command",
+                          side_effect=lambda spec, jid, **kw: (
+                              ["/bin/true"], "/tmp", [])):
+            # First attempt — run_job finishes quickly.
+            w._spawn_job(spec)
+            old = w._job_tasks["jX"]
+
+            # Pump the loop until the deterministic window: old task DONE, but its
+            # _done callback NOT YET run (jX still maps to the OLD task) — exactly
+            # the state a poll await can leave.
+            window = False
+            for _ in range(2000):
+                await asyncio.sleep(0)
+                if old.done():
+                    window = w._job_tasks.get("jX") is old
+                    break
+            assert old.done(), "old task should have finished"
+            assert window, (
+                "could not reach the done-but-callback-pending window "
+                "(scheduling); rerun")
+
+            # The real loop body for a re-lease of jX, with NO await between the
+            # reap's early return and _spawn_job (matches the loop at worker.py).
+            await w._reap_stale_attempt("jX")   # old.done() -> early return
+            w._spawn_job(spec)                  # install NEW task (hanging proc)
+            new = w._job_tasks.get("jX")
+            assert new is not None and new is not old
+
+            # Let the NEW attempt genuinely start (register in _active) so it is
+            # provably a LIVE, still-running task — then let the OLD task's
+            # pending callback fire.
+            for _ in range(200):
+                if "jX" in w._active and not new.done():
+                    break
+                await asyncio.sleep(0)
+            assert not new.done() and "jX" in w._active, (
+                "new attempt should be live and running")
+            for _ in range(10):
+                await asyncio.sleep(0)
+
+            present = w._job_tasks.get("jX")
+            new_still_running = not new.done()
+            # Tidy up before asserting so a leak can't hang asyncio shutdown.
+            for t in list(w._job_tasks.values()):
+                t.cancel()
+            if new is not None and not new.done():
+                new.cancel()
+            for _ in range(20):
+                await asyncio.sleep(0)
+
+            assert present is new and new_still_running, (
+                "the NEW attempt's _job_tasks entry was EVICTED by the OLD "
+                f"task's stale done-callback while the NEW task was still "
+                f"running (present={present!r}, new_running={new_still_running}); "
+                "the worker now under-counts in-flight jobs (capacity gate "
+                "over-leases) and the running task is orphaned from _job_tasks "
+                "(shutdown/reap miss it -> double execution on the next re-lease)")
+        await w.close()
+
+    asyncio.run(go())
+
+
+def test_done_callback_identity_guard():
+    """Pins the REAL _spawn_job/_done identity-guard semantics: a stale task's
+    late callback must NOT evict a newer entry, while the OWNING task's callback
+    still cleans up normally (the common path must keep popping)."""
+    from unittest.mock import patch
+    import roost.worker as wmod
+
+    async def go():
+        w, _events, _logs = _mk_runjob_worker({})
+        w._capacity = 4
+
+        # Drive the REAL _spawn_job (-> real run_job -> real _done callback) for
+        # the same job_id twice: a quick first attempt, then a hanging re-lease.
+        proc_seq = [_QuickProc, _HangingProc]
+
+        async def _fake_create(*_a, **_k):
+            return proc_seq.pop(0)()
+
+        spec = {"id": "jG", "spec": {"kind": "command", "command": "x",
+                                     "verify": False}}
+        with patch("asyncio.create_subprocess_exec", side_effect=_fake_create), \
+             patch.object(wmod, "build_command",
+                          side_effect=lambda spec, jid, **kw: (
+                              ["/bin/true"], "/tmp", [])):
+            w._spawn_job(spec)
+            old = w._job_tasks["jG"]
+
+            # Window: old finished but its _done not yet drained (jG -> old).
+            for _ in range(2000):
+                await asyncio.sleep(0)
+                if old.done() and w._job_tasks.get("jG") is old:
+                    break
+            assert old.done() and w._job_tasks.get("jG") is old, (
+                "could not reach done-but-callback-pending window; rerun")
+
+            # Install the NEW (owning) attempt at the same key.
+            w._spawn_job(spec)
+            new = w._job_tasks.get("jG")
+            assert new is not None and new is not old
+
+            # Drain the OLD task's late callback: with the identity guard it is a
+            # no-op (jG now points at NEW), so the newer entry must SURVIVE.
+            for _ in range(50):
+                await asyncio.sleep(0)
+            assert w._job_tasks.get("jG") is new, (
+                "stale callback evicted the newer entry; identity guard broken")
+
+            # The OWNING (NEW) task's callback still cleans up normally: cancel it
+            # and confirm its own _done pops the entry (the common path).
+            new.cancel()
+            for _ in range(50):
+                await asyncio.sleep(0)
+            assert "jG" not in w._job_tasks, (
+                "owning task's callback failed to pop its own entry")
+
+            for t in list(w._job_tasks.values()):
+                t.cancel()
+            for _ in range(20):
+                await asyncio.sleep(0)
+        await w.close()
+
+    asyncio.run(go())
+
+
 def test_run_job_quick_job_unaffected_by_default_cap():
     """A fast job under the default cap succeeds normally."""
     async def go():

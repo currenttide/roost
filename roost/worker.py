@@ -1667,6 +1667,13 @@ class Worker:
         cross the attempts' tracking entries."""
         old = self._job_tasks.get(job_id)
         if old is None or old.done():
+            # [R67] An already-done old task may still have a PENDING _done
+            # callback (scheduled via call_soon, not yet run). We deliberately do
+            # NOT drain it here (no `await old` / sleep(0)): draining isn't a
+            # reliable barrier and would add an event-loop yield on this hot path
+            # for every non-re-lease poll. Correctness instead lives in _done's
+            # identity guard, which makes that late callback a no-op once the new
+            # attempt owns the entry. Keep both in sync if you touch either.
             return
         print(f"[roost] job {job_id} re-leased while a stale local attempt is "
               "still running; aborting the stale attempt", flush=True)
@@ -1685,7 +1692,17 @@ class Worker:
         self._job_tasks[job_id] = task
 
         def _done(t: asyncio.Task, _jid: str = job_id) -> None:
-            self._job_tasks.pop(_jid, None)
+            # [R67] Identity guard: only the task that still OWNS this entry may
+            # evict it. A finished task's _done is scheduled via call_soon and
+            # runs LATER; if the same job_id was re-leased in between (its old
+            # attempt done() but _done not yet drained — see _reap_stale_attempt's
+            # done() early-return), _spawn_job has already installed a NEW task at
+            # this key. An unconditional pop would evict that live task: the
+            # capacity gate (len(_job_tasks)) would under-count -> over-lease,
+            # _shutdown_jobs couldn't cancel the orphan, and the next re-lease's
+            # reap couldn't find it -> two concurrent attempts -> double execution.
+            if self._job_tasks.get(_jid) is t:
+                self._job_tasks.pop(_jid, None)
             # Surface an unexpected crash (run_job guards its own paths, but never let a
             # task die silently and leak _running/_active accounting unnoticed).
             if not t.cancelled():
