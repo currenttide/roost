@@ -1644,6 +1644,65 @@ def test_publish_oneshot_500_blob_ok_but_publish_json_fails_surfaces_both(
     assert "blob flow" in res.output.lower()       # fallback failure noted
 
 
+def test_publish_loses_oneshot_err_on_fallback_connect_error(
+        tmp_path, monkeypatch):
+    # R90: the one-shot 500s (a real, diagnostic server error) and the blob
+    # fallback POST then raises a TRANSPORT exception (connection refused
+    # mid-publish) — NOT an HTTP status. The R78 contract (cli docstring:
+    # "if both paths fail you see the original error") must hold even when the
+    # fallback dies at the transport layer: the original one-shot diagnosis
+    # must still surface in a clean ClickException, not a bare httpx traceback.
+    rec = _Recorder()
+
+    def blobs_handler(req):
+        raise httpx.ConnectError("Connection refused", request=req)
+
+    _mock_publish(monkeypatch, {
+        "POST /publish": httpx.Response(500, text="ONESHOT-BOOM: schema mismatch"),
+        "POST /blobs": blobs_handler,
+    }, rec)
+    res = CliRunner().invoke(
+        roost_cli.publish, [str(_publish_dir(tmp_path)), "--name", "hello"],
+        obj={})
+    assert res.exit_code != 0
+    # The original one-shot error must still be visible (not lost behind the
+    # transport exception), and the fallback failure noted — no raw traceback.
+    assert "ONESHOT-BOOM" in res.output, (
+        "publish lost the original one-shot error when the blob fallback "
+        f"raised a transport exception. Output was:\n{res.output}\n"
+        f"Exception: {res.exception!r}")
+    assert "publish failed" in res.output.lower()
+    assert "blob flow" in res.output.lower()       # fallback failure noted
+
+
+def test_publish_loses_oneshot_err_on_publish_json_connect_error(
+        tmp_path, monkeypatch):
+    # R90 (second fallback leg): the blob upload succeeds but the second,
+    # JSON /publish POST raises a transport exception. The one-shot error must
+    # still surface (same contract as the blob-leg transport failure above).
+    rec = _Recorder()
+
+    def publish_handler(req):
+        if "application/json" in req.headers.get("content-type", ""):
+            raise httpx.ConnectError("Connection refused", request=req)
+        return httpx.Response(500, text="ONESHOT-BOOM: schema mismatch")
+
+    _mock_publish(monkeypatch, {
+        "POST /publish": publish_handler,
+        "POST /blobs": httpx.Response(200, json={"id": "blob-9"}),
+    }, rec)
+    res = CliRunner().invoke(
+        roost_cli.publish, [str(_publish_dir(tmp_path)), "--name", "hello"],
+        obj={})
+    assert res.exit_code != 0
+    assert "ONESHOT-BOOM" in res.output, (
+        "publish lost the original one-shot error when the JSON /publish "
+        f"fallback raised a transport exception. Output was:\n{res.output}\n"
+        f"Exception: {res.exception!r}")
+    assert "publish failed" in res.output.lower()
+    assert "blob flow" in res.output.lower()
+
+
 def test_publish_oneshot_403_is_actionable_no_fallback(tmp_path, monkeypatch):
     # A 403 is an auth problem, not a version mismatch — surface the admin
     # hint directly; the blob flow would just 403 again.
