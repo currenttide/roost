@@ -1363,3 +1363,25 @@ Entries are written by the loop; humans read, never need to edit.
   stress, its OWN runtime teeth experiment, and the full suite
 - Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only)
 - Notes: iteration #8 slot 1. R46 (MCP examples) + A1 hunt #4 in flight.
+
+## 2026-06-07 ~03:10 UTC — R46: MCP tool docstring examples
+- Verdict: shipped (judge round 2)
+- Branch/PR: loop/r46-mcp-examples / https://github.com/currenttide/roost/pull/57 (merged 13b9856)
+- What changed: tight worked example (input JSON + one-line return sketch) on all 16
+  TOOLS entries — each input checked against the inputSchema, each return traced
+  through the tool impl + server route. roost_submit's example shows the docker/GPU
+  case incl. R33's reason arg. +47/-17, description strings only. ROUND-1 CATCH:
+  roost_cancel's PRE-EXISTING description claimed "returns the updated job record"
+  but DELETE /jobs/{id} actually returns {cancelled: N} — my first example doubled
+  down on the stale prose; judge caught it, both fixed. (The already-terminal →
+  {error: not_cancellable} gotcha was verified correct.)
+- Evidence:
+  - `python -m pytest -q` → 644 passed; test_mcp.py asserts schema only (greped) —
+    no prose-assertion breakage; INTEGRATIONS.md table consistent, untouched
+- Judge: revise (round 1, the roost_cancel shape) → approve (round 2) — verified
+  EVERY example against schema + actual route return, re-ran pytest each round
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only)
+- Notes: iteration #8 slot 2. The examples themselves surfaced a docs bug the R42
+  sweep missed (return-shape claims aren't in any table) — the judge-catches-
+  propagated-drift pattern is exactly why examples must be truth-checked. Hunt #4
+  last in flight.

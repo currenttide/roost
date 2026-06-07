@@ -139,7 +139,7 @@ Done-when: per-model pricing configurable (worker policy or CP config — pick t
 Surface: tests/robustness. A4 debt from R42's run: `test_backup_leaves_no_temp_file_behind` globs the SHARED system temp dir and races the adjacent backup test under parallel execution — failed once mid-run, passes in isolation. A flaky suite undermines every future judge gate.
 Done-when: the test isolates its temp observation (dedicated tmp_path-scoped dir for backup temps, or filter by this test's own marker); deterministic under repetition (`pytest tests/test_server.py -k backup -p no:randomly --count`-style or a tight loop) and under parallel runs; pytest green.
 
-### R46. MCP tool docstrings: usage examples — `open` `self-promoted` `feature`
+### R46. MCP tool docstrings: usage examples — `done` *(2026-06-07, PR #57)* `self-promoted` `feature`
 Surface: MCP/DX. Pre-existing Proposed item, promoted: the captain agent READS these docstrings to decide how to call tools — examples directly improve every captain run's tool-use accuracy. Add a short worked example to each of the 16 tools' descriptions in roost/mcp.py (inputs + what comes back), truth-checked against the real schemas/server behavior.
 Done-when: every TOOLS entry carries an accurate example; examples truth-checked (judge re-checks against schemas + server routes); INTEGRATIONS.md tool table untouched or consistent; pytest green.
 
