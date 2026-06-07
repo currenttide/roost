@@ -82,7 +82,7 @@ Done-when: minimal honest slice — schema for schedules, CP tick that enqueues 
 Surface: tests. The zero-to-fleet onramp has no test file; regressions break new users silently.
 Done-when: unit tests for `build_url`, `wait_for_health`, `wait_for_worker` et al. with a stubbed CP; failure paths covered; pytest green.
 
-### R10. Tests for `service.py` — `open`
+### R10. Tests for `service.py` — `done` *(2026-06-07, PR #18)*
 Surface: tests. 232 lines of systemd/launchd install logic, zero tests.
 Done-when: subprocess boundaries mocked; unit/file-generation logic asserted for both systemd and launchd paths; pytest green.
 
