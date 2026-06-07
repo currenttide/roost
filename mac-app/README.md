@@ -68,8 +68,10 @@ the Linux gate never type-checked the view code.)
 before claiming the app compiles.** Two ways, either suffices:
 
 - **CI** — `.github/workflows/mac-app.yml`'s `app-macos` job runs `swift build`
-  + `swift test` + `./scripts/build.sh` on a `macos-14` runner. This is the
-  source of truth on every mac-app PR.
+  + `swift test` + `./scripts/build.sh` on a `macos-15` runner (its default
+  Xcode 16.4 ships Swift 6.1; the older `macos-14` default Xcode 15.4 / Swift
+  5.10 cannot resolve SwiftTerm's transitive swift-argument-parser 6.0 manifest
+  — R92). This is the source of truth on every mac-app PR.
 - **Mac node (loop / offline)** — build on the fleet's Mac node, e.g.
   `roost exec mac-mini-m4 'cd <checkout>/mac-app && swift build 2>&1 | tail'`
   and capture `Compiling`/`Build complete!` (or `swift test`). The build-log
