@@ -105,7 +105,8 @@ uv tool install --python 3.12 "git+https://github.com/<you>/roost"
 > **Pin Python 3.12.** `uv` may otherwise pick a newer interpreter the async HTTP
 > client doesn't support yet.
 
-This puts a `roost` command on your PATH. (Prefer pip? `pip install -e ".[dev]"` in a venv.)
+This puts a `roost` command on your PATH (`roost --version` confirms which build you
+have). (Prefer pip? `pip install -e ".[dev]"` in a venv.)
 
 ---
 
@@ -238,6 +239,15 @@ scrape_configs:
       - targets: ["control-plane-host:8787"]
 ```
 
+### Push notifications (opt-in)
+
+So you learn a session finished without polling, the control plane can fire a
+notification on **every terminal job** (succeeded / failed / cancelled). It's
+**off by default** — set `ROOST_NOTIFY_URL` (or `roost serve --notify-url`) to an
+ntfy.sh / UnifiedPush-style webhook to turn it on. The POST is fire-and-forget
+(never on the job's critical path) and carries both a JSON body and ntfy display
+headers. Full recipe and security notes: **[docs/DEPLOY.md](docs/DEPLOY.md)**.
+
 ---
 
 ## Talk to your fleet (MCP)
@@ -320,11 +330,12 @@ a per-kind default cap applies (`command` 120 min, `claude`/`auto` 240 min, `doc
 | `roost logs <id> [--follow]` | job output |
 | `roost send <id> <text> [--wait]` | send a follow-up message to a **running** job (see *Interactive follow-up* below) |
 | `roost exec <worker> -- <cmd>` | run a command on one specific node — no SSH, via the job channel (great for a node whose SSH is unreachable) |
-| `roost tree <root> --health` | a dispatch's whole job tree + per-job liveness |
+| `roost tree <root> --health` | a dispatch's whole job tree + per-job liveness; each child shows the captain's `↳ why:` plan reason when one was recorded |
 | `roost cancel <id> [--tree]` | cancel a job (or its lineage) |
-| `roost workers` | the live fleet |
+| `roost workers` | the live fleet (a node whose GPU probe errored shows `gpu:DETECTION-FAILED`, distinct from a genuinely GPU-less node) |
 | `roost prune-workers [--days N]` | (admin) delete ghost worker rows not seen in N days (default 7); never touches live or running nodes |
-| `roost capabilities` | what the fleet can do, in plain language |
+| `roost capabilities` | what the fleet can do, in plain language (flags any node whose GPU detection failed) |
+| `roost backup <dest.db>` | (admin) download a consistent online snapshot of the control-plane DB — works against a remote CP; restore is in [docs/DEPLOY.md](docs/DEPLOY.md) |
 
 ### Interactive follow-up (send input to a running job)
 
@@ -451,7 +462,7 @@ mac-app/build.sh http://<control-plane-host>:8787 "<admin-token>"
 
 ```bash
 uv tool install --python 3.12 --with pytest .    # or: pip install -e ".[dev]"
-python -m pytest -q                               # 347 tests
+python -m pytest -q                               # 636 tests
 ```
 
 Contributions welcome. Keep credentials and machine-specific config out of commits

@@ -52,6 +52,7 @@ import click
 import httpx
 import yaml
 
+from . import __version__
 from . import config as roost_config
 
 
@@ -390,6 +391,8 @@ def _iter_sse(resp: httpx.Response):
 
 
 @click.group()
+@click.version_option(version=__version__, prog_name="roost",
+                      message="%(prog)s %(version)s")
 @click.option("--url", default=None,
               help="Control plane base URL (env: ROOST_URL, else config)")
 @click.option("--token", default=None,
