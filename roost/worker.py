@@ -2026,7 +2026,17 @@ class Worker:
                 base_url=None, token=None, can_dispatch=False, tempfiles=temp,
             )
             if system_prompt:
-                argv = argv[:3] + ["--append-system-prompt", system_prompt] + argv[3:]
+                # Insert right after `claude -p <intent>`. Anchor to the `claude`
+                # token rather than index 0 — under worker policy sandbox: "bwrap"
+                # the argv is bwrap-wrapped (`bwrap ... -- claude -p <intent> ...`),
+                # so a fixed argv[:3] would splice the flag into bwrap's own options
+                # and corrupt the sandbox invocation. Mirror _build_auto_argv.
+                try:
+                    ci = argv.index("claude")
+                except ValueError:
+                    ci = 0
+                cut = ci + 3  # ["claude", "-p", intent]
+                argv = argv[:cut] + ["--append-system-prompt", system_prompt] + argv[cut:]
         except (ValueError, FileNotFoundError) as e:
             return None, "", 0
         try:
