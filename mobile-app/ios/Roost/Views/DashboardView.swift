@@ -8,6 +8,7 @@ struct DashboardView: View {
     @Environment(\.scenePhase) private var scenePhase
 
     @State private var showNew = false
+    @State private var showPublish = false
     @State private var confirmCancel: Run?
     @State private var path: [String] = []      // navigation stack of job ids
 
@@ -41,6 +42,10 @@ struct DashboardView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
+                        Button {
+                            showPublish = true
+                        } label: { Label("Publish a site", systemImage: "globe") }
+                        Divider()
                         Button("Unpair", role: .destructive) { app.unpair() }
                         if let name = app.credential?.name { Text(name) }
                     } label: { Image(systemName: "ellipsis.circle") }
@@ -53,6 +58,9 @@ struct DashboardView: View {
                     showNew = false
                     path.append(newId)
                 }
+            }
+            .sheet(isPresented: $showPublish) {
+                PublishView()
             }
             .confirmationDialog("Cancel this job?",
                                 isPresented: Binding(
@@ -69,6 +77,8 @@ struct DashboardView: View {
         .onAppear {
             store.bind(app)
             store.start()
+            // Screenshot/demo hook: jump straight to the publish sheet.
+            if app.autoOpenPublish { showPublish = true }
         }
         .onChange(of: scenePhase) { _, phase in
             // Pause polling in background (DESIGN §7: no background networking).
