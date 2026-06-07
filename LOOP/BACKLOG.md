@@ -103,7 +103,7 @@ Done-when: `GET /metrics` (admin auth) returns valid Prometheus text with ≥8 m
 Surface: backend/robustness. North star #2 (bounded resources): `/publish` list is unbounded (server.py ~2150) — a fleet that publishes for months returns megabytes per list call.
 Done-when: list accepts `limit`/`offset` with a sane default cap; response shape stays additive (existing clients keep working); CLI passes the flags through; boundary tests; mobile contract unaffected or additively extended; pytest green.
 
-### R37. Mobile push notifications (DESIGN.md v1.1 — ntfy/UnifiedPush) — `open` `self-promoted` `feature`
+### R37. Mobile push notifications (DESIGN.md v1.1 — ntfy/UnifiedPush) — `done` *(2026-06-06, PR #48)* `self-promoted` `feature`
 Surface: backend/mobile/feature. North star #3 + the top user-facing ask in the design doc. Read `mobile-app/DESIGN.md` v1.1 first and implement its choice (ntfy-style webhook push). Server side: CP config gains an optional notify endpoint/topic; terminal job events (succeeded/failed/cancelled) POST a notification via httpx; notify failure NEVER affects job state.
 Done-when: per DESIGN.md v1.1 — opt-in config documented; stubbed-endpoint tests cover success, failure-isolation, and payload shape; pytest green. Client subscription wiring claimed only as far as Linux-testable (evidence table caps).
 

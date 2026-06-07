@@ -1122,3 +1122,28 @@ Entries are written by the loop; humans read, never need to edit.
   diff is exactly 5 files). Implementer corrections of judge narration are working
   as designed.
 - Notes: iteration #5 slot 1. R37 (push) + R38 (interactive input) still in flight.
+
+## 2026-06-07 ~00:00 UTC — R37: mobile push notifications (ntfy/UnifiedPush webhook)
+- Verdict: shipped
+- Branch/PR: loop/r37-push-notifications / https://github.com/currenttide/roost/pull/48 (merged 005bbfc)
+- What changed: CP-side push per DESIGN.md v1.1. Opt-in `ROOST_NOTIFY_URL` env +
+  `roost serve --notify-url` + docker/stack.yml passthrough (mirrors the
+  ROOST_PUBLISH_DOMAIN config pattern). On terminal events (worker event, /finalize,
+  DELETE /jobs/{id}) the CP fires a detached 5s-timeout POST: JSON payload
+  {event, job_id, state, intent, duration_sec, exit_code, worker_id, message} plus
+  ntfy display headers (Title/Priority/Tags; failures priority 5) — one POST serves
+  both generic webhooks and ntfy. No retry by design (missed push recoverable via
+  /derived); _post_notification swallows+logs all errors, never on the request path.
+  No new deps (httpx reused). Client-side subscription = device work → documented in
+  DEPLOY.md as tracked separately, deferred to Proposed, NOT claimed.
+- Evidence:
+  - `python -m pytest -q` → 582 passed (+16 in tests/test_notify.py)
+  - failure isolation proven with the REAL poster against a dead port (job still
+    succeeded, API still 200) and a simulated timeout; unconfigured → zero posts
+- Judge: approve (round 1) — re-ran suite, reproduced dead-port + unconfigured checks
+  with its own stubs, checked DESIGN.md fidelity + no-new-deps + LOOP/ untouched
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only;
+  fenced MODEL line present)
+- Notes: iteration #5 slot 2. Design choices documented in PR (single notify_url
+  captures host+topic; dual payload). R38 (interactive input) still in flight —
+  last Ranked item; replenishment cycle #7 follows its landing.
