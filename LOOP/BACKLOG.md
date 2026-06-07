@@ -2,21 +2,17 @@
 
 Direction anchor for the improvement loop (see `PROTOCOL.md` for the rules).
 
-- **Humans** edit the Ranked section: reorder, cut, promote from Proposed, sharpen Done-when.
-- **The loop** takes the top unblocked Ranked item, one per iteration, and may only
-  *append* to Proposed — with one exception: when Ranked runs dry, the Replenishment
-  engine (`PROTOCOL.md`) refills it with up to 3 judge-approved **Tier A** items per
-  cycle from renewable sources — bug hunts (reproducing test required), coverage gaps,
-  drift sweeps over changed code, journaled debts, the Ratchets table, and the
-  **Product gap survey (A6)** — each tagged `self-promoted`. A6 may also promote items
-  from Proposed directly to Ranked when the gap is real and code-verifiable, the fix
-  is additive, the Done-when is concrete, and no design decision is required (judge
-  must approve). Features needing a direction call, API/contract changes, or new
-  dependencies always wait for the human.
-  This is what makes the loop continuous: it idles only when a full cycle plus two
-  deepening passes find nothing real, and resumes when the repo changes.
-- Every iteration is gated by an independent **Sonnet judge** that re-runs the
-  evidence itself (autoreview-style) before a PR is opened.
+- **Humans** may edit the Ranked section anytime: reorder, cut, sharpen Done-when.
+- **The loop** (standing human direction 2026-06-06: best judgment, feature focus,
+  production-readiness goal — see PROTOCOL.md) takes up to 3 unblocked Ranked items
+  per iteration, dispatched to parallel isolated worktree agents. It keeps Ranked
+  stocked via Replenishment: confirmed bugs (reproducing test required) outrank
+  features; features/production items (Tier B, loop judgment) are the focus and
+  Ranked should always hold ≥3 of them; coverage/docs ratchets fill the rest.
+  Breaking API/contract changes and security-surface items are the two remaining
+  human gates (the latter handled in a dedicated session).
+- Every PR is gated by an independent judge on a different model that re-runs the
+  evidence itself; approved PRs auto-merge (squash).
 - Status: `open` → `in-progress` → `done` (or `blocked: <why>`).
 
 ---
@@ -88,9 +84,32 @@ Surface: backend/robustness. A1 hunt #3 deferred bug, repro'd + judge-approved i
 Repro: `LOOP/repro-a1-hunt3.py::test_oneshot_agent_cancels_relay_tasks_on_cancellation` — FAILS on master.
 Done-when: finally cancels/awaits both relay tasks on every exit path; repro passes; pytest green.
 
-### R32. Single-source the version (pyproject 0.1.0 vs server 0.2.0) — `open` `self-promoted`
-Surface: backend/correctness. A6 promotion from Proposed (found during I0; gates: additive ✓, code-verifiable ✓, concrete done-when ✓, no design decision ✓ — implementing agent's judge must verify the gates before implementation per protocol). The running CP self-reports 0.2.0 while pyproject.toml says 0.1.0.
-Done-when: version read from package metadata (e.g. `importlib.metadata`) at one source of truth; `GET /healthz` and pyproject agree; test pins the equality; pytest green.
+### R32. Single-source the version (pyproject 0.1.0 vs server 0.2.0) — `done` *(2026-06-06, PR #41)* `self-promoted`
+Surface: backend/correctness. A6 promotion from Proposed. `__version__` in roost/__init__.py (adjacent-pyproject first → importlib.metadata → documented fallback); pyproject bumped to 0.2.0; healthz/readyz/FastAPI/MCP all import it; equality test parses pyproject independently. Both judge phases passed (gates, then diff).
+
+### R33. Captain observability: sub-job plan + reasoning in `roost tree` — `open` `self-promoted` `feature`
+Surface: backend/CLI/feature. Production north star #2 (operability). When the captain splits a goal into sub-jobs, the plan (which sub-jobs, why, what order) is invisible — `roost tree` shows children but not the reasoning. An operator debugging a fleet cannot tell what the captain intended.
+Done-when: captain dispatch records a structured plan on the parent job (additive field); `roost tree <root>` renders per-child one-line reasoning; older plan-less jobs render gracefully; tests for plan recording + rendering; pytest green.
+
+### R34. Mobile one-shot publish parity — `open` `self-promoted` `feature`
+Surface: mobile/feature. Completes the half-landed R7 feature (north star #3: complete surfaces). Server has `POST /publish?name=` (raw body) since PR #15; mobile API.md §6 still documents only the two-step blob flow; neither client can use the one-shot path.
+Done-when: API.md §6 documents the one-shot path; `record_fixtures.py` records it (regen is values-only additive); iOS + Android decode layers + Linux-runnable tests; pytest green + both mobile harnesses green (per evidence table).
+
+### R35. `/metrics` endpoint (Prometheus text format, no new deps) — `open` `self-promoted` `feature`
+Surface: backend/feature. North star #2: a production fleet needs scrapeable metrics; today the only visibility is CLI polling. Hand-rolled Prometheus text exposition (no client library — dependency-light rule).
+Done-when: `GET /metrics` (admin auth) returns valid Prometheus text with ≥8 meaningful series (jobs by state, queue depth, workers online/total, lease expirations, schedule beats, blob count/bytes); values read from DB so they survive CP restarts; README ops section documents it; format + seeded-value tests; pytest green.
+
+### R36. Published-site listing pagination — `open` `self-promoted` `feature`
+Surface: backend/robustness. North star #2 (bounded resources): `/publish` list is unbounded (server.py ~2150) — a fleet that publishes for months returns megabytes per list call.
+Done-when: list accepts `limit`/`offset` with a sane default cap; response shape stays additive (existing clients keep working); CLI passes the flags through; boundary tests; mobile contract unaffected or additively extended; pytest green.
+
+### R37. Mobile push notifications (DESIGN.md v1.1 — ntfy/UnifiedPush) — `open` `self-promoted` `feature`
+Surface: backend/mobile/feature. North star #3 + the top user-facing ask in the design doc. Read `mobile-app/DESIGN.md` v1.1 first and implement its choice (ntfy-style webhook push). Server side: CP config gains an optional notify endpoint/topic; terminal job events (succeeded/failed/cancelled) POST a notification via httpx; notify failure NEVER affects job state.
+Done-when: per DESIGN.md v1.1 — opt-in config documented; stubbed-endpoint tests cover success, failure-isolation, and payload shape; pytest green. Client subscription wiring claimed only as far as Linux-testable (evidence table caps).
+
+### R38. Interactive follow-up to running agent jobs (DESIGN.md §3.2) — `open` `self-promoted` `feature`
+Surface: backend/worker/feature. North star #3, v2 design. Read `mobile-app/DESIGN.md` §3.2 first. Where the design leaves choices open, the loop makes the call and documents the rationale (standing direction 2026-06-06). Expected shape: `POST /jobs/{id}/input` queues a message; worker delivers to the running agent job; clients can steer mid-flight.
+Done-when: input verb exists end-to-end for at least the `claude` kind on the CLI surface (`roost send <id> <text>` or similar); delivery semantics documented (queued vs dropped when no consumer); tests with a stubbed agent process; pytest green + live smoke (behavior change).
 
 ### R21. Make presigned blob PUT single-use and race-safe — `done` *(2026-06-07, PR #30)* `self-promoted`
 Surface: backend/security. A1 hunt #2 reproduced that a presigned `put_url`
@@ -214,13 +233,10 @@ first iteration on that ratchet measures and records it here (no code changes).
 <<<<<<< Updated upstream
 =======
 >>>>>>> Stashed changes
-- **A6 (cycle #4, unblocked from Proposed):** Mobile one-shot publish parity — server landed with R7 (PR #15); just needs API.md §6 + iOS/Android decode layers (no server changes)
 - **A6 (cycle #4, unblocked from Proposed):** Version drift — `pyproject.toml` says `0.1.0`, server self-reports `0.2.0`; single-source via `importlib.metadata`
-- Published-site listing pagination (`/publish` list unbounded, roost/server.py:2150)
 - Drop `cred_hash` on worker revoke — make revocation total
 - Capability detection: distinguish "no GPU" from "GPU detection failed" (worker logs)
 - Worker credential refresh racing lease TTL — sync refresh with lease lifecycle
-- Captain split observability: expose sub-job plan + reasoning in `roost tree`
 - Cost estimation: configurable per-model pricing instead of fixed rate
 - Narration re-render `min_interval` configurable
 - MCP tool docstrings: add usage examples for each tool
@@ -228,9 +244,6 @@ first iteration on that ratchet measures and records it here (no code changes).
 - Broader e2e coverage for `verify.py` verdict path
 - DEPLOY.md: SQLite backup/restore procedure for the hubbase CP
 - Mobile: schedule verb parity (after R8)
-- Mobile push notifications (DESIGN.md v1.1 — ntfy/UnifiedPush)
-- Interactive follow-up to running agent jobs (DESIGN.md §3.2, v2)
 - Mac app follow-ups (the native SwiftPM app lands with I1; webview wrapper is the deleted PoC — never resurrect it)
 - Publish UI wiring: iOS/Android screens for pick-bundle → upload → publish → share-link (decode layers + contract landed with R6, PR #14, 2026-06-06)
-- Mobile one-shot publish parity: expose `POST /publish?name=` (raw body) in API.md §6 + fixtures + decode layers (server side landed with R7, PR #15, 2026-06-06)
 - Lease-expiry requeue grace analog: should a sweeper requeue also restart the placement-grace window (R19 restarted it for declines only — real failures may deserve different semantics)? (2026-06-07)

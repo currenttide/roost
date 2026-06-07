@@ -138,19 +138,50 @@ churn.
   Proposed to Ranked (bypassing the usual human-only rule) when the four gates
   are met and the judge approves.
 
-### Tier B (human-gated — drafted, never self-promoted)
+### Tier B (loop judgment — judge-gated, journaled)
 
-Anything that requires a product direction or design decision: new external
-dependencies, API/contract changes (removals, renames, breaking changes), UX
-redesigns, new product surfaces with unclear scope, refactors unjustified by a
-reproducing defect, or features whose value depends on positioning judgment the
-loop cannot make alone. Goes to Proposed with evidence and a clear "what the
-human needs to decide" note; surfaced in replenishment notifications.
+*Standing human direction (2026-06-06): "Do not wait on my direction call. Use
+your best judgement on what needs to be done. Focus more on new features and
+the goal of making roost a production ready tool."*
 
-The boundary with A6: if a reasonable engineer, seeing the current codebase,
-would agree that the gap is obviously real and the fix is obviously correct —
-it's A6. If a reasonable engineer might say "good question, but I'm not sure
-that's the right direction" — it's Tier B.
+Tier B items no longer wait for the human. The loop promotes feature work, UX
+work, additive API growth, and ops/production-readiness improvements on its own
+judgment, prioritized by the Production-readiness north star below. Design
+decisions within an item are the loop's to make — make the call, document the
+rationale in the PR and journal, and prefer the choice most consistent with the
+existing architecture. Constraints that still hold:
+
+- Every item needs a concrete Done-when and the full judge gate — the quality
+  bar is unchanged; only the permission gate moved.
+- **Additive bias**: breaking API/contract changes (removals, renames,
+  incompatible reshapes) still go to Proposed for the human — a production tool
+  does not break its users.
+- **Dependency-light** (CLAUDE.md): avoid new runtime dependencies; prefer
+  hand-rolled-simple. A genuinely necessary new dependency must be justified in
+  the PR and explicitly weighed by the judge.
+- Security-surface items: still excluded (separate session).
+- Outward-facing actions beyond this repo (publishing packages, posting
+  externally): still out of scope.
+
+### Production-readiness north star
+
+"Production ready" for Roost means an operator can run a fleet for months
+without babysitting it, and every documented client surface actually works.
+Concretely, in priority order:
+
+1. **Never lose or wedge a job** — correctness/reliability bugs with repros
+   outrank everything else.
+2. **Operable**: observability (metrics, history, failure triage), bounded
+   resources (caps, pagination, pruning), recoverable state (backup/restore,
+   migrations), clean lifecycle (drain, shutdown, revocation).
+3. **Complete surfaces**: every verb reachable from every documented client
+   (CLI, MCP, mobile, mac) — half-landed features get finished.
+4. **Self-explanatory**: docs match code; new users succeed without tribal
+   knowledge.
+
+Each replenishment cycle should keep Ranked stocked with at least three
+feature/production items so parallel dispatch always has feature work — bug
+hunts continue, but feature progress is the focus.
 
 ### The cycle
 

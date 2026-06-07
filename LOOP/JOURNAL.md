@@ -917,3 +917,51 @@ Entries are written by the loop; humans read, never need to edit.
   gates to be judge-verified pre-implementation. R30+R31 share _oneshot_agent —
   dispatched to ONE agent sequentially (two PRs) to avoid same-function
   conflicts; R32 parallel.
+
+## 2026-06-06 ~22:40 UTC — Direction change: loop judgment + feature focus + production-readiness
+- Verdict: shipped (protocol/backlog bookkeeping)
+- Branch/PR: direct to master (bookkeeping)
+- What changed: standing human direction received this session: "Do not wait on
+  my direction call. Use your best judgement on what needs to be done. Focus
+  more on new features and the goal of making roost a production ready tool."
+  PROTOCOL.md: Tier B rewritten from human-gated to loop-judgment (judge gate
+  unchanged; additive bias, dependency-light, security exclusion, and
+  no-external-publishing all still hold); Production-readiness north star added
+  (1 never lose a job, 2 operable, 3 complete surfaces, 4 self-explanatory).
+  BACKLOG.md header updated to match. Feature slate promoted on loop judgment:
+  R33 captain plan in `roost tree`, R34 mobile one-shot publish parity,
+  R35 /metrics endpoint, R36 publish-list pagination, R37 mobile push
+  notifications (DESIGN.md v1.1), R38 interactive follow-up (DESIGN.md §3.2).
+  Also dispatched: rescue re-port of PR #13 (bare-204 + ASGI publish router —
+  both bugs verified still live on master at server.py:2683 and :1771; old
+  branch CONFLICTING, so fresh re-port with fresh judge). DEVIATION (logged):
+  this makes iteration #3 effectively 4 items (R30+R31+R32+rescue) — the cap
+  exists to prevent churn, not to delay crash-storm fixes.
+- Evidence: protocol/backlog diffs in this commit; PR #13 mergeable=CONFLICTING
+  per gh; both target bugs grep-confirmed on master pre-dispatch.
+- Judge: n/a (bookkeeping; each dispatched item carries its own judge)
+- Models: orchestrator claude-opus-4-8
+- Notes: R22/R23 (security) remain parked for the dedicated session. Remaining
+  human gates: breaking API changes, security surface, external publishing.
+
+## 2026-06-06 ~22:45 UTC — R32: single-source the version
+- Verdict: shipped
+- Branch/PR: loop/r32-version-single-source / https://github.com/currenttide/roost/pull/41 (merged f8663de)
+- What changed: `roost/__init__.py` `__version__` — adjacent-source pyproject.toml
+  first (editable installs would otherwise report the frozen .dist-info value),
+  then importlib.metadata, then a documented fallback literal. pyproject bumped
+  0.1.0 → 0.2.0 (server never downgraded). healthz/readyz/FastAPI app/MCP
+  SERVER_VERSION all import `__version__`. tests/test_version.py parses
+  pyproject independently and pins equality across all reporters.
+- Evidence:
+  - `python -m pytest -q` → 548 passed (was 541; +7)
+  - judge phase 1 (A6 gates): GATES-APPROVED; phase 2 (diff): APPROVE, re-ran
+    pytest itself, grep-confirmed single-sourcing
+- Judge: approve (both phases, round 1)
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (via claude -p
+  --model sonnet read-only; phase-2 verdict text led with prose instead of the
+  fenced MODEL line — substance unambiguous, quirk logged)
+- Notes: iteration #3 slot 2. Out-of-scope finds flagged: API.md/fixtures pin
+  "0.2.0" (still correct; regen only if version changes again); CLI has no
+  --version flag (left as possible future A6 item). R30/R31 agent + PR-13
+  rescue agent still in flight.
