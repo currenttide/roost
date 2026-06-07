@@ -335,7 +335,7 @@ the one-shot attempt, or preflight the server version via healthz — pick, just
 failing test first (stubbed old-CP responses); clear error text when no path works;
 pytest green.
 
-### R79. Job-id prefix lookup: `history` prints 8 chars, every lookup verb needs 12 — `open`
+### R79. Job-id prefix lookup: `history` prints 8 chars, every lookup verb needs 12 — `done` *(2026-06-07, PR #92 — server-side ≥6-char prefix on read routes; cancel/send deliberately exact-id)*
 Surface: backend/CLI/DX. User-test minor. `roost history` prints truncated ids
 (cli.py:316) but `logs`/`status`/`tree` do exact `WHERE id = ?` — pasting an id straight
 from history → terse "job not found".
@@ -343,13 +343,13 @@ Done-when: unambiguous-prefix lookup server-side (≥6 chars; ambiguous → 409 
 candidates) OR history prints full ids — pick the better UX, justify; tests for
 match/ambiguous/too-short; docs additively updated if the contract changes; pytest green.
 
-### R80. Blob `name` accepts unbounded length — `open`
+### R80. Blob `name` accepts unbounded length — `done` *(2026-06-07, PR #90 — 512-char cap, single validate_name seam)*
 Surface: backend/robustness. User-test minor: a 32,000-char `name` was accepted and
 stored (HTTP 200). Every other fuzz case returned clean 4xx — this is the one hole.
 Done-when: sane cap (match existing field-cap precedent in server.py) returning 422;
 boundary tests at/over the cap; existing clients unaffected; pytest green.
 
-### R81. mac-app Schedules pane: contradictory double error against a 404 CP — `open`
+### R81. mac-app Schedules pane: contradictory double error against a 404 CP — `done` *(2026-06-07, PR #91 — SchedulesListState decision seam; render proven headless)*
 Surface: mac-app/UX. User-test minor (mac-app/mainwindow-schedules.png): against a CP
 without `/schedules` the pane stacks a red "Not found: Not Found" banner ON TOP of the
 "No schedules" empty state — error and empty-state contradict each other.
@@ -531,5 +531,6 @@ first iteration on that ratchet measures and records it here (no code changes).
 - Mac-app verb expansion (A6 survey #2): menu bar covers Runs/Workers/Console/Transfers but none of publish/schedules/send/backup/history — which belong in a menu-bar scope is a product call (2026-06-07)
 - **User-testing sweep 2026-06-07 — polish notes (not promoted):** panel bad-token banner says "control plane unreachable — HTTP 401" (it's an auth failure; reachability is fine); `roost token --scope agent` mints `rst-mob-`-prefixed secrets (cosmetic; scope is correct); Android pairing screen is bottom-heavy with large empty margins (android/01); Android `model/Parsers.kt:21` `optString(key, null)` compiler warning.
 - **Commit the headless SwiftUI render harness** from the mac-app user test as a supported test utility *(product call)*: `RenderShots.swift` + 1-line `App.swift` hook gated on `ROOST_RENDER_DIR`, renders real views with live `GET /derived` data via `NSHostingView.cacheDisplay` — the only screenshot path on a TCC-less worker (mac-mini-m4 has no Screen Recording/Automation permission, ungrantable non-interactively).
+- **mac-app Publish + Transfers panes swallow load errors silently** (R81 finding, 2026-06-07): `(try? client.sites()) ?? sites` and `try? refreshStaged()` drop failures entirely — against a CP missing those endpoints the panes just look empty with no feedback (the inverse of the R81 double-stack bug). Needs an error surface per pane; the SchedulesListState decision-seam pattern (PR #91) is the precedent to mirror.
 - **macOS CI job has never compiled the app** (R73 journaled debt, 2026-06-07; promotion candidate): `mac-app/Package.swift` pins `swift-tools-version:5.10`, but SwiftTerm 1.13.0 pulls swift-argument-parser 1.8.2 which requires tools 6.0 — the macos-14 runner's Swift 5.10 dies at dependency RESOLUTION, so the `App build + tests (macOS)` job is red on every mac-app PR and can catch nothing (it could not have caught R73). Master also has no required-status-check protection, so `--auto` merges fall through immediately. Fix: bump tools-version (the Mac node's 6.2.3 builds fine) or pin an older arg-parser, plus consider branch protection *(the protection setting itself is a human/GitHub-admin action)*.
 - **Fleet ops (human — NOT loop work), from the 2026-06-07 sweep:** (a) live CP container (`docker-ec7c1cae…`) runs roost 0.1.0 (installed Jun 5) — rebuild from master to unbreak `backup`/`schedule`/`/metrics`/one-shot publish against the live fleet; (b) oracle is unhealthy for agent jobs — Claude cred 401 + a broken SessionStart Node hook; (c) mac-mini-m4's `~/roost-r50` clone is a stale single-branch checkout (origin lacks a master ref) — re-clone or fix the remote; (d) consider granting Screen Recording TCC on the Mac for real-window capture.

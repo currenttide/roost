@@ -2204,3 +2204,70 @@ Entries are written by the loop; humans read, never need to edit.
 - Notes: iteration #24 totals: 3/3 shipped (PRs #87 #88 #89), tests 828 → 836,
   all judges approved round 1. User-testing majors now ALL cleared
   (R75/R76/R77/R78); remaining Ranked: R79-R87 (minors + XCUITest + docs).
+
+## 2026-06-07 ~19:00 UTC — R80: blob name capped at 512 (iteration #25)
+- Verdict: shipped
+- Branch/PR: loop/r80-blob-name-cap / https://github.com/currenttide/roost/pull/90 (merged 89e2fd5)
+- What changed: `BLOB_NAME_MAX_CHARS = 512` + `blobs.validate_name()` — one seam,
+  called in `insert_blob` (chokepoint) and eagerly at both routes (`POST /blobs`,
+  `/blobs/presign`) so clients get clean 422; MCP stage_file covered transitively;
+  `/publish?name=` confirmed already slug-capped (left untouched). 512 = generous
+  unicode headroom over the 255-byte path-component reality; precedent matched:
+  PLAN_REASON_MAX_CHARS pattern.
+- Evidence: 32k hole reproduced on master at both entry points (200) →
+  `python -m pytest -q` 842 passed (836 + 6); drift guard 28; scratch-CP smoke:
+  32k→422, at-cap→200, cap+1→422, 255-char unicode filename→200, empty→"blob"
+  default preserved
+- Judge: approve (round 1) — re-ran gate + drift guard; confirmed single seam,
+  all entry points, boundaries, no scope creep
+- Models: implementer claude-opus-4-8[1m] / judge claude-sonnet-4-6
+
+## 2026-06-07 ~19:00 UTC — R81: mac Schedules pane single-state on 404 (iteration #25)
+- Verdict: shipped
+- Branch/PR: loop/r81-mac-schedules-404 / https://github.com/currenttide/roost/pull/91 (merged 7a6bf30)
+- What changed: 3 files, +264/-12. NEW RoostKit `SchedulesListState.decide(...)`
+  — Linux-testable decision seam; 404 → `.endpointMissing` → single
+  `.unavailable` state, mutually exclusive with empty/error/list/loading (two
+  states can never stack). SchedulesView is now a dumb switch; `.unavailable`
+  renders ONE ContentUnavailableView ("Schedules not available — this control
+  plane doesn't support schedules (older server)"); toggle errors moved to a
+  separate surface so action errors can't masquerade as list-unavailable.
+- Evidence:
+  - Failing-first: master's render predicates (errorBanner && emptyState) both
+    true for a 404 — contradiction proven
+  - Linux RoostKit swift test: 68 (54 + 14 new); pytest 842 (server untouched);
+    Mac node: full RoostMac `swift build` Build complete! + 68/68
+  - Render PROVEN: throwaway headless NSHostingView.cacheDisplay harness (NOT
+    committed) drove the real decide() on a 404 and rendered the fixed pane —
+    single clean state, no red banner, no empty-state stack (artifact:
+    user-testing/mac-app/r81-schedules-404-fixed.png)
+- Judge: approve — re-ran swift test + pytest + diff itself
+- Models: implementer claude-opus-4-8[1m] / judge claude-sonnet-4-6
+- Notes: FINDING (→ Proposed): Schedules was the only DOUBLE-STACKING pane, but
+  Publish (`(try? client.sites()) ?? sites`) and Transfers (`try? refreshStaged()`)
+  swallow load errors entirely — silent failure on 404, no feedback at all.
+  Different seam, correctly left out of scope.
+
+## 2026-06-07 ~19:00 UTC — R79: job-id prefix lookup on read paths (iteration #25)
+- Verdict: shipped
+- Branch/PR: loop/r79-jobid-prefix / https://github.com/currenttide/roost/pull/92 (merged cb44463)
+- What changed: server-side `_resolve_job_id` (≥6-char unambiguous prefix;
+  <6 → 400, ambiguous → 409 with up to 10 candidates, unknown → 404) wired into
+  the READ routes only: GET /jobs/{id}, /derived, /logs, /tree, /inputs,
+  /stream (resolved before the SSE opens). DELIBERATE write-path stance,
+  documented: cancel + send stay exact-id — fuzzy-matching a destructive or
+  steering verb is a footgun. CLI status/logs/tree surface the server's 400/409
+  detail via `_lookup_error` (no httpx traceback); MCP read-tool descriptions +
+  README + API.md §4 updated additively. Chosen over "print full ids in
+  history": fixes every client at once, purely additive (full ids resolve to
+  themselves).
+- Evidence: A1 fails-on-master (judge re-verified by swapping master's
+  server.py/cli.py in); `python -m pytest -q` → 853 (842 + 11: 7 server,
+  4 CLI) post-rebase over R80/R81 (zero conflicts); drift guard 28; scratch-CP
+  HTTP smoke: prefix→200 on all read paths, ambiguous→409 w/ both candidates,
+  too-short→400, write paths exact-only confirmed
+- Judge: approve (round 1) — re-ran everything; one nit (≥11-match phrasing)
+  addressed in-PR
+- Models: implementer claude-opus-4-8[1m] / judge claude-sonnet-4-6
+- Notes: iteration #25 totals: 3/3 shipped (PRs #90 #91 #92), tests 836 → 853,
+  all judges round 1. Remaining Ranked: R82-R87.
