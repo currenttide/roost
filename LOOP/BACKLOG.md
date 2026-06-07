@@ -382,14 +382,14 @@ headless via `xcodebuild test` on mac-mini-m4 (Roost job) with the result bundle
 screenshots as artifacts; documented in ios/README; flake-free twice consecutively;
 pytest green.
 
-### R85. Mobile session subtitle hardcodes "claude" for every job kind — `open`
+### R85. Mobile session subtitle hardcodes "claude" for every job kind — `done` *(2026-06-07, PR #97 — additive `kind` on /derived rows via _job_kind; clients never guess)*
 Surface: mobile/correctness. User-test minor (android/05,08): a `command` job renders
 "… · claude · succeeded" (Android `sessionSubtitle` + DashboardScreen `subtitle`; audit
 iOS for the same).
 Done-when: subtitle reflects the job's actual kind on both platforms; Linux-harness tests
 with command/claude/docker fixtures; pytest green.
 
-### R86. Long raw shell-command goals make verdict bars unreadable (all surfaces) — `open`
+### R86. Long raw shell-command goals make verdict bars unreadable (all surfaces) — `done` *(2026-06-07, PR #98 — additive goal_display, one summarizer, four surfaces + fallback)*
 Surface: cross-surface/UX. User-test minor, observed independently on Android (03,10),
 iOS rows, and the mac popover: `command` jobs put the full shell text where a glanceable
 goal belongs.
@@ -398,7 +398,7 @@ Done-when: seam decided (server-side display summary for command kinds in
 justified, applied consistently to panel + mac-app + both mobiles; fixtures additive;
 tests; pytest green.
 
-### R87. Docs: `roost pair --url` ordering wrong in mobile READMEs — `open`
+### R87. Docs: `roost pair --url` ordering wrong in mobile READMEs — `done` *(2026-06-07, PR #96 — 1 real instance fixed; 7 other sites verified legitimately per-verb)*
 Surface: docs. User-test confirmed drift: `mobile-app/README.md` and
 `mobile-app/ios/README.md` show `roost pair --url http://<LAN>:8787`, but `--url` is a
 global option — `pair` rejects it; correct form is `roost --url … pair`.

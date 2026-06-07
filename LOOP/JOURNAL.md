@@ -2339,3 +2339,71 @@ Entries are written by the loop; humans read, never need to edit.
 - Notes: iteration #26 totals: 3/3 shipped (PRs #93 #94 #95), RoostKit 68→82,
   iOS unit 80→90 + 4 UI flows, pytest steady at 853. Remaining Ranked from the
   sweep: R85 R86 R87 (final iteration #27).
+
+## 2026-06-07 ~20:39 UTC — R87: pair --url docs ordering (iteration #27)
+- Verdict: shipped
+- Branch/PR: loop/r87-pair-url-docs / https://github.com/currenttide/roost/pull/96 (merged 82d88d6)
+- What changed: truth-checked first (`roost pair --url` → exit 2 "No such
+  option"; --url/--token are group-level, cli.py:417-420; pair owns only
+  label/list/revoke). ONE real inverted instance existed — mobile-app/README.md:19
+  — fixed; the backlog quoted ios/README.md too but master had already corrected
+  it. Full sweep classified 7 other --url/--token doc sites as legitimately
+  per-verb (enroll/serve/up own their flags) — untouched.
+- Evidence: pytest 853 (docs-only diff); per-file classification table in PR
+- Judge: approve (round 1) — re-ran the option-scoping truth-check + grep itself
+- Models: implementer claude-opus-4-8[1m] / judge claude-sonnet-4-6
+
+## 2026-06-07 ~20:39 UTC — R85: subtitle shows the job's ACTUAL kind (iteration #27)
+- Verdict: shipped
+- Branch/PR: loop/r85-kind-label / https://github.com/currenttide/roost/pull/97 (merged 5e1c275)
+- What changed: ROOT CAUSE was upstream — `/derived` rows carried no `kind` at
+  all, so clients guessed. Server-side additive `kind` via new `_job_kind(job)`
+  reporting the EFFECTIVE kind by mirroring the worker's build_command
+  resolution (auto→docker→has-command=command→declared→claude default); a
+  command-carrying job reads "command" regardless of declared kind. API.md §2
+  documents it. iOS-audit finding: iOS never hardcoded "claude" — it OMITTED the
+  kind segment (the inverse gap); fixed for parity. Both clients read it through
+  a pure `Subtitle.kindSegment` helper; against older CPs (field absent) the
+  segment is dropped, never guessed. Companion: recorder's "job not found"
+  fixture was hitting R79's too-short-prefix path on a 4-char id — fixed to
+  record the real 404.
+- Evidence: pytest 857 (853+4); drift guard green (additive); Android harness
+  OK 94 (92+2 Subtitle tests + fixture kind assertions); iOS xcodebuild
+  92 TEST SUCCEEDED (90+2); clean rebase over R87
+- Judge: approve (round 1) — re-ran pytest + harness; verified _job_kind mirrors
+  build_command incl. the docker+command edge
+- Models: implementer claude-opus-4-8[1m] / judge claude-sonnet-4-6
+
+## 2026-06-07 ~20:39 UTC — R86: glanceable goal_display on all four surfaces (iteration #27)
+- Verdict: shipped
+- Branch/PR: loop/r86-goal-display / https://github.com/currenttide/roost/pull/98 (merged 07ea09a)
+- What changed: server-side additive `goal_display` in `_derive_run` — ONE
+  summarizer, four surfaces (chosen over four divergent client truncation
+  implementations). Rules: agent goals pass through; command goals strip
+  leading `cd …`/env-assignment noise (incl. subshells with pipes), lead with
+  the real program, 72-char cap + ellipsis; inherits R70's never-raise coercion
+  for non-str/None/list payloads. `goal` untouched (search/detail/cancel
+  contract). Consumers: panel.html goalLine, RoostKit Run.displayGoal
+  (popover + RunDetail), iOS + Android Run.displayGoal (dashboard + session) —
+  all falling back to `goal` when the field is absent (older CPs). API.md §2
+  documents it.
+- Evidence: pytest 867 (10 new); drift guard 28 (additive fixtures); Mac node:
+  RoostKit 83, RoostMac build clean, iOS 92 TEST SUCCEEDED, Android 94 — all
+  re-run green AFTER a real-conflict rebase over R85 (integrated kind +
+  goal_display in fixtures); Playwright visual: scratch-CP AFTER shows
+  glanceable summaries, live-old-CP BEFORE shows the bug AND proves the
+  fallback renders full goal without error
+- Judge: approve (round 1; re-confirmed post-rebase) — re-ran evidence both times
+- Models: implementer claude-opus-4-8[1m] / judge claude-sonnet-4-6
+- Notes: **USER-TESTING SWEEP COMPLETE.** All 15 human-promoted items
+  (R73–R87) shipped across iterations #23–#27: PRs #84–#98, 15/15 judge-
+  approved (14 round-1, 1 revise→approve), tests 823 → 867 pytest + RoostKit
+  54→83 + Android 81→94 + iOS 74→92 + 4 XCUITest flows, zero blocked items,
+  zero flaky outcomes. Both user-test BLOCKERS (mac compile, Android TopAppBar)
+  cleared in the first iteration. Infrastructure wins: XCUITest proven headless
+  on the fleet Mac (tap-gap closed), Android emulator path codified in the
+  PROTOCOL evidence table. Ranked is now EMPTY of unblocked items →
+  Replenishment per protocol: A3 drift sweep over PRs #84–#98 + A1 targeted
+  hunt over the freshly-changed code dispatched as cycle #24-repl; A4 journaled
+  debts (macOS CI never compiles the app; mac-app silent-swallow panes) join
+  the slate for judging.
