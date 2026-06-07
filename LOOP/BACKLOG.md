@@ -231,9 +231,13 @@ Surface: backend/correctness. A1 hunt #6 (PR #77). `_spawn_job`'s `_done` callba
 Repro: `LOOP/repro-a1-hunt6.py` — FAILS ×3 on master; one-line identity guard (`if self._job_tasks.get(_jid) is t:`) proven to fix (non-tautology cycle md5-verified by the hunter).
 Done-when: the identity guard (or equivalent — consider also draining the old task's callback in _reap_stale_attempt; pick the minimal correct form and justify) lands; repro promoted into tests/; repro file deleted; pytest green.
 
-### R68. captain.py coverage lift (deepening #2) — `open` `self-promoted`
+### R68. captain.py coverage lift (deepening #2) — `done` *(2026-06-07, PR #79 — 75→100% branch; zero latent bugs)* `self-promoted`
 Surface: tests. A2 deepening: captain.py at 75% branch — the weakest remaining module. The dispatch path (goal → plan → roost_submit children with reasons → collect/wait → synthesize) has unit gaps; R51's verify.py e2e precedent showed test-writing on these seams surfaces latent bugs.
 Done-when: captain.py branch coverage strictly up ≥10 points with real-behavior assertions (stubbed MCP/HTTP seams, no live LLM); any latent bug found gets a repro note for the next cycle (do not fix in this PR — scope discipline); no module down; pytest green (802 base).
+
+### R69. A1 hunt #7 — mobile-contract robustness lens (deepening #3, long-idle gate) — `open` `self-promoted`
+Surface: hunt. Final queued deepening: the server↔mobile contract under adversarial/degenerate payloads — the decode layers have golden-fixture tests (happy path) but the SERVER side of the contract has never been hunted for responses that would break the documented additive-only guarantees (e.g. fields that can become null where clients assume non-null; SSE event vocabulary under unusual job lifecycles; pagination headers under edge counts). Server-side findings only (client decoders are pure + tested); reproducing test required per finding; an all-clear = deepening-clear #2 → LONG-IDLE.
+Done-when: repros merged after judge verification, or an honest all-clear report triggering long-idle.
 
 ### R21. Make presigned blob PUT single-use and race-safe — `done` *(2026-06-07, PR #30)* `self-promoted`
 Surface: backend/security. A1 hunt #2 reproduced that a presigned `put_url`

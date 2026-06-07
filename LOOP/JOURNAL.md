@@ -1889,3 +1889,25 @@ Entries are written by the loop; humans read, never need to edit.
   lens) per protocol — or drift+targeted if the repo changed (human activity).
   Wake interval moved to the max (3600s): overnight full-wave cadence ends here;
   the loop idles honestly between thinner findings.
+
+## 2026-06-07 ~17:50 UTC — R68: captain.py coverage (deepening #2)
+- Verdict: shipped
+- Branch/PR: loop/r68-captain-coverage / https://github.com/currenttide/roost/pull/79 (merged 118905d)
+- What changed: tests-only (+207, test_captain.py). captain.py 75% → 100% branch
+  (+25; bar was ≥10). HONEST SCOPE FINDING: the "dispatch path" lives in the
+  spawned claude process, not captain.py — the real dark code was run() in its
+  entirety (claude-on-PATH guard, restricted-toolset argv, model threading, rc
+  propagation, finally-cleanup of the credential-bearing temp mcp-config on happy
+  AND exception paths), write_mcp_config's ROOST_PARENT_JOB_ID lineage threading,
+  render_fleet facets, build_prompt no-budget path. Stubs limited to
+  shutil.which/subprocess.run; assertions on observable behavior.
+- Evidence:
+  - `python -m pytest -q` → 812 passed (+10); captain.py 0 missing
+  - mutation probes: implementer 6/6, judge 3/3 caught (rc swallow, lineage drop,
+    cleanup neutralized)
+- Judge: approve (round 1)
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only)
+- Notes: ZERO latent bugs — deepening-clear #1 (hunt #6's find had reset the
+  counter). Modules at 100%: captain, schema, verify, triage, bootstrap, service.
+  Cycle #20 = R69, hunt #7 (mobile-contract robustness lens) — the long-idle
+  gate: an all-clear there is deepening-clear #2 → long-idle.
