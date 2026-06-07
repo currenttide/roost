@@ -775,11 +775,20 @@ async def _post_notification(
 
 
 def _derive_run(
-    job: dict, pricing: Optional[dict[str, dict[str, float]]] = None
+    job: dict,
+    pricing: Optional[dict[str, dict[str, float]]] = None,
+    inputs: Optional[dict[str, int]] = None,
 ) -> dict:
-    """One job → the operator-meaningful 'story' fields (D0)."""
+    """One job → the operator-meaningful 'story' fields (D0).
+
+    `inputs` (R59), when the job has received any interactive input, is its
+    {queued, delivered, dropped} counts — attached to the run so /panel, `roost
+    history`, the mac-app, and both mobile dashboards can show the R38 verb on the
+    aggregate views, not only on single-job `roost status`. Absent when the job has
+    no inputs (the 99% case), mirroring how `GET /jobs/{id}` attaches the same
+    object only when nonzero — the aggregate caller passes the batched map."""
     res = job.get("result") if isinstance(job.get("result"), dict) else {}
-    return {
+    run = {
         "run_id": job.get("id"),
         "goal": _goal_text(job),
         "state": job.get("state"),
@@ -804,6 +813,9 @@ def _derive_run(
         "created_at": job.get("created_at"),
         "finished_at": job.get("finished_at"),
     }
+    if inputs and any(inputs.values()):
+        run["inputs"] = inputs
+    return run
 
 
 FAILURE_RECENT_SEC = 600.0  # a terminal failure older than this is history, not an alert
@@ -1802,6 +1814,34 @@ def _input_counts(db_path: Path, job_id: str) -> dict[str, int]:
         ).fetchall():
             if r["state"] in out:
                 out[r["state"]] = int(r["n"])
+    return out
+
+
+def _input_counts_for(db_path: Path, job_ids: list[str]) -> dict[str, dict[str, int]]:
+    """Batched {job_id -> {queued, delivered, dropped}} for the aggregate views
+    (R59). One GROUP BY over all the ids — never N+1 a query per run/node — and the
+    result holds ONLY jobs that have at least one input row, so callers attach the
+    counts with the same only-when-nonzero rule `GET /jobs/{id}` uses. Most jobs
+    have no inputs, so for them this returns nothing and the payload stays lean."""
+    if not job_ids:
+        return {}
+    out: dict[str, dict[str, int]] = {}
+    # Dedup + bound the IN-list to the ids actually present (callers pass the page).
+    ids = list(dict.fromkeys(job_ids))
+    placeholders = ",".join("?" * len(ids))
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            f"SELECT job_id, state, COUNT(*) AS n FROM job_inputs "
+            f"WHERE job_id IN ({placeholders}) GROUP BY job_id, state",
+            ids,
+        ).fetchall()
+    for r in rows:
+        if r["state"] not in ("queued", "delivered", "dropped"):
+            continue
+        bucket = out.setdefault(
+            r["job_id"], {"queued": 0, "delivered": 0, "dropped": 0}
+        )
+        bucket[r["state"]] = int(r["n"])
     return out
 
 
@@ -2820,7 +2860,11 @@ def create_app(
         jobs = await asyncio.to_thread(_list_jobs, db, None, None, None, limit)
         jobs = await asyncio.to_thread(_annotate_liveness, db, jobs)
         workers = await asyncio.to_thread(_list_workers, db)
-        runs = [_derive_run(j, app.state.pricing) for j in jobs]
+        # [R59] One batched query for the whole page's input counts (no N+1), then
+        # attach per-run; absent for the jobs with none.
+        counts = await asyncio.to_thread(
+            _input_counts_for, db, [j["id"] for j in jobs])
+        runs = [_derive_run(j, app.state.pricing, counts.get(j["id"])) for j in jobs]
         return {"generated_at": time.time(),
                 "fleet_verdict": _fleet_verdict(workers, runs),
                 "workers": workers, "runs": runs}
@@ -2831,7 +2875,9 @@ def create_app(
         if not job:
             raise HTTPException(404, "job not found")
         job = (await asyncio.to_thread(_annotate_liveness, db, [job]))[0]
-        return _derive_run(job, app.state.pricing)
+        # [R59] Same run shape as §2 — carry input counts when the job has any.
+        counts = await asyncio.to_thread(_input_counts, db, job_id)
+        return _derive_run(job, app.state.pricing, counts)
 
     @app.get("/metrics", dependencies=[Depends(require_admin)])
     async def metrics_endpoint():
@@ -2907,7 +2953,17 @@ def create_app(
             raise HTTPException(404, "job not found")
         root_id = job["root_job_id"] or job["id"]
         tree = await asyncio.to_thread(_get_tree, db, root_id)
-        return await asyncio.to_thread(_annotate_liveness, db, tree)
+        tree = await asyncio.to_thread(_annotate_liveness, db, tree)
+        # [R59] Annotate each node's interactive-input counts so `tree --health`
+        # can show the R38 verb. One batched query for the whole tree (no N+1),
+        # attached only to nodes that have inputs — same key/rule as GET /jobs/{id}.
+        counts = await asyncio.to_thread(
+            _input_counts_for, db, [n["id"] for n in tree])
+        for node in tree:
+            c = counts.get(node["id"])
+            if c:
+                node["inputs"] = c
+        return tree
 
     @app.delete("/jobs/{job_id}", dependencies=[Depends(require_any)])
     async def cancel_job_endpoint(job_id: str, tree: bool = False):

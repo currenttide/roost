@@ -673,6 +673,51 @@ def test_tree_mixed_plan_only_annotates_jobs_with_reason(monkeypatch):
     assert "↳ why: the annotated one" in res.output
 
 
+def _tree_health_via_mock(monkeypatch, jobs: list[dict]):
+    """`roost tree <root> --health` with the CP `/tree` response stubbed."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/tree")
+        return httpx.Response(200, json=jobs)
+
+    monkeypatch.setattr(
+        roost_cli, "_ctx_client",
+        lambda _ctx: httpx.Client(base_url="http://cp", transport=httpx.MockTransport(handler)),
+    )
+    return CliRunner().invoke(roost_cli.tree, ["root1", "--health"], obj={})
+
+
+def test_tree_health_renders_input_counts_for_node_with_input(monkeypatch):
+    """`tree --health` shows `inputs N/N/N` for a child that has received input,
+    and NOT for a sibling without any (R59, only-when-nonzero)."""
+    jobs = [
+        {"id": "root1", "state": "running", "worker_id": None, "parent_job_id": None,
+         "intent": "plan", "spec": {"intent": "plan"}, "tokens_used": 0},
+        {"id": "childA", "state": "running", "worker_id": "w1", "parent_job_id": "root1",
+         "intent": "steered", "spec": {"command": "cat"}, "tokens_used": 0,
+         "inputs": {"queued": 1, "delivered": 2, "dropped": 0}},
+        {"id": "childB", "state": "running", "worker_id": "w2", "parent_job_id": "root1",
+         "intent": "plain", "spec": {"command": "true"}, "tokens_used": 0},
+    ]
+    res = _tree_health_via_mock(monkeypatch, jobs)
+    assert res.exit_code == 0, res.output
+    assert "inputs 1/2/0" in res.output
+    # Exactly one node prints the inputs bit (the sibling without input omits it).
+    assert res.output.count("inputs ") == 1
+
+
+def test_tree_health_omits_inputs_when_zero(monkeypatch):
+    """A node carrying an all-zero `inputs` object still omits the bit — the
+    only-when-nonzero rule guards the CLI render, not just the server payload."""
+    jobs = [
+        {"id": "root1", "state": "running", "worker_id": "w1", "parent_job_id": None,
+         "intent": "plan", "spec": {"command": "cat"}, "tokens_used": 0,
+         "inputs": {"queued": 0, "delivered": 0, "dropped": 0}},
+    ]
+    res = _tree_health_via_mock(monkeypatch, jobs)
+    assert res.exit_code == 0, res.output
+    assert "inputs " not in res.output
+
+
 # ---------- roost send: interactive follow-up (R38) ----------
 
 

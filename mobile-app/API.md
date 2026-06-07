@@ -71,6 +71,8 @@ Run row (fixture has every field; the app renders a subset):
   "narration": "<str>"|null,           // best live one-liner; fall back to last_activity
   "progress": 0..100|null, "eta_sec": <int>|null,
   "cost": {"tokens_used": <int>, "cost_est_usd": <float>, "budget_pct"?: <float>},
+  "inputs"?: {"queued": <int>, "delivered": <int>, "dropped": <int>}, // R38 follow-ups,
+                                       // present ONLY when this run has received input (§4)
   "created_at": <epoch>, "finished_at": <epoch>|null,
   "queued_sec"|"idle_sec"|"capable_workers"|"decline_count"|"diagnosis"|
   "last_activity"|"root_job_id": informational
@@ -118,7 +120,9 @@ Response = full job object; navigate to its `id` immediately. Job objects contai
 - Catch-up: `GET /jobs/{id}/logs?since=<seq>&limit=1000` → fixture `job_logs.json`:
   `{"job_id", "state", "logs": [{"seq": <int>, "stream": "stdout"|"stderr"|"event", "data": "<line>", "ts": <epoch>}]}`.
   `since` is EXCLUSIVE (rows with `seq > since`). `job_logs_since_2.json` shows a resumed page.
-- Children: `GET /jobs/{id}/tree` (fixture `job_tree.json`).
+- Children: `GET /jobs/{id}/tree` (fixture `job_tree.json`). Each node is a job
+  object and carries the same optional `inputs: {queued, delivered, dropped}` as
+  `GET /jobs/{id}` — present only on nodes that have received follow-up input.
 - Cancel: `DELETE /jobs/{id}` → `{"cancelled": <n>}`; `?tree=true` cascades.
 - Retry (client-side): re-`POST /jobs` with the failed job's `spec` fields from §3.
 - Follow-up input (R38): `POST /jobs/{id}/input` with `{"text": "<message>"}` →
@@ -126,8 +130,9 @@ Response = full job object; navigate to its `id` immediately. Job objects contai
   empty text `400`; over **64 KiB** `413`. Poll `GET /jobs/{id}/inputs` →
   `{"job_id", "state", "inputs": [{"id", "state": "queued"|"delivered"|"dropped",
   "detail", "created_at", "delivered_at", "created_by"}]}` for the outcome (the same
-  counts ride `GET /jobs/{id}` as an optional `inputs: {queued, delivered, dropped}`
-  object, present only when the job has received input). **Delivery is honest about
+  counts ride `GET /jobs/{id}`, every `/derived` run row (§2), and each tree node
+  as an optional `inputs: {queued, delivered, dropped}` object, present only when
+  the job has received input). **Delivery is honest about
   kind:** only `command` jobs receive it live (written to the process stdin); agent
   (`claude`/`auto`/`codex`) and `docker` jobs run with stdin closed, so their input is
   marked `dropped` with a reason — show that, don't pretend it landed. (This is the
