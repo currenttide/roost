@@ -248,6 +248,37 @@ def test_non_finite_sentinels_rejected():
     assert matches({"gpu_vram_gb": float("nan")}, {"gpu_vram_gb": "!=0"}) is False
 
 
+# ---------- [R41] GPU-detection-failed node never satisfies a GPU constraint ----------
+
+
+def test_gpu_constraint_fails_for_both_absent_and_failed():
+    """A numeric GPU constraint must reject BOTH a genuinely-bare node (no gpu*
+    keys) AND a node whose probe ERRORED (advertises gpu_detection: "failed" but no
+    gpu_vram_gb). The failed marker rides R18's rule: there is no numeric
+    gpu_vram_gb to satisfy the constraint, and the non-numeric "failed" value can
+    never satisfy a numeric comparator even if a job (wrongly) constrained on it."""
+    bare = {"cpus": 8}                                  # genuinely no GPU
+    failed = {"cpus": 8, "gpu_detection": "failed"}     # probe errored
+    healthy = {"cpus": 8, "gpu_vram_gb": 24}            # real GPU
+    for req in (">=8", ">0", "!=0", "==24", "<=24", ">8"):
+        assert matches(bare, {"gpu_vram_gb": req}) is False, req
+        assert matches(failed, {"gpu_vram_gb": req}) is False, req
+    # The marker itself never satisfies a numeric constraint about it (R18 rule).
+    assert matches(failed, {"gpu_detection": ">=8"}) is False
+    assert matches(failed, {"gpu_detection": "!=0"}) is False
+    # Sanity: a healthy node still places, so the rule didn't over-reject.
+    assert matches(healthy, {"gpu_vram_gb": ">=8"}) is True
+
+
+def test_gpu_detection_failed_is_string_matchable_for_operators():
+    """Operators / tooling can still target the failed marker by exact string (a
+    diagnostic filter), even though it never satisfies a numeric GPU constraint."""
+    failed = {"gpu_detection": "failed"}
+    assert matches(failed, {"gpu_detection": "failed"}) is True
+    assert matches(failed, {"gpu_detection": "==failed"}) is True
+    assert matches({"gpu_vram_gb": 24}, {"gpu_detection": "failed"}) is False
+
+
 # ---------- [R20] prefer-by-name parity with target ----------
 
 

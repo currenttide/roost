@@ -856,6 +856,143 @@ def test_discrete_gpu_unchanged_when_present(monkeypatch):
     assert called["tegra"] is False
 
 
+# ---------- [R41] GPU detection: no-GPU vs detection-FAILED ----------
+#
+# The GPU probe (_detect_gpus) returns [] both when nvidia-smi is absent (genuinely
+# no GPU) and when nvidia-smi is present but errors (driver hiccup / timeout / GPU
+# off the bus). These tests pin the four distinct paths so a BROKEN node advertises
+# `gpu_detection: "failed"` (additive) while a BARE node advertises no gpu* keys —
+# and so placement still skips both for GPU jobs.
+
+
+def _no_gpu_env(monkeypatch):
+    """Common stubs for detect_capabilities GPU-branch tests: no Tegra, no docker,
+    nothing else on PATH. Caller controls _find_nvidia_smi / subprocess.run."""
+    import roost.worker as wm
+    monkeypatch.setattr(wm, "_detect_tegra_gpu", lambda: [])
+    monkeypatch.setattr(wm, "_detect_docker", lambda: {})
+    monkeypatch.setattr(wm.shutil, "which", lambda _n: None)
+
+
+def test_gpu_probe_success_advertises_gpu_no_failed_marker(monkeypatch):
+    """Path 1 — probe SUCCEEDS: real gpu* keys, and no `gpu_detection` marker."""
+    import roost.worker as wm
+    _no_gpu_env(monkeypatch)
+    monkeypatch.setattr(
+        wm, "_detect_gpus",
+        lambda: [{"name": "NVIDIA RTX 4090", "vram_gb": 24.0, "driver": "550"}])
+    caps = detect_capabilities(self_test=False)
+    assert caps.get("gpu_vram_gb") == 24.0
+    assert "gpu_detection" not in caps  # success never marks a failure
+
+
+def test_gpu_absent_no_gpu_keys_and_no_failed_marker(monkeypatch):
+    """Path 2 — ABSENCE: nvidia-smi not installed → no gpu* keys, no marker."""
+    import roost.worker as wm
+    _no_gpu_env(monkeypatch)
+    monkeypatch.setattr(wm, "_detect_gpus", lambda: [])
+    monkeypatch.setattr(wm, "_find_nvidia_smi", lambda: None)  # no probe tool at all
+    caps = detect_capabilities(self_test=False)
+    assert "gpu_vram_gb" not in caps
+    assert "gpu_count" not in caps
+    assert "gpu_detection" not in caps  # genuinely bare, NOT failed
+
+
+def test_gpu_probe_failed_exception_advertises_failed(monkeypatch):
+    """Path 3 — FAILURE via exception: nvidia-smi present but the subprocess raises
+    (e.g. OSError / a driver that won't load). Advertise gpu_detection=failed."""
+    import roost.worker as wm
+    _no_gpu_env(monkeypatch)
+    monkeypatch.setattr(wm, "_detect_gpus", lambda: [])
+    monkeypatch.setattr(wm, "_find_nvidia_smi", lambda: "/usr/bin/nvidia-smi")
+
+    def _boom(*a, **k):
+        raise OSError("nvidia-smi: cannot execute")
+    monkeypatch.setattr(wm.subprocess, "run", _boom)
+
+    caps = detect_capabilities(self_test=False)
+    assert caps.get("gpu_detection") == "failed"
+    # Crucially still NO usable GPU advertised — placement must skip it like a bare node.
+    assert "gpu_vram_gb" not in caps
+    assert "gpu_count" not in caps
+
+
+def test_gpu_probe_failed_nonzero_exit_advertises_failed(monkeypatch):
+    """Path 4 — FAILURE via nonzero exit: nvidia-smi present but exits nonzero
+    (CalledProcessError — the canonical "driver loaded but GPU unhealthy" case)."""
+    import roost.worker as wm
+    _no_gpu_env(monkeypatch)
+    monkeypatch.setattr(wm, "_detect_gpus", lambda: [])
+    monkeypatch.setattr(wm, "_find_nvidia_smi", lambda: "/usr/bin/nvidia-smi")
+
+    def _nonzero(*a, **k):
+        raise wm.subprocess.CalledProcessError(
+            returncode=255, cmd="nvidia-smi",
+            stderr="Failed to initialize NVML: Driver/library version mismatch")
+    monkeypatch.setattr(wm.subprocess, "run", _nonzero)
+
+    caps = detect_capabilities(self_test=False)
+    assert caps.get("gpu_detection") == "failed"
+    assert "gpu_vram_gb" not in caps
+
+
+def test_gpu_probe_timeout_advertises_failed(monkeypatch):
+    """A hung GPU/driver makes nvidia-smi time out → still classified as failed."""
+    import roost.worker as wm
+    _no_gpu_env(monkeypatch)
+    monkeypatch.setattr(wm, "_detect_gpus", lambda: [])
+    monkeypatch.setattr(wm, "_find_nvidia_smi", lambda: "/usr/bin/nvidia-smi")
+
+    def _timeout(*a, **k):
+        raise wm.subprocess.TimeoutExpired(cmd="nvidia-smi", timeout=5.0)
+    monkeypatch.setattr(wm.subprocess, "run", _timeout)
+
+    assert wm._gpu_probe_failed() == "nvidia-smi timed out"
+    assert detect_capabilities(self_test=False).get("gpu_detection") == "failed"
+
+
+def test_gpu_probe_failed_emits_loud_log_line(monkeypatch, capsys):
+    """The failure path emits a structured, greppable worker log line so the broken
+    node is visible in the worker's own logs (operability), not just over the API."""
+    import roost.worker as wm
+    _no_gpu_env(monkeypatch)
+    monkeypatch.setattr(wm, "_detect_gpus", lambda: [])
+    monkeypatch.setattr(wm, "_find_nvidia_smi", lambda: "/usr/bin/nvidia-smi")
+    monkeypatch.setattr(wm.subprocess, "run",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("nope")))
+    detect_capabilities(self_test=False)
+    out = capsys.readouterr().out
+    assert "GPU_DETECTION_FAILED" in out
+    assert "gpu_detection=failed" in out
+
+
+def test_tegra_board_not_marked_detection_failed(monkeypatch):
+    """A Jetson (integrated nvgpu) is handled by the Tegra fallback BEFORE the
+    failure branch, so it advertises a real GPU and is never mislabeled as failed."""
+    import roost.worker as wm
+    monkeypatch.setattr(wm, "_detect_gpus", lambda: [])  # discrete probe empty
+    monkeypatch.setattr(
+        wm, "_detect_tegra_gpu",
+        lambda: [{"name": "Orin (nvgpu)", "vram_gb": 16.0, "driver": None,
+                  "tegra": True, "integrated": True}])
+    monkeypatch.setattr(wm, "_detect_docker", lambda: {})
+    monkeypatch.setattr(wm.shutil, "which", lambda _n: None)
+    caps = detect_capabilities(self_test=False)
+    assert caps.get("tegra") is True
+    assert caps.get("gpu_vram_gb") == 16.0
+    assert "gpu_detection" not in caps
+
+
+def test_gpu_probe_failed_succeeds_with_no_rows_is_absence(monkeypatch):
+    """_gpu_probe_failed: nvidia-smi runs cleanly but returns no rows → NOT a
+    failure (e.g. an integrated board with no discrete GPU) → returns None."""
+    import roost.worker as wm
+    monkeypatch.setattr(wm, "_find_nvidia_smi", lambda: "/usr/bin/nvidia-smi")
+    monkeypatch.setattr(wm.subprocess, "run",
+                        lambda *a, **k: type("R", (), {"stdout": "", "stderr": ""})())
+    assert wm._gpu_probe_failed() is None
+
+
 # ---------- bwrap detection capability ----------
 
 
