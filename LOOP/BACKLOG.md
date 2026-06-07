@@ -153,7 +153,7 @@ Surface: backend/correctness. A1 hunt #4 (PR #58). `_annotate_liveness` (server.
 Repro: `LOOP/repro-a1-hunt4.py::test_job_pinned_to_nonexistent_target_is_unplaceable` — FAILS on master.
 Done-when: liveness annotation honors the target pin (parity with assignment); repro passes (promote into tests/); LOOP/repro-a1-hunt4.py deleted once both its tests live in the suite; pytest green.
 
-### R49. Narration re-render `min_interval` configurable — `open` `self-promoted` `feature`
+### R49. Narration re-render `min_interval` configurable — `done` *(2026-06-07, PR #60)* `self-promoted` `feature`
 Surface: backend/feature. Pre-existing Proposed item: the watcher's narration re-render interval is a fixed constant; busy fleets may want it slower (cost) and demo fleets faster (snappiness).
 Done-when: interval configurable via the same config style as ROOST_NARRATE (env var or config sibling — match the existing seam); default preserves today's value exactly; bounds-checked (sane floor); test for default + override; pytest green.
 

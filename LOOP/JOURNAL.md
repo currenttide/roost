@@ -1413,3 +1413,22 @@ Entries are written by the loop; humans read, never need to edit.
   promoted (same-file → ONE agent sequential, R30/R31 pattern), R49 narration
   interval (small feature). verify.py e2e coverage + iOS publish UI queued for
   cycle #11 (UI work deliberately deferred to daytime — Mac-node dependency).
+
+## 2026-06-07 ~04:00 UTC — R49: configurable narration interval
+- Verdict: shipped
+- Branch/PR: loop/r49-narration-interval / https://github.com/currenttide/roost/pull/60 (merged 0bcc5eb)
+- What changed: ROOST_NARRATE_INTERVAL env (read in _sweep_loop beside ROOST_NARRATE,
+  threaded _narrate_pass → jobs_needing_narration/watch_once). The constant lived at
+  watcher.py:40 (DEFAULT_MIN_INTERVAL = 20.0) and was never surfaced. Parsing in
+  watcher.resolve_min_interval() modeled on the ROOST_PRICING tolerant-fallback
+  pattern: unset/blank/garbage/NaN/inf → 20.0 exactly (pinned); clamped to
+  MIN_INTERVAL_FLOOR = 5.0 with documented rationale (the sweep cadence — faster
+  can't gain freshness, only hammer the LLM). README documents it beside
+  ROOST_NARRATE.
+- Evidence:
+  - `python -m pytest -q` → 649 passed (+5)
+- Judge: both phases approve (round 1) — gate verified the constant + absence of
+  config; diff re-ran pytest, checked default-unchanged + floor rationale
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only,
+  fenced MODEL line)
+- Notes: iteration #9 slot 2. R47+R48 (health-seam fixes, sequential) still in flight.
