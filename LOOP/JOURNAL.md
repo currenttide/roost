@@ -1584,3 +1584,28 @@ Entries are written by the loop; humans read, never need to edit.
 - Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only)
 - Notes: iteration #11 slot 2. Weakest modules now mcp.py 61% / schema.py 62% —
   A2 fodder for future cycles. R55 (push client slice) last in flight.
+
+## 2026-06-07 ~08:40 UTC — R55: push client wiring (Linux-testable slice)
+- Verdict: shipped (judge round 2)
+- Branch/PR: loop/r55-push-client-slice / https://github.com/currenttide/roost/pull/67 (merged e095546)
+- What changed: per DESIGN.md v1.1 — pure NtfyTopic (bare topic → ntfy.sh, full
+  self-hosted URL, grammar-validated) + NotifyRouter (R37 payload → Session
+  deep-link; malformed → Dashboard fallback) on BOTH platforms; settings surface
+  (iOS dashboard-overflow sheet; Android SETTINGS route+screen); topic persisted.
+  CROSS-CONTRACT tests on both harnesses parse payload literals copied verbatim
+  from tests/test_notify.py — client/server drift now fails tests. Device-only
+  transport (APNs/ntfy-app subscription, UnifiedPush binding, tap consumption)
+  implemented as thin seams (#if canImport(UIKit) PushService; PushReceiver) and
+  CAPPED in PR + DESIGN.md §8a. ROUND-1 JUDGE CATCH: failed-payload literal had
+  worker_id null where the server fixture emits "pi4" — fidelity gap fixed.
+  R53-sibling conflict resolved by folding Notifications into the shared overflow
+  menu; re-verified all suites post-rebase.
+- Evidence:
+  - pytest 707 (post-rebase); iOS 58/58 (+12 NotificationsTests); Android 40 OK
+    (+12 NotifyTest)
+- Judge: revise (round 1, payload fidelity) → approve (round 2) — re-ran all
+  three suites, diff-checked literals against _build_notification
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only)
+- Notes: iteration #11 COMPLETE — R53 #65, R54 #66, R55 #67; master 707. Cycle
+  #13: R56 A6 survey #2 (surface doubled this session), R57 mcp/schema coverage,
+  R58 env-var deploy truth pass.

@@ -177,9 +177,21 @@ Done-when: Compose screen wired following the app's existing screen/viewmodel pa
 Surface: tests/ratchet. A5+A2: the branch-coverage ratchet baseline is stale (63% TOTAL at 482 tests, 2026-06-07 early; suite now 664). First re-measure and record the new TOTAL; then lift the weakest module — cli.py was 36% branch at last measure (process-spawning paths were excused, but command surfaces like send/backup/schedule/history/prune-workers have grown since R16 with uneven test reach).
 Done-when: fresh `coverage run --branch -m pytest` TOTAL recorded (judge re-measures); targeted tests raise cli.py branch coverage measurably (≥5 points) with real assertions (R16 style: runner + stubbed HTTP, no processes); no module down; pytest green.
 
-### R55. Push-notification client wiring — Linux-testable slice — `open` `self-promoted` `feature`
+### R55. Push-notification client wiring — Linux-testable slice — `done` *(2026-06-07, PR #67 — device-only transport capped, documented in DESIGN.md §8a)* `self-promoted` `feature`
 Surface: mobile/feature. R37 landed the CP webhook (ntfy-compatible); the deferred client side has a real codeable slice even without devices: (iOS) a notification-settings screen storing the ntfy topic/URL derived from the CP config + deep-link plumbing from a notification payload to the job detail screen; (Android) the same settings + an UnifiedPush-style receiver whose payload→navigation mapping is pure logic. Read mobile-app/DESIGN.md v1.1's client section first and implement what it actually specifies.
 Done-when: settings + payload-routing logic landed on both clients with the logic layer Linux-tested (payload parse → expected deep-link route table); device-only pieces (actual push registration/display) explicitly capped in the PR per the evidence table; API.md/DESIGN.md updated only if the implemented slice needs it (additive); pytest + both mobile harnesses green.
+
+### R56. A6 product gap survey #2 — `open` `self-promoted`
+Surface: survey. The product surface roughly doubled this session (metrics, backup, send/input, mobile schedules, publish UIs, push, pagination, captain plans, cost pricing). Re-run the A6 user-lens survey over the grown surface: README/INTEGRATIONS/API.md/DESIGN.md vs code; CLI help vs docs; what would a daily operator or phone user now hit? Apply the four A6 gates per finding; output a judged slate for cycle #14 (promotables + Proposed notes). Survey #1 found the kind:auto schema hole within minutes — the surface has grown 10× since.
+Done-when: every user-facing surface swept; each finding gated + judge-verified (re-checkable evidence); slate of ≤3 promotables + Proposed additions reported to the orchestrator; no code changes (survey only).
+
+### R57. mcp.py + schema.py coverage lift — `open` `self-promoted`
+Surface: tests. A2: post-R54 the weakest modules are mcp.py 61% and schema.py 62%. mcp.py's untested reach: tool dispatch paths, error mapping, the R46 example-bearing tools' impl branches; schema.py: migration paths V1→V14 (synthetic old-version DBs, the R19/R38 migration pattern from tests).
+Done-when: both modules' branch coverage strictly up (≥8 points each); migration tests cover every version step incl. idempotency; no module down; real assertions (judge mutation-probes); pytest green (707 base).
+
+### R58. Config/deploy truth pass for the new env vars — `open` `self-promoted`
+Surface: docs/deploy. This session added ROOST_PRICING (R44), ROOST_NARRATE_INTERVAL (R49), ROOST_NOTIFY_URL (R37) and the backup/metrics admin endpoints. Verify each is (a) documented where operators look (DEPLOY.md's config reference, README), (b) passed through docker/stack.yml like ROOST_PUBLISH_DOMAIN is, (c) consistent with the code's actual parsing (truth-check defaults/fallbacks). R37 added its own passthrough — verify; R44/R49 likely did not.
+Done-when: every operator-facing env var documented + docker-passthrough'd + truth-checked; gaps fixed additively; pytest green.
 
 ### R21. Make presigned blob PUT single-use and race-safe — `done` *(2026-06-07, PR #30)* `self-promoted`
 Surface: backend/security. A1 hunt #2 reproduced that a presigned `put_url`
