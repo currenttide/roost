@@ -47,7 +47,7 @@ feat/mac-app) — verify it after the merge.
 
 ## Ranked
 
-### R21. Make presigned blob PUT single-use and race-safe — `open` `self-promoted`
+### R21. Make presigned blob PUT single-use and race-safe — `done` *(2026-06-07, PR #30)* `self-promoted`
 Surface: backend/security. A1 hunt #2 reproduced that a presigned `put_url`
 remains valid after the first upload finalizes the blob: replaying the same URL
 returns 200 and overwrites both the finalized bytes and their size/hash metadata.

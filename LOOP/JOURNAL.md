@@ -715,3 +715,25 @@ Entries are written by the loop; humans read, never need to edit.
   to worker executors. R21 is the top next iteration. The machine clock read
   02:52 UTC while the inherited preceding entry says 08:05 UTC, so append
   order is intentionally truthful rather than timestamp-sorted.
+
+## 2026-06-07 03:01 UTC — R21: Make presigned blob PUT single-use and race-safe
+- Verdict: shipped
+- Branch/PR: loop/r21-presigned-put-single-use / https://github.com/currenttide/roost/pull/30
+- What changed: presigned PUT now atomically claims `pending → uploading`,
+  streams to a private temp file, atomically installs it, then conditionally
+  finalizes metadata. Replay/concurrent losers get 409; failure removes partial
+  content and releases the claim without touching already-ready blobs.
+- Evidence:
+  - `python -m pytest -q` → 537 passed in 15.78s
+  - `python -m pytest -q tests/test_blobs.py` → 13 passed in 1.15s
+  - scratch CP :8794 → first PUT 200, replay 409, GET returned
+    `trusted-live-bytes`, downloaded SHA-256 matched first-PUT metadata
+- Judge: approve (round 1) — independently ran 537 passed in 15.99s,
+  13 focused tests in 1.22s, the original R21 repro (passed), and its own
+  fresh scratch-CP smoke (200 then 409; bytes/size/hash unchanged). Reviewed
+  SQLite claim atomicity, temp/final visibility, failure cleanup, and the
+  forced-concurrency test. Claude Code again omitted the requested first
+  textual model-ID line; machine-readable `modelUsage` records the pinned
+  `claude-sonnet-4-6`.
+- Models: implementer gpt-5 (Codex) / judge claude-sonnet-4-6
+- Notes: R22 and R23 remain open and untouched; R22 is now top Ranked.
