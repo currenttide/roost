@@ -75,6 +75,10 @@ LOG_MAX_ROWS_PER_JOB = 5000   # and cap rows per job
 # (stdout/stderr only — low-volume lifecycle `event` rows stay visible even
 # when a job has spammed its way to the ceiling).
 LOG_APPEND_MAX_BYTES = 64 * 1024
+# Captain plan observability (R33): a sub-job's `spec.reason` is the captain's
+# one-line "why this sub-job, in this order". Clamp it so the plan annotation can
+# never bloat the spec blob — it is meant to be a single short line, not prose.
+PLAN_REASON_MAX_CHARS = 280
 # Hygiene: prune worker rows that have been offline/unseen this long AND own no
 # in-flight job. Non-enrolled workers that reconnect after an outage leave orphan
 # rows that age to 'offline' but are never deleted, so /derived + the panel
@@ -178,6 +182,17 @@ def _insert_job(
     tree_budget = budget.get("tree_max_tokens") or budget.get("max_tokens") if parent is None else None
     model = spec.get("model")
     subagent_model = spec.get("subagent_model")
+    # Plan observability (R33): keep the captain's per-child `reason` to one short
+    # line in the stored spec so `roost tree` can read intent later without bloating
+    # the row. A missing/blank reason is dropped from the spec entirely (renders as
+    # graceful absence) — every non-captain submit omits it.
+    if "reason" in spec:
+        raw = spec.get("reason")
+        norm = raw.strip().replace("\n", " ") if isinstance(raw, str) else ""
+        if norm:
+            spec = {**spec, "reason": norm[:PLAN_REASON_MAX_CHARS]}
+        else:
+            spec = {k: v for k, v in spec.items() if k != "reason"}
 
     with _connect(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -1652,6 +1667,7 @@ class JobSubmit(BaseModel):
     parent_job_id: Optional[str] = None  # populated by roost-mcp dispatches
     max_attempts: Optional[int] = None
     captain_root: bool = False  # anchor a captain plan's lineage/budget (V2-1)
+    reason: Optional[str] = None  # captain's one-line "why this sub-job" (R33, plan observability)
 
 
 class ScheduleCreate(BaseModel):

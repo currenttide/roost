@@ -224,6 +224,46 @@ def test_captain_root_anchors_tree_and_budget(client: TestClient):
     assert root["id"] in ids and child["id"] in ids
 
 
+def test_captain_plan_reason_recorded_on_child_spec(client: TestClient):
+    """R33: a sub-job's `reason` (the captain's 'why') persists in the child spec
+    and surfaces verbatim in the tree, so `roost tree` can render plan intent."""
+    root = client.post("/jobs", json={
+        "intent": "split a goal", "captain_root": True,
+        "hierarchy": {"can_dispatch": True, "max_depth": 3},
+    }).json()
+    # A child WITH a reason — note it is stripped/collapsed to one line on store.
+    child = client.post("/jobs", json={
+        "command": "pytest -q", "parent_job_id": root["id"],
+        "reason": "  run the suite first\n(everything else depends on it)  ",
+    }).json()
+    assert child["spec"]["reason"] == "run the suite first (everything else depends on it)"
+
+    # The reason is durable: it round-trips through the tree endpoint (what
+    # `roost tree` reads), not just the immediate submit response.
+    tree = {j["id"]: j for j in client.get(f"/jobs/{root['id']}/tree").json()}
+    assert tree[child["id"]]["spec"]["reason"] == \
+        "run the suite first (everything else depends on it)"
+
+
+def test_job_without_reason_carries_no_plan_annotation(client: TestClient):
+    """Graceful absence: a job submitted without a reason (all older/non-captain
+    jobs) stores no `reason` key — the tree renderer then shows it exactly as today."""
+    job = client.post("/jobs", json={"command": "true"}).json()
+    assert "reason" not in job["spec"]
+    # A blank/whitespace reason is treated as absent too (no empty annotation).
+    blank = client.post("/jobs", json={"command": "true", "reason": "   \n  "}).json()
+    assert "reason" not in blank["spec"]
+
+
+def test_plan_reason_is_clamped(client: TestClient):
+    """The plan reason is a one-liner, not prose: an oversize reason is clamped so
+    it can never bloat the stored spec blob."""
+    job = client.post("/jobs", json={
+        "command": "true", "reason": "x" * (server.PLAN_REASON_MAX_CHARS + 200),
+    }).json()
+    assert len(job["spec"]["reason"]) == server.PLAN_REASON_MAX_CHARS
+
+
 def test_finalize_captain_root(client: TestClient):
     root = client.post("/jobs", json={
         "intent": "plan", "captain_root": True,
