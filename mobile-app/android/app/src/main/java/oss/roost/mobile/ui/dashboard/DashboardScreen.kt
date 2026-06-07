@@ -38,11 +38,14 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -76,7 +79,20 @@ fun DashboardScreen(
     var showSheet by remember { mutableStateOf(false) }
     var showPublish by remember { mutableStateOf(false) }   // R53: publish-a-site sheet
     var confirmCancel by remember { mutableStateOf<Run?>(null) }
-    val nowMs = System.currentTimeMillis()
+    // R75: the staleness pill is wall-clock driven, so `now` must keep advancing
+    // even when no new /derived payload arrives. Reading System.currentTimeMillis()
+    // once per recomposition froze it: after the first failed poll, repeated
+    // `_state.copy(error=…)` produced equals UiStates that MutableStateFlow deduped
+    // → no recomposition → `now` stuck near the first failure → age never crossed
+    // the 10 s guard during a real outage (user-testing android/11). A 1 s ticker
+    // makes `now` real Compose State that ticks independent of StateFlow emissions.
+    var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            nowMs = System.currentTimeMillis()
+            delay(1_000)
+        }
+    }
 
     Scaffold(
         topBar = {   // R53 publish + R55 notifications + R61 schedules share one overflow menu

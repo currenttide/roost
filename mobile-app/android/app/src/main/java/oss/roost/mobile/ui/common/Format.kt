@@ -2,6 +2,7 @@ package oss.roost.mobile.ui.common
 
 import androidx.compose.ui.graphics.Color
 import oss.roost.mobile.model.HealthGlyph
+import oss.roost.mobile.model.Staleness
 import oss.roost.mobile.ui.Semantic
 
 /** UI-side formatting helpers (pure, no Compose state). */
@@ -22,11 +23,13 @@ object Format {
 
     private fun Long.pad(): String = toString().padStart(2, '0')
 
-    /** "data Ns old" pill text when generated_at lags (API.md §2 staleness guard). */
-    fun staleness(generatedAt: Double, nowMs: Long): String? {
-        val ageSec = (nowMs / 1000.0) - generatedAt
-        return if (ageSec > 10) "data ${ageSec.toInt()}s old" else null
-    }
+    /**
+     * "data Ns old" pill text when generated_at lags (API.md §2 staleness guard).
+     * Delegates to the pure [Staleness] core so the UI and the Linux harness share
+     * a single source of truth (R75).
+     */
+    fun staleness(generatedAt: Double, nowMs: Long): String? =
+        Staleness.pillText(generatedAt, nowMs)
 
     /** Map a health Tone to a concrete color from the theme. */
     fun toneColor(tone: HealthGlyph.Tone): Color = when (tone) {
