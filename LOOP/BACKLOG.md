@@ -405,6 +405,25 @@ global option — `pair` rejects it; correct form is `roost --url … pair`.
 Done-when: both corrected (plus a grep for the same inverted pattern across docs/skills);
 docs-drift ratchet stays 0; pytest green.
 
+## Replenishment 2026-06-07 evening — A1 hunt #9 + A3 drift sweep #4 over PRs #84–#98
+
+Hunt repro file: `/workspace/yang/loop-wt-hunt/LOOP/repro-a1-hunt9.py` (12 failing repros, 4 cleared; uncommitted — implementers copy it in). All three findings judge-confirmed (sonnet) with failing repros on master 141e03b.
+
+### R88. `/derived` 500s on a truthy non-dict spec row — `_goal_text` + `_job_kind` unguarded — `open` `self-promoted`
+Surface: backend/robustness. A1 hunt #9. `server.py:689` (`_goal_text`) and `:721` (`_job_kind`, new in R85) use `spec = job.get("spec") or {}` — `or {}` only replaces FALSY specs; a truthy non-dict spec (JSON string/array/number from a legacy/drifted at-rest row via `_row_to_job:183`) survives and `spec.get(...)` raises AttributeError → one bad row 500s `GET /derived`, which every client polls every 2s (the R70 failure mode, two new co-offenders). Properly guarded siblings: `_goal_display:762`, `_job_health:869`, `_annotate_liveness:583`.
+Repro: hunt9 file — 7 tests incl. `test_repro_derived_500s_on_one_bad_spec_row`, FAIL on master.
+Done-when: both functions coerce non-dict spec → `{}` (isinstance pattern, parity with siblings); `/derived` returns 200 with a bad-spec row present; repros promoted into tests/; pytest green.
+
+### R89. `_goal_display` blanks a non-empty goal made entirely of strippable prefixes — `open` `self-promoted`
+Surface: backend/correctness. A1 hunt #9. `server.py:749-778` (R86): for `cd ~/x && `, `cd /a && cd /b && `, `A=1 B=2 `, `A=1 && B=2 && ` the peel loop strips the entire string → `goal_display: ""` while `goal` is non-empty — violating R86's own "never return empty when goal is non-empty" contract; the verdict bar renders blank. Real setup-only/copy-paste fleet shapes.
+Repro: hunt9 file — 4 `test_repro_goal_display_blank_for_nonempty_goal` cases, FAIL on master.
+Done-when: when the peel loop empties the string, fall back to the (72-char-truncated) `_goal_text` instead of `""`; repros promoted; existing R86 `test_goal_display_*` green; pytest green. COUPLING: merge after R88 (the fallback calls `_goal_text`, which R88 hardens) — rebase + re-verify.
+
+### R90. `roost publish` loses the one-shot error when the fallback raises a transport exception — `open` `self-promoted`
+Surface: CLI/robustness. A1 hunt #9. `cli.py:1564-1573` (R78): on one-shot ≥400, `oneshot_err` is saved, but only an HTTP-STATUS fallback failure wraps it — a transport exception (`httpx.ConnectError`, connection refused mid-fallback) from the blob POST propagates raw, so the user loses the original diagnosis, contradicting the R78 docstring promise (cli.py:1514-1515).
+Repro: hunt9 file — `test_repro_publish_loses_oneshot_err_on_fallback_connect_error`, FAIL on master.
+Done-when: the fallback blob POST and second `/publish` POST wrapped so transport exceptions still surface `oneshot_err` in a ClickException; repro promoted; pytest green.
+
 ### R21. Make presigned blob PUT single-use and race-safe — `done` *(2026-06-07, PR #30)* `self-promoted`
 Surface: backend/security. A1 hunt #2 reproduced that a presigned `put_url`
 remains valid after the first upload finalizes the blob: replaying the same URL
@@ -531,6 +550,9 @@ first iteration on that ratchet measures and records it here (no code changes).
 - Mac-app verb expansion (A6 survey #2): menu bar covers Runs/Workers/Console/Transfers but none of publish/schedules/send/backup/history — which belong in a menu-bar scope is a product call (2026-06-07)
 - **User-testing sweep 2026-06-07 — polish notes (not promoted):** panel bad-token banner says "control plane unreachable — HTTP 401" (it's an auth failure; reachability is fine); `roost token --scope agent` mints `rst-mob-`-prefixed secrets (cosmetic; scope is correct); Android pairing screen is bottom-heavy with large empty margins (android/01); Android `model/Parsers.kt:21` `optString(key, null)` compiler warning.
 - **Commit the headless SwiftUI render harness** from the mac-app user test as a supported test utility *(product call)*: `RenderShots.swift` + 1-line `App.swift` hook gated on `ROOST_RENDER_DIR`, renders real views with live `GET /derived` data via `NSHostingView.cacheDisplay` — the only screenshot path on a TCC-less worker (mac-mini-m4 has no Screen Recording/Automation permission, ungrantable non-interactively).
+- **README.md:474 test count stale (792 → 867+)** — drift sweep #4 finding F1, Tier A JUDGED, awaiting promotion (the max-3 slot went to hunt #9's confirmed bugs this cycle). Consider the structural fix while in there: stop stating an exact count in the comment (it drifts with every PR) — e.g. `# full suite` — or wire the claim to the collect count. Trivial either way.
+- **iOS README:257 Linux pure-layer count stale (claims 58/58; ≥71 today)** — drift sweep #4 F2, Tier B (exact number needs a Swift-toolchain run to stamp; direction proven from journal R83 + Subtitle tests living in Models/).
+- **`_resolve_job_id` case inconsistency** (hunt #9, Proposed-grade): uppercase FULL id 404s (`WHERE id=?` case-sensitive) while an uppercase PREFIX resolves (SQLite LIKE is ASCII-case-insensitive). No legitimate caller hits it (ids are lowercase hex) — normalize or document if ever touched.
 - **mac-app Publish + Transfers panes swallow load errors silently** (R81 finding, 2026-06-07): `(try? client.sites()) ?? sites` and `try? refreshStaged()` drop failures entirely — against a CP missing those endpoints the panes just look empty with no feedback (the inverse of the R81 double-stack bug). Needs an error surface per pane; the SchedulesListState decision-seam pattern (PR #91) is the precedent to mirror.
 - **macOS CI job has never compiled the app** (R73 journaled debt, 2026-06-07; promotion candidate): `mac-app/Package.swift` pins `swift-tools-version:5.10`, but SwiftTerm 1.13.0 pulls swift-argument-parser 1.8.2 which requires tools 6.0 — the macos-14 runner's Swift 5.10 dies at dependency RESOLUTION, so the `App build + tests (macOS)` job is red on every mac-app PR and can catch nothing (it could not have caught R73). Master also has no required-status-check protection, so `--auto` merges fall through immediately. Fix: bump tools-version (the Mac node's 6.2.3 builds fine) or pin an older arg-parser, plus consider branch protection *(the protection setting itself is a human/GitHub-admin action)*.
 - **Fleet ops (human — NOT loop work), from the 2026-06-07 sweep:** (a) live CP container (`docker-ec7c1cae…`) runs roost 0.1.0 (installed Jun 5) — rebuild from master to unbreak `backup`/`schedule`/`/metrics`/one-shot publish against the live fleet; (b) oracle is unhealthy for agent jobs — Claude cred 401 + a broken SessionStart Node hook; (c) mac-mini-m4's `~/roost-r50` clone is a stale single-branch checkout (origin lacks a master ref) — re-clone or fix the remote; (d) consider granting Screen Recording TCC on the Mac for real-window capture.
