@@ -2407,3 +2407,65 @@ Entries are written by the loop; humans read, never need to edit.
   hunt over the freshly-changed code dispatched as cycle #24-repl; A4 journaled
   debts (macOS CI never compiles the app; mac-app silent-swallow panes) join
   the slate for judging.
+
+## 2026-06-07 ~21:10 UTC — Replenishment: A1 hunt #9 + A3 drift sweep #4 (over PRs #84–#98)
+- Verdict: shipped (survey cycle — slates only, no product code)
+- Branch/PR: — (slate committed as 02024f3)
+- What changed: HUNT #9 (fresh-code lens over R77-R86 changes): 3 Tier-A bugs
+  confirmed with failing repros (12 failing tests), judge-approved → promoted
+  as R88/R89/R90; 4 hypotheses cleared with cited reasoning (LIKE-injection
+  escaped, ambiguity boundary sound, 72-char boundary sound, validate_name
+  edge cases sound); 1 Proposed note (job-id case quirk). The
+  "hunt-your-own-fresh-changes" pattern: 3-for-3 again. DRIFT SWEEP #4: ONE
+  Tier A (README.md:474 says 792 tests; suite was 867) + one Tier B (iOS
+  README Linux-harness count) — every other surface across 15 PRs verified
+  clean; in-PR doc discipline held. F1 held for the next promotion slot
+  (max-3 consumed by the bugs).
+- Evidence: repro file LOOP/repro-a1-hunt9.py (left uncommitted in the hunt
+  worktree + /tmp backup); both judges (sonnet) re-ran repros/checks themselves
+- Models: orchestrator claude-opus-4-8[1m]; hunters/surveyors opus; judges sonnet
+- Notes: OPS SIGNAL — the drift judge's first dispatch onto hubbase-gpu died
+  401 (stale Claude creds): the cred-refresh degradation extends beyond oracle.
+
+## 2026-06-07 ~21:10 UTC — R88: /derived survives bad spec rows (iteration #28)
+- Verdict: shipped
+- Branch/PR: loop/r88-derived-spec-guard / https://github.com/currenttide/roost/pull/99 (merged 94c17b5)
+- What changed: `_goal_text` + `_job_kind` (the R85 newcomer) switched from
+  `or {}` to the siblings' isinstance-dict guard — a truthy non-dict spec from
+  a legacy at-rest row no longer 500s `/derived` (2s-polled by every client).
+- Evidence: 7 hunt-9 repros promoted (incl. end-to-end raw-INSERT bad-row →
+  /derived 200); fail-on-master verbatim AttributeErrors; pytest 874
+- Judge: approve (round 1) — reverted the hunk to re-prove failures, re-ran all
+- Models: implementer claude-opus-4-8[1m] / judge claude-sonnet-4-6
+
+## 2026-06-07 ~21:10 UTC — R89: goal_display never blanks a non-empty goal (iteration #28)
+- Verdict: shipped
+- Branch/PR: loop/r89-goal-display-blank / https://github.com/currenttide/roost/pull/100 (merged 51151fe)
+- What changed: when the peel loop empties the string (`cd X && `, `A=1 B=2 `…),
+  fall back to the un-peeled `_goal_text` (72-char cap still applies) instead
+  of `""`. Merge ORDER enforced: rebased onto R88's merge (linear history
+  94c17b5 → 51151fe); combined behavior tested — drifted spec → clean `""`,
+  never raises; dict-spec peel-everything → never blanks.
+- Evidence: 4 mandated repros + 2 edge tests (fallback 72-capped;
+  dict-spec shape) fail-on-unfixed → pass; existing R86 tests untouched green;
+  pytest 882 post-rebase
+- Judge: approve (round 1)
+- Models: implementer claude-opus-4-8[1m] / judge claude-sonnet-4-6
+
+## 2026-06-07 ~21:10 UTC — R90: publish keeps the one-shot diagnosis on transport failures (iteration #28)
+- Verdict: shipped
+- Branch/PR: loop/r90-publish-transport-err / https://github.com/currenttide/roost/pull/101 (merged 015c26f)
+- What changed: both fallback POSTs (blob + second /publish) wrapped in
+  `try/except httpx.HTTPError` re-raising a ClickException that leads with the
+  saved one-shot error and notes the fallback failure; `raise … from e`
+  preserves the chain; programming errors (KeyError/ValueError) still
+  propagate as tracebacks (deliberate — HTTPError covers transport/protocol
+  only).
+- Evidence: 2 repros (ConnectError on blob POST; on second /publish POST)
+  fail-on-master (ONESHOT-BOOM never surfaced) → pass; R78 tests untouched;
+  pytest 884 post-rebase
+- Judge: approve (round 1) — re-proved fail-on-master in a scratch worktree
+- Models: implementer claude-opus-4-8[1m] / judge claude-sonnet-4-6
+- Notes: iteration #28 totals: 3/3 shipped (PRs #99 #100 #101), tests 867→884,
+  all round-1. Every hunt-9 bug closed same-day. Next: promote drift F1 +
+  A4 debts (macOS CI; silent-swallow panes) as R91-R93 → iteration #29.
