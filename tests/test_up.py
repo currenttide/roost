@@ -134,14 +134,23 @@ def test_up_skips_worker_spawn_when_one_is_serving(env: Boundaries, monkeypatch)
     assert [s for s in env.spawns if s and s[-1] == "worker"] == []
 
 
-def test_up_supervised_service_when_not_isolated(env: Boundaries, monkeypatch):
+def _deisolate_config_dir(monkeypatch, tmp_path: Path) -> None:
+    """Simulate a DEFAULT (non-isolated) install for the service-unit branch:
+    drop ROOST_CONFIG_DIR but pin XDG_CONFIG_HOME to tmp FIRST — without it,
+    config.default_config_path() falls back to the operator's REAL
+    ~/.config/roost/config.toml and the test would clobber it (judge-caught)."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.delenv("ROOST_CONFIG_DIR", raising=False)
+
+
+def test_up_supervised_service_when_not_isolated(env: Boundaries, monkeypatch,
+                                                 tmp_path: Path):
     # No ROOST_CONFIG_DIR ⇒ default install ⇒ the durable service unit, NOT a
-    # detached spawn. (Config still isolated: load/save are pointed at tmp by
-    # patching the config module's dir resolution via ROOST_HOME-relative path.)
+    # detached spawn.
     monkeypatch.setattr(roost_service, "install",
                         lambda start: (env.service_installs.append(start)
                                        or (0, "unit at ~/.config")))
-    monkeypatch.delenv("ROOST_CONFIG_DIR", raising=False)
+    _deisolate_config_dir(monkeypatch, tmp_path)
     res = _run()
     assert res.exit_code == 0, res.output
     assert env.service_installs == [True]
@@ -149,9 +158,10 @@ def test_up_supervised_service_when_not_isolated(env: Boundaries, monkeypatch):
     assert [s for s in env.spawns if s and s[-1] == "worker"] == []
 
 
-def test_up_service_failure_falls_back_to_detached(env: Boundaries, monkeypatch):
+def test_up_service_failure_falls_back_to_detached(env: Boundaries, monkeypatch,
+                                                   tmp_path: Path):
     monkeypatch.setattr(roost_service, "install", lambda start: (2, "no supervisor"))
-    monkeypatch.delenv("ROOST_CONFIG_DIR", raising=False)
+    _deisolate_config_dir(monkeypatch, tmp_path)
     res = _run()
     assert res.exit_code == 0, res.output
     assert "supervised service unavailable" in res.output
