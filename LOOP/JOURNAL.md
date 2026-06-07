@@ -1385,3 +1385,31 @@ Entries are written by the loop; humans read, never need to edit.
   sweep missed (return-shape claims aren't in any table) — the judge-catches-
   propagated-drift pattern is exactly why examples must be truth-checked. Hunt #4
   last in flight.
+
+## 2026-06-07 ~03:30 UTC — A1 hunt #4: captain/steward/verify/watcher (cycle #10 prep)
+- Verdict: shipped (repros merged; 2 confirmed, 5 cleared)
+- Branch/PR: loop/replenish-hunt4 / https://github.com/currenttide/roost/pull/58 (merged 50d8e4c; LOOP/repro-a1-hunt4.py only)
+- What changed: hunt #4 over the last unhunted core area. CONFIRMED (both in the
+  health seam the overseer/panel/MCP inbox consume via /derived): C1 stuck-detection
+  masked by activity-substring (server.py:585 — "verifying" in user-controllable
+  activity text short-circuits the stuck check; worker emits exact emoji markers to
+  anchor on instead); C2 target-pinned jobs never flagged unplaceable
+  (server.py:463-493 — capable_workers ignores the hard target pin _try_assign_one
+  enforces). Non-tautology proven for both (obvious fix applied → repros pass →
+  reverted byte-identical, md5-verified). CLEARED honestly: verify-phase lease lapse
+  (15s heartbeat renews independently of run_job), tree_budget double-counting
+  (progress SETs, terminal increments once, stale-attempt guard), steward capacity
+  edge cases (fail-safe to 1), parse_verdict flips (robust; known LLM-echo edge
+  already tested), watcher narration parsing.
+- Evidence:
+  - `python -m pytest -q LOOP/repro-a1-hunt4.py` → exactly 2 failed, deterministic ×3
+  - `python -m pytest -q` → 644 passed
+- Judge: APPROVE_ALL — independently confirmed both bugs from source, verified repro
+  honesty, re-ran both commands
+- Models: hunter claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only)
+- Notes: iteration #8 COMPLETE — R45 #56, R46 #57, hunt #58. Hunt rotation record:
+  #1 matcher/placement, #2 blobs/publish, #3 worker executors, #4 captain/steward/
+  verify/watcher — all core areas now hunted at least once. Cycle #10: R47+R48
+  promoted (same-file → ONE agent sequential, R30/R31 pattern), R49 narration
+  interval (small feature). verify.py e2e coverage + iOS publish UI queued for
+  cycle #11 (UI work deliberately deferred to daytime — Mac-node dependency).

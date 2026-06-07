@@ -143,6 +143,20 @@ Done-when: the test isolates its temp observation (dedicated tmp_path-scoped dir
 Surface: MCP/DX. Pre-existing Proposed item, promoted: the captain agent READS these docstrings to decide how to call tools — examples directly improve every captain run's tool-use accuracy. Add a short worked example to each of the 16 tools' descriptions in roost/mcp.py (inputs + what comes back), truth-checked against the real schemas/server behavior.
 Done-when: every TOOLS entry carries an accurate example; examples truth-checked (judge re-checks against schemas + server routes); INTEGRATIONS.md tool table untouched or consistent; pytest green.
 
+### R47. Stuck-job detection masked by activity-text substring — `open` `self-promoted`
+Surface: backend/correctness. A1 hunt #4 (PR #58). `_job_phase` (server.py:585) infers the verify/self-heal phase from a bare substring ("verifying"/"self-healing") of the job's own activity text — short-circuiting `_job_health` before the stuck check, so a genuinely-stuck job whose activity legitimately contains that word is never flagged. The worker emits exact markers ("🔎 verifying result" / "🔧 self-healing (attempt N)").
+Repro: `LOOP/repro-a1-hunt4.py::test_stuck_job_with_verifying_in_activity_is_still_flagged_stuck` — FAILS on master.
+Done-when: phase detection anchored to the exact worker markers; repro passes (promote into tests/); pytest green.
+
+### R48. `target`-pinned jobs never flagged unplaceable — `open` `self-promoted`
+Surface: backend/correctness. A1 hunt #4 (PR #58). `_annotate_liveness` (server.py:463-493) computes `capable_workers` from `requires` only, ignoring the hard `target` pin that `_try_assign_one` enforces — a job pinned to a non-existent/offline worker looks placeable forever and the overseer never sees it.
+Repro: `LOOP/repro-a1-hunt4.py::test_job_pinned_to_nonexistent_target_is_unplaceable` — FAILS on master.
+Done-when: liveness annotation honors the target pin (parity with assignment); repro passes (promote into tests/); LOOP/repro-a1-hunt4.py deleted once both its tests live in the suite; pytest green.
+
+### R49. Narration re-render `min_interval` configurable — `open` `self-promoted` `feature`
+Surface: backend/feature. Pre-existing Proposed item: the watcher's narration re-render interval is a fixed constant; busy fleets may want it slower (cost) and demo fleets faster (snappiness).
+Done-when: interval configurable via the same config style as ROOST_NARRATE (env var or config sibling — match the existing seam); default preserves today's value exactly; bounds-checked (sane floor); test for default + override; pytest green.
+
 ### R21. Make presigned blob PUT single-use and race-safe — `done` *(2026-06-07, PR #30)* `self-promoted`
 Surface: backend/security. A1 hunt #2 reproduced that a presigned `put_url`
 remains valid after the first upload finalizes the blob: replaying the same URL
@@ -267,7 +281,6 @@ first iteration on that ratchet measures and records it here (no code changes).
 >>>>>>> Stashed changes
 - **A6 (cycle #4, unblocked from Proposed):** Version drift — `pyproject.toml` says `0.1.0`, server self-reports `0.2.0`; single-source via `importlib.metadata`
 - Drop `cred_hash` on worker revoke — make revocation total *(security-session — credential lifecycle belongs in the dedicated session)*
-- Narration re-render `min_interval` configurable
 - Tests for `triage.py` prompt rendering and `config.py` TOML/perms
 - Broader e2e coverage for `verify.py` verdict path
 - Mac app follow-ups (the native SwiftPM app lands with I1; webview wrapper is the deleted PoC — never resurrect it)
