@@ -1,7 +1,7 @@
 {
-  "assigned_at": 1780785952.5155227,
+  "assigned_at": 1780810381.6304774,
   "attempt": 1,
-  "created_at": 1780785952.5093372,
+  "created_at": 1780810381.624933,
   "decline_count": 0,
   "declined_by": null,
   "depth": 0,
@@ -9,11 +9,11 @@
   "error": null,
   "eta_sec": null,
   "exit_code": 0,
-  "finished_at": 1780785952.5541866,
-  "id": "3d588c7fa2ae",
+  "finished_at": 1780810381.6700246,
+  "id": "2c880e6c5666",
   "intent": "fix the flaky auth test in roost-oss",
   "last_activity": "re-running: all green",
-  "last_activity_at": 1780785952.55717,
+  "last_activity_at": 1780810381.6728244,
   "lease_expires_at": null,
   "max_attempts": 2,
   "max_depth": 3,
@@ -22,6 +22,7 @@
   "narration": null,
   "parent_job_id": null,
   "progress": null,
+  "requeued_at": null,
   "requires": {
     "tools": [
       "python3"
@@ -32,7 +33,7 @@
     "output": "fixed: tests green",
     "verified": true
   },
-  "root_job_id": "3d588c7fa2ae",
+  "root_job_id": "2c880e6c5666",
   "spec": {
     "args": null,
     "budget": {},
@@ -63,11 +64,11 @@
     "task": null,
     "verify": null
   },
-  "started_at": 1780785952.5205557,
+  "started_at": 1780810381.6357532,
   "state": "succeeded",
   "subagent_model": null,
   "tokens_used": 48213,
   "tree_budget_spent": 48213,
   "tree_budget_tokens": null,
-  "worker_id": "224446b04761"
+  "worker_id": "a7c24b411c74"
 }

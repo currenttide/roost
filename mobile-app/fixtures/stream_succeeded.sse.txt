@@ -2,22 +2,22 @@ event: state
 data: {"state": "succeeded"}
 
 event: log
-data: {"seq": 1, "stream": "event", "data": "{\"type\": \"started\", \"attempt\": 1, \"exit_code\": null, \"result\": null, \"error\": null, \"tokens_used\": null, \"activity\": null, \"diagnosis\": null}", "ts": 1780785952.5229704}
+data: {"seq": 1, "stream": "event", "data": "{\"type\": \"started\", \"attempt\": 1, \"exit_code\": null, \"result\": null, \"error\": null, \"tokens_used\": null, \"activity\": null, \"diagnosis\": null}", "ts": 1780810381.6389854}
 
 event: log
-data: {"seq": 2, "stream": "stdout", "data": "running pytest -q ...", "ts": 1780785952.527595}
+data: {"seq": 2, "stream": "stdout", "data": "running pytest -q ...", "ts": 1780810381.6437774}
 
 event: log
-data: {"seq": 3, "stream": "stdout", "data": "2 failed, re-reading test_auth.py", "ts": 1780785952.5337834}
+data: {"seq": 3, "stream": "stdout", "data": "2 failed, re-reading test_auth.py", "ts": 1780810381.6503758}
 
 event: log
-data: {"seq": 4, "stream": "stdout", "data": "editing tests/test_auth.py", "ts": 1780785952.540138}
+data: {"seq": 4, "stream": "stdout", "data": "editing tests/test_auth.py", "ts": 1780810381.656763}
 
 event: log
-data: {"seq": 5, "stream": "stdout", "data": "re-running: all green", "ts": 1780785952.5472074}
+data: {"seq": 5, "stream": "stdout", "data": "re-running: all green", "ts": 1780810381.66354}
 
 event: log
-data: {"seq": 6, "stream": "event", "data": "{\"type\": \"succeeded\", \"attempt\": 1, \"exit_code\": 0, \"result\": {\"output\": \"fixed: tests green\", \"verified\": true, \"evidence\": \"pytest -q: 255 passed\"}, \"error\": null, \"tokens_used\": 48213, \"activity\": null, \"diagnosis\": null}", "ts": 1780785952.55717}
+data: {"seq": 6, "stream": "event", "data": "{\"type\": \"succeeded\", \"attempt\": 1, \"exit_code\": 0, \"result\": {\"output\": \"fixed: tests green\", \"verified\": true, \"evidence\": \"pytest -q: 255 passed\"}, \"error\": null, \"tokens_used\": 48213, \"activity\": null, \"diagnosis\": null}", "ts": 1780810381.6728244}
 
 event: done
 data: {"state": "succeeded", "exit_code": 0, "error": null, "result": {"output": "fixed: tests green", "verified": true, "evidence": "pytest -q: 255 passed"}, "tokens_used": 48213}

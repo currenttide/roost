@@ -161,6 +161,18 @@ struct ApiClient {
                               as: Site.self)
     }
 
+    /// One-shot publish (API.md §6a): the `tar.gz` IS the body, no staged blob.
+    /// `name` is REQUIRED (no blob name to default from) and slugified server-side.
+    /// Returns the same `Site` as the two-step `publish(blobId:)`.
+    func publishBundle(name: String, data: Data) async throws -> Site {
+        var req = request("publish", query: [.init(name: "name", value: name)],
+                          method: "POST")
+        req.httpBody = data
+        // Non-JSON Content-Type selects the one-shot path server-side.
+        req.setValue("application/gzip", forHTTPHeaderField: "Content-Type")
+        return try await send(req, as: Site.self)
+    }
+
     func sites() async throws -> [Site] {
         try await send(request("publish"), as: [Site].self)
     }

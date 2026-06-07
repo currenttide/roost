@@ -133,18 +133,29 @@ def capture(db_path: Path) -> dict[str, Any]:
             f"/jobs/{queued_id}", headers=mh).json()
 
         # -- publish (API.md §6) — entirely AS the mobile token ------------
-        buf = io.BytesIO()
-        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-            page = b"<h1>shipped from the phone</h1>"
-            info = tarfile.TarInfo("index.html")
-            info.size = len(page)
-            tar.addfile(info, io.BytesIO(page))
+        def _bundle(page: bytes) -> bytes:
+            buf = io.BytesIO()
+            with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+                info = tarfile.TarInfo("index.html")
+                info.size = len(page)
+                tar.addfile(info, io.BytesIO(page))
+            return buf.getvalue()
+
+        # Two-step flow: stage a blob, then publish by blob_id.
         r = c.post("/blobs", params={"name": "phone-site.tar.gz"},
-                   content=buf.getvalue(), headers=mh)
+                   content=_bundle(b"<h1>shipped from the phone</h1>"), headers=mh)
         blob = r.json()
         out["blob_upload_response.json"] = blob
         out["publish_response.json"] = c.post(
             "/publish", json={"blob_id": blob["id"]}, headers=mh).json()
+
+        # One-shot flow (R7): the bundle IS the body, no staged blob; the
+        # slug comes from ?name=. Same Site response shape as the two-step path.
+        out["publish_oneshot_response.json"] = c.post(
+            "/publish", params={"name": "phone-oneshot"},
+            content=_bundle(b"<h1>one-shot from the phone</h1>"),
+            headers={**mh, "Content-Type": "application/gzip"}).json()
+
         out["publish_list.json"] = c.get("/publish", headers=mh).json()
 
         # Error shapes the apps must handle.

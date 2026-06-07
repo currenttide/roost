@@ -135,6 +135,36 @@ class ApiClient(
         return Parsers.parseSite(requestText("POST", "/publish", body.toString()))
     }
 
+    /**
+     * One-shot publish (API.md §6a): the tar.gz IS the body, no staged blob.
+     * `name` is required (no blob name to default from) and slugified server-side.
+     * Returns the same [Site] as the two-step [publish]. A non-JSON Content-Type
+     * selects the one-shot path server-side.
+     */
+    suspend fun publishBundle(name: String, bytes: ByteArray): Site =
+        withContext(Dispatchers.IO) {
+            val conn = open("/publish?name=${enc(name)}")
+            try {
+                conn.requestMethod = "POST"
+                conn.connectTimeout = 10_000
+                conn.readTimeout = 60_000   // bundles are bigger than JSON bodies
+                token?.let { conn.setRequestProperty("Authorization", "Bearer $it") }
+                conn.setRequestProperty("Content-Type", "application/gzip")
+                conn.doOutput = true
+                conn.outputStream.use { it.write(bytes) }
+                val code = conn.responseCode
+                if (code in 200..299) {
+                    Parsers.parseSite(readBody(conn) ?: "")
+                } else {
+                    val err = readError(conn) ?: ""
+                    throw Parsers.parseError(code, err)
+                        .let { ApiException(it.status, it.detail) }
+                }
+            } finally {
+                conn.disconnect()
+            }
+        }
+
     suspend fun sites(): List<Site> = Parsers.parseSites(getText("/publish"))
 
     // ---- HTTP plumbing -----------------------------------------------------------

@@ -3,7 +3,7 @@
     "assigned_at": null,
     "attempt": 0,
     "capable_workers": 0,
-    "created_at": 1780785952.5927525,
+    "created_at": 1780810381.7077296,
     "decline_count": 0,
     "declined_by": null,
     "depth": 0,
@@ -12,7 +12,7 @@
     "eta_sec": null,
     "exit_code": null,
     "finished_at": null,
-    "id": "157f106c274a",
+    "id": "c78f6c86d3d3",
     "intent": "train on the gpu box",
     "last_activity": null,
     "last_activity_at": null,
@@ -25,11 +25,12 @@
     "parent_job_id": null,
     "progress": null,
     "queued_sec": 0.0,
+    "requeued_at": null,
     "requires": {
       "gpu_vram_gb": ">=24"
     },
     "result": null,
-    "root_job_id": "157f106c274a",
+    "root_job_id": "c78f6c86d3d3",
     "spec": {
       "args": null,
       "budget": {},
@@ -67,9 +68,9 @@
     "worker_id": null
   },
   {
-    "assigned_at": 1780785952.5694427,
+    "assigned_at": 1780810381.6849117,
     "attempt": 1,
-    "created_at": 1780785952.5625553,
+    "created_at": 1780810381.677879,
     "decline_count": 0,
     "declined_by": null,
     "depth": 0,
@@ -78,12 +79,12 @@
     "eta_sec": null,
     "exit_code": null,
     "finished_at": null,
-    "id": "0350969c6395",
+    "id": "5c01b333e54e",
     "idle_sec": 0.0,
     "intent": "bump deps and run the test suite",
     "last_activity": "uv lock --upgrade ...",
-    "last_activity_at": 1780785952.5850255,
-    "lease_expires_at": 1780786012.586749,
+    "last_activity_at": 1780810381.6997647,
+    "lease_expires_at": 1780810441.7015774,
     "max_attempts": 2,
     "max_depth": 3,
     "model": null,
@@ -91,13 +92,14 @@
     "narration": null,
     "parent_job_id": null,
     "progress": null,
+    "requeued_at": null,
     "requires": {
       "tools": [
         "python3"
       ]
     },
     "result": null,
-    "root_job_id": "0350969c6395",
+    "root_job_id": "5c01b333e54e",
     "spec": {
       "args": null,
       "budget": {},
@@ -128,18 +130,18 @@
       "task": null,
       "verify": null
     },
-    "started_at": 1780785952.5759447,
+    "started_at": 1780810381.6909566,
     "state": "running",
     "subagent_model": null,
     "tokens_used": 0,
     "tree_budget_spent": 0,
     "tree_budget_tokens": null,
-    "worker_id": "224446b04761"
+    "worker_id": "a7c24b411c74"
   },
   {
-    "assigned_at": 1780785952.5155227,
+    "assigned_at": 1780810381.6304774,
     "attempt": 1,
-    "created_at": 1780785952.5093372,
+    "created_at": 1780810381.624933,
     "decline_count": 0,
     "declined_by": null,
     "depth": 0,
@@ -147,11 +149,11 @@
     "error": null,
     "eta_sec": null,
     "exit_code": 0,
-    "finished_at": 1780785952.5541866,
-    "id": "3d588c7fa2ae",
+    "finished_at": 1780810381.6700246,
+    "id": "2c880e6c5666",
     "intent": "fix the flaky auth test in roost-oss",
     "last_activity": "re-running: all green",
-    "last_activity_at": 1780785952.55717,
+    "last_activity_at": 1780810381.6728244,
     "lease_expires_at": null,
     "max_attempts": 2,
     "max_depth": 3,
@@ -160,6 +162,7 @@
     "narration": null,
     "parent_job_id": null,
     "progress": null,
+    "requeued_at": null,
     "requires": {
       "tools": [
         "python3"
@@ -170,7 +173,7 @@
       "output": "fixed: tests green",
       "verified": true
     },
-    "root_job_id": "3d588c7fa2ae",
+    "root_job_id": "2c880e6c5666",
     "spec": {
       "args": null,
       "budget": {},
@@ -201,12 +204,12 @@
       "task": null,
       "verify": null
     },
-    "started_at": 1780785952.5205557,
+    "started_at": 1780810381.6357532,
     "state": "succeeded",
     "subagent_model": null,
     "tokens_used": 48213,
     "tree_budget_spent": 48213,
     "tree_budget_tokens": null,
-    "worker_id": "224446b04761"
+    "worker_id": "a7c24b411c74"
   }
 ]

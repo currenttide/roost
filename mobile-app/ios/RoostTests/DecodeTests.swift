@@ -107,9 +107,17 @@ final class DecodeTests: XCTestCase {
         XCTAssertNil(site.publicUrl)        // fixture CP has no publish domain
         XCTAssertEqual(site.shareUrl, site.url)
         XCTAssertEqual(site.files, 1)
-        // List shape.
+        // One-shot publish (API.md §6a): same Site shape, slug from ?name=.
+        let shot = try dec.decode(Site.self,
+                                  from: Fixtures.data("publish_oneshot_response.json"))
+        XCTAssertEqual(shot.slug, "phone-oneshot")
+        XCTAssertTrue(shot.url.hasSuffix("/pub/phone-oneshot/"))
+        XCTAssertNil(shot.publicUrl)
+        XCTAssertEqual(shot.shareUrl, shot.url)
+        XCTAssertEqual(shot.files, 1)
+        // List shape (covers sites from either flow).
         let list = try dec.decode([Site].self, from: Fixtures.data("publish_list.json"))
-        XCTAssertEqual(list.map(\.slug), ["phone-site"])
+        XCTAssertEqual(Set(list.map(\.slug)), ["phone-site", "phone-oneshot"])
     }
 
     func testErrorEnvelopes() throws {
