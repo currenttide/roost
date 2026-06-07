@@ -74,12 +74,12 @@ Done-when: tool table contains every tool in TOOL_IMPL with one-line description
 Surface: docs. A6 survey cycle #4 (judge-approved, fast-tracked per protocol). Both commands fully implemented (cli.py:1916, cli.py:1029) but absent from README.md's "Inspect & control runs" table and docs/INTEGRATIONS.md. `roost history --failed` is the natural "what went wrong this week" entry point and no user can discover it.
 Done-when: README.md inspect/control table includes `roost history [--failed]` and `roost prune-workers`; INTEGRATIONS.md CLI section mentions `roost history`; pytest green (docs-drift ratchet stays 0).
 
-### R30. `_oneshot_agent` corrupts bwrap argv when inserting `--append-system-prompt` — `open` `self-promoted`
+### R30. `_oneshot_agent` corrupts bwrap argv when inserting `--append-system-prompt` — `done` *(2026-06-06, PR #40)* `self-promoted`
 Surface: backend/correctness. A1 hunt #3 deferred bug, repro'd + judge-approved in cycle #6 prep (PR #39). `roost/worker.py:2028-2029`: with policy `sandbox: "bwrap"`, the argv is bwrap-wrapped but the code splices `--append-system-prompt` at fixed index `argv[:3]`, landing inside bwrap's flags (`--ro-bind / /` → `--ro-bind / --append-system-prompt … /`). `_build_auto_argv` (line ~1013) does it correctly via `argv.index("claude")`.
 Repro: `LOOP/repro-a1-hunt3.py::test_oneshot_agent_keeps_bwrap_argv_intact_with_system_prompt` — FAILS on master.
 Done-when: insertion anchored to the `claude` position (parity with `_build_auto_argv`); repro passes; pytest green.
 
-### R31. `_oneshot_agent` leaks relay tasks on CancelledError — `open` `self-promoted`
+### R31. `_oneshot_agent` leaks relay tasks on CancelledError — `done` *(2026-06-06, PR #42)* `self-promoted`
 Surface: backend/robustness. A1 hunt #3 deferred bug, repro'd + judge-approved in cycle #6 prep (PR #39). `roost/worker.py:2076-2091`: relay tasks `t1`/`t2` are gathered inside `try`, not `finally`; a cancel during `asyncio.wait_for(proc.wait(), …)` skips the gather and the tasks float as pending (asyncio warnings, test interference).
 Repro: `LOOP/repro-a1-hunt3.py::test_oneshot_agent_cancels_relay_tasks_on_cancellation` — FAILS on master.
 Done-when: finally cancels/awaits both relay tasks on every exit path; repro passes; pytest green.

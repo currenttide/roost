@@ -965,3 +965,37 @@ Entries are written by the loop; humans read, never need to edit.
   "0.2.0" (still correct; regen only if version changes again); CLI has no
   --version flag (left as possible future A6 item). R30/R31 agent + PR-13
   rescue agent still in flight.
+
+## 2026-06-06 ~22:50 UTC — R30: anchor _oneshot_agent system-prompt splice to the claude token
+- Verdict: shipped
+- Branch/PR: loop/r30-oneshot-bwrap-argv / https://github.com/currenttide/roost/pull/40 (merged 8a65018)
+- What changed: `_oneshot_agent`'s fixed `argv[:3]` splice of `--append-system-prompt`
+  replaced with insertion anchored at `argv.index("claude")` (fallback 0), mirroring
+  `_build_auto_argv`. Under `sandbox: "bwrap"` the old splice corrupted `--ro-bind / /`.
+  Repro promoted from LOOP/repro-a1-hunt3.py into tests/test_worker.py.
+- Evidence:
+  - `test_oneshot_agent_keeps_bwrap_argv_intact_with_system_prompt` → PASSES (failed on master pre-fix)
+  - `python -m pytest -q` → 542 passed
+- Judge: approve (round 1) — re-ran repro + full suite
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p mechanism)
+- Notes: iteration #3 slot 1a (sequential with R31 — same function).
+
+## 2026-06-06 ~22:55 UTC — R31: cancel _oneshot_agent relay tasks on CancelledError
+- Verdict: shipped
+- Branch/PR: loop/r31-oneshot-relay-leak / https://github.com/currenttide/roost/pull/42 (merged 1e163af)
+- What changed: `_oneshot_agent`'s `finally` now cancel()s both relay tasks and awaits
+  them via `gather(..., return_exceptions=True)` on every exit path; the in-try gather
+  (normal drain) retained. Branched from merged-R30 master. Repro promoted into
+  tests/test_worker.py (helpers nested to avoid `_HangingProcess` collision);
+  LOOP/repro-a1-hunt3.py REMOVED — both its tests now live in the regular suite.
+- Evidence:
+  - both `test_oneshot_agent_*` tests → PASS; full suite 543 passed
+  - tests/test_worker.py clean under `-W error::RuntimeWarning` (no pending-task warnings)
+- Judge: approve (round 1) — diffed promoted tests against HEAD~1:LOOP/repro-a1-hunt3.py
+  for fidelity, re-ran targeted + full suites
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p mechanism)
+- Notes: iteration #3 slot 1b. Iteration #3 complete: R30 #40, R31 #42, R32 #41 — plus
+  the rescue re-port of PR #13 dispatched as a logged 4th item (in flight). A1 hunt #3
+  fully consumed (all 5 worker-executor bugs fixed: R24-R26, R30-R31). Iteration #4
+  (first pure-feature wave) dispatched: R33 captain plan in tree, R34 mobile one-shot
+  publish parity, R35 /metrics endpoint. Hunt rotation next: captain/steward.
