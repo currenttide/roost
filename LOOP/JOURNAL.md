@@ -622,3 +622,40 @@ Entries are written by the loop; humans read, never need to edit.
 - Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (fenced
   first-line model-ID block present)
 - Notes: next R19 (decline/requeue bookkeeping — needs live smoke).
+
+## 2026-06-07 07:35 UTC — R19: Decline/requeue bookkeeping
+- Verdict: shipped
+- Branch/PR: loop/r19-decline-bookkeeping / https://github.com/currenttide/roost/pull/27
+- What changed: (a) V13 adds jobs.requeued_at, set on decline-requeue; the
+  placement-grace clock runs from COALESCE(requeued_at, created_at) so a
+  decline hands the job back for a FRESH competitive round while created_at
+  stays truthful. DESIGN DEVIATION (logged): the /tmp repro asserted
+  created_at-reset; the chosen semantics supersede it — behavior verified
+  live instead. Interaction the fix exposed (3 existing tests caught it):
+  the decliner still counted in best_other, so a worse-fit poller deferred
+  to a competitor that can never take the job — decliners now excluded from
+  the competing set (fast handoff among equals preserved; better-fit
+  non-decliners get their window). (b) decline-requeue refunds the attempt
+  (MAX(0, attempt-1)) — declines no longer eat the retry budget; late
+  events from the decliner are still rejected by worker-ownership.
+- Evidence:
+  - `python -m pytest -q` → 533 passed in 16.03s (was 530; +3, none removed;
+    all 7 existing decline tests green)
+  - live smoke (scratch CP :8788, real wire, 3 synthetic workers): the
+    hunt's exact Bug-A scenario — decliner grabs via anti-starvation →
+    declines → worse-fit immediate poll gets 204 (window LIVE; pre-fix it
+    got the job) → preferred worker takes it at attempt 1 (refunded)
+- Judge: approve (round 1) — re-ran pytest (533) + the A1 repro file
+  (matcher/attempt PASS, prefer-by-name fails as expected for R20, grace
+  repro fails ONLY on the superseded created_at design — verified), ran its
+  OWN Bug-A smoke + a synthetic V12→V13 migration (column + version,
+  idempotent), probed: sweeper attempt arithmetic across
+  decline→run→expiry correct, stale-attempt 403 with reused numbers,
+  escalation path intentionally no-refund, decliner exclusion can't
+  promote a worse worker over a better non-decliner, mobile contract
+  additive (drift guard 23/23 in the run).
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (fenced
+  first-line model-ID block present)
+- Notes: lease-expiry requeue deliberately does NOT restart the grace
+  window (real failures ≠ declines) — the analog question filed to
+  Proposed. Next: R20 (prefer-by-name, last Ranked item).

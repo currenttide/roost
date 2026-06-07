@@ -1035,23 +1035,33 @@ def _try_assign_one(db_path: Path, worker_id: str) -> Optional[dict]:
                     )
                     if not is_target:
                         continue
-                waited = now - (row["created_at"] or now)
+                # Grace runs from the LAST decline-requeue when there is one
+                # (R19): a decline hands the job back for a fresh competitive
+                # placement round — without this, any job older than the grace
+                # window re-enters with anti-starvation pre-armed and the
+                # first poller takes it regardless of fit, forever.
+                waited = now - (row["requeued_at"] or row["created_at"] or now)
                 # bare-worker (kind: auto): never re-grab a task this worker already
                 # declined — a poor fit won't become a good one. The task waits for a
                 # capable node; it only fails once ALL capable nodes have declined.
-                if worker_id in _decliner_set(row["declined_by"]):
+                decliners = _decliner_set(row["declined_by"])
+                if worker_id in decliners:
                     continue
                 job = {"prefer": spec.get("prefer"), "requires": requires}
                 if waited >= PLACEMENT_GRACE:
                     chosen = row  # don't starve: take it regardless of fit
                     break
                 my_score = placement_score(me, job, now=now)
-                # Best competing fit among *capable* idle others.
+                # Best competing fit among *capable* idle others. Decliners are
+                # NOT competitors (R19): they can never take this job, so
+                # deferring to one would deadlock the handoff until the grace
+                # window expires — among equals the handoff stays immediate.
                 best_other = max(
                     (
                         placement_score(w, job, now=now)
                         for w in others
-                        if matches(w["capabilities"], requires)
+                        if w["id"] not in decliners
+                        and matches(w["capabilities"], requires)
                     ),
                     default=float("-inf"),
                 )
@@ -1306,11 +1316,21 @@ def _apply_event(
                          "escalated: declined-by-all", job_id),
                     )
                 else:
+                    # R19 bookkeeping on requeue:
+                    # - requeued_at=now restarts the placement-grace window so
+                    #   the next round is competitive again (see _try_assign_one);
+                    # - attempt-1 refunds the slot this assignment consumed —
+                    #   declines must not eat the retry budget (two declines at
+                    #   max_attempts=2 would leave the first REAL execution
+                    #   zero retries). Safe against late events from the
+                    #   decliner: a reused attempt number still fails the
+                    #   worker-ownership check once another worker holds the job.
                     conn.execute(
                         "UPDATE jobs SET state='queued', worker_id=NULL, "
                         "assigned_at=NULL, started_at=NULL, lease_expires_at=NULL, "
+                        "requeued_at=?, attempt=MAX(0, attempt - 1), "
                         "decline_count=?, declined_by=?, last_activity=? WHERE id=?",
-                        (new_count, json.dumps(sorted(decliners)),
+                        (now, new_count, json.dumps(sorted(decliners)),
                          f"declined by {worker_id}: {reason}", job_id),
                     )
                 conn.execute(
