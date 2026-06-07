@@ -51,7 +51,7 @@ feat/mac-app) — verify it after the merge.
 
 ## Ranked
 
-### R24. Auto job crash after decline marker misclassified as `declined` — `open` `self-promoted`
+### R24. Auto job crash after decline marker misclassified as `declined` — `done` *(2026-06-06, PR #31)* `self-promoted`
 Surface: backend/correctness. A1 hunt #3 (worker executors). `run_job` checks `declined` before `exit_code != 0`, so a `kind:auto` triage subprocess that emits `ROOST_DECLINE:` then crashes with non-zero exit is reported as `type="declined"` (causing the CP to requeue it) instead of `type="failed"`. Causes an infinite retry loop across the fleet.
 Repro: `tests/test_judge_r4_bugs.py::test_bug5_auto_decline_then_crash_reported_as_declined_not_failed` — FAILS on master.
 Done-when: exit_code check wins over the `declined` flag (non-zero exit is always `failed` regardless of marker); repro test passes; pytest green.
@@ -61,7 +61,7 @@ Surface: backend/robustness. A1 hunt #3. `self._running += 1` and `self._active[
 Repro: `tests/test_judge_r4_bugs.py::test_bug1_running_and_active_not_leaked_on_cancellation` — FAILS on master.
 Done-when: `try/finally` wraps the full body after `_running += 1`; decrement and `_active.pop` unconditional on any exit path including `CancelledError`; repro test passes; pytest green.
 
-### R26. `OSError` subclasses escape `run_job` without posting terminal event — `done` *(2026-06-06, PR #33)* `self-promoted`
+### R26. `OSError` subclasses escape `run_job` without posting terminal event — `done` *(2026-06-06, PR #34)* `self-promoted`
 Surface: backend/robustness. A1 hunt #3. The `except` clause around `asyncio.create_subprocess_exec` catches only `FileNotFoundError` and `PermissionError`. Broader `OSError` subclasses (e.g. `BlockingIOError` EAGAIN, `OSError` EMFILE) propagate uncaught — `_running` stays incremented, no terminal event posted, job stuck at "started" forever.
 Repro: `tests/test_judge_r4_bugs.py::test_bug4_other_oserror_does_not_escape_run_job` — FAILS on master.
 Done-when: except broadened to `OSError`; spawn failures post `type="failed"` and decrement `_running`; repro test passes; pytest green.
@@ -69,6 +69,14 @@ Done-when: except broadened to `OSError`; spawn failures post `type="failed"` an
 ### R27. `roost_submit` MCP schema missing `kind: auto` — `done` *(2026-06-06, PR #33)* `self-promoted`
 Surface: MCP/correctness. `roost/mcp.py` defined `kind` enum as `["claude","codex","docker"]`; `"auto"` was absent. Captain agents calling `roost_submit` with `kind: auto` were rejected by MCP schema validation before reaching the server.
 Done-when: `kind` enum includes `"auto"` with description; INTEGRATIONS.md updated; test added; pytest green.
+
+### R28. INTEGRATIONS.md MCP tool table missing 6 of 16 tools — `open` `self-promoted`
+Surface: docs. A6 survey cycle #4 (judge-approved, fast-tracked per protocol). `docs/INTEGRATIONS.md` tool table lists 9 tools; `roost/mcp.py` TOOL_IMPL defines 16. Missing: `stage_file`, `send_file`, `fetch_file`, `list_staged`, `roost_schedule`, `roost_wait` (collapsed into another row). File transfer and scheduling are invisible to new MCP users.
+Done-when: tool table contains every tool in TOOL_IMPL with one-line descriptions matching their mcp.py docstrings; re-verify against current master (R27 already touched the roost_submit row); pytest green (docs-drift ratchet stays 0).
+
+### R29. `roost history` and `roost prune-workers` undocumented — `open` `self-promoted`
+Surface: docs. A6 survey cycle #4 (judge-approved, fast-tracked per protocol). Both commands fully implemented (cli.py:1916, cli.py:1029) but absent from README.md's "Inspect & control runs" table and docs/INTEGRATIONS.md. `roost history --failed` is the natural "what went wrong this week" entry point and no user can discover it.
+Done-when: README.md inspect/control table includes `roost history [--failed]` and `roost prune-workers`; INTEGRATIONS.md CLI section mentions `roost history`; pytest green (docs-drift ratchet stays 0).
 
 ### R21. Make presigned blob PUT single-use and race-safe — `done` *(2026-06-07, PR #30)* `self-promoted`
 Surface: backend/security. A1 hunt #2 reproduced that a presigned `put_url`
@@ -192,8 +200,6 @@ first iteration on that ratchet measures and records it here (no code changes).
 <<<<<<< Updated upstream
 =======
 >>>>>>> Stashed changes
-- **A6 (cycle #4, judge-approved — promote without re-judging in cycle #5):** INTEGRATIONS.md tool table documents 9 of 16 MCP tools — `stage_file`, `send_file`, `fetch_file`, `list_staged`, `roost_schedule`, `roost_wait` are invisible to new users
-- **A6 (cycle #4, judge-approved — promote without re-judging in cycle #5):** `roost history` and `roost prune-workers` are implemented (cli.py:1916, :1029) but absent from README.md and INTEGRATIONS.md
 - **A6 (cycle #4, unblocked from Proposed):** Mobile one-shot publish parity — server landed with R7 (PR #15); just needs API.md §6 + iOS/Android decode layers (no server changes)
 - **A6 (cycle #4, unblocked from Proposed):** Version drift — `pyproject.toml` says `0.1.0`, server self-reports `0.2.0`; single-source via `importlib.metadata`
 - **A1 (cycle #4 hunt #3, repro in tests/test_judge_r4_bugs.py):** `_oneshot_agent` corrupts bwrap argv when inserting `--append-system-prompt` — inserts at `argv[:3]` (inside bwrap flags) instead of finding the `claude` position

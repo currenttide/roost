@@ -5,48 +5,6 @@ Entries are written by the loop; humans read, never need to edit.
 
 ---
 
-## 2026-06-07T04:56:16Z — R25: fix _running/_active leak when run_job is cancelled
-- Verdict: shipped
-- Branch/PR: loop/r25-running-active-leak / https://github.com/currenttide/roost/pull/35
-- What changed: Wrapped the entire body of `run_job` after `self._running += 1` in a
-  `try/finally` block. The `finally` is the single cleanup point: `self._active.pop(job_id, None)`
-  and `self._running = max(0, self._running - 1)`. Removed the three formerly-separate
-  explicit cleanup sites (build_command failure, spawn failure, cancelled/lease_lost, and
-  cancelled-during-verify paths) — none of them touched `_running`/`_active` anymore.
-  The `_active.pop` in the normal completion path (before `_post_event`) is retained and
-  the finally's second pop is a safe no-op. Added `test_bug1_running_and_active_not_leaked_on_cancellation`
-  in `tests/test_worker.py` which creates a job task, cancels it mid-`process.wait()`, and
-  asserts both counters are clean afterward.
-- Evidence:
-  - `pytest tests/test_worker.py::test_bug1_running_and_active_not_leaked_on_cancellation -v` → PASSED
-  - `python -m pytest -q` → 541 passed in 16.46s
-- Judge: claude-sonnet-4-6 — APPROVE. "Fix is correct and minimal. No double-decrement
-  possible — the only decrement is in the finally block. _active.pop double-call is safe
-  (idempotent). The test is a genuine reproducer: _HangingProcess.wait() uses asyncio.sleep(9999)
-  so CancelledError propagates through a real awaitable. Verified no existing tests deleted."
-- Models: implementer claude-opus-4-8, judge claude-sonnet-4-6
-
----
-
-## 2026-06-06 — R26: broaden OSError catch in run_job spawn handler
-- Verdict: shipped
-- Branch/PR: loop/r26-oserror-escape / https://github.com/currenttide/roost/pull/33
-- What changed: `except (FileNotFoundError, PermissionError)` → `except OSError` in
-  `roost/worker.py` at the `asyncio.create_subprocess_exec` call site (one line).
-  Added `test_bug4_other_oserror_does_not_escape_run_job` in `tests/test_worker.py`
-  which injects `OSError(errno.EMFILE, "Too many open files")` and verifies the error
-  is caught, a `type="failed"` event is posted with the OS message, and `_running` is
-  decremented back to its pre-call value.
-- Evidence:
-  - `pytest tests/test_worker.py::test_bug4_other_oserror_does_not_escape_run_job -v` → PASSED
-  - `python -m pytest -q` → 539 passed in 16.39s
-- Judge: claude-sonnet-4-6 — APPROVE. "The change is correct and the motivation is
-  sound. OSError is the documented base class for all OS-level failures from
-  asyncio.create_subprocess_exec. Catching it here is the right level of specificity.
-  Test quality is high."
-
----
-
 ## 2026-06-05 — pre-loop: repo truth pass + backlog audit (interactive session)
 - Verdict: shipped (uncommitted, on feat/agent-substrate)
 - Branch/PR: feat/agent-substrate / - (working tree, user reviewing)
@@ -851,3 +809,52 @@ Entries are written by the loop; humans read, never need to edit.
 - Notes: Promoted from Proposed (A6 cycle #4, judge-pre-approved). Fix was purely additive —
   no server changes required since the server already handled `kind: auto`; the gap was
   only at the MCP schema validation layer.
+
+## 2026-06-06 ~22:00 UTC — R26: broaden OSError catch in run_job spawn handler
+- Verdict: shipped
+- Branch/PR: loop/r26-oserror-escape / https://github.com/currenttide/roost/pull/34
+- What changed: `except (FileNotFoundError, PermissionError)` → `except OSError` in
+  `roost/worker.py` at the `asyncio.create_subprocess_exec` call site (one line).
+  Added `test_bug4_other_oserror_does_not_escape_run_job` in `tests/test_worker.py`
+  which injects `OSError(errno.EMFILE, "Too many open files")` and verifies the error
+  is caught, a `type="failed"` event is posted with the OS message, and `_running` is
+  decremented back to its pre-call value.
+- Evidence:
+  - `pytest tests/test_worker.py::test_bug4_other_oserror_does_not_escape_run_job -v` → PASSED
+  - `python -m pytest -q` → 539 passed in 16.39s
+- Judge: approve (round 1) — "The change is correct and the motivation is sound.
+  OSError is the documented base class for all OS-level failures from
+  asyncio.create_subprocess_exec. Catching it here is the right level of specificity.
+  Test quality is high."
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6
+- Notes: shipped from the first PARALLEL iteration (R25+R26+R27 dispatched concurrently
+  in isolated worktrees per the updated protocol). Entry relocated from journal top to
+  chronological position by the orchestrator; PR number corrected (#34, agent wrote #33).
+
+## 2026-06-07 ~05:00 UTC — R25: fix _running/_active leak when run_job is cancelled
+- Verdict: shipped
+- Branch/PR: loop/r25-running-active-leak / https://github.com/currenttide/roost/pull/35
+- What changed: Wrapped the entire body of `run_job` after `self._running += 1` in a
+  `try/finally` block. The `finally` is the single cleanup point: `self._active.pop(job_id, None)`
+  and `self._running = max(0, self._running - 1)`. Removed the three formerly-separate
+  explicit cleanup sites (build_command failure, spawn failure, cancelled/lease_lost, and
+  cancelled-during-verify paths) — none of them touched `_running`/`_active` anymore.
+  The `_active.pop` in the normal completion path (before `_post_event`) is retained and
+  the finally's second pop is a safe no-op. Added `test_bug1_running_and_active_not_leaked_on_cancellation`
+  in `tests/test_worker.py` which creates a job task, cancels it mid-`process.wait()`, and
+  asserts both counters are clean afterward.
+- Evidence:
+  - `pytest tests/test_worker.py::test_bug1_running_and_active_not_leaked_on_cancellation -v` → PASSED
+  - `python -m pytest -q` → 541 passed in 16.46s
+- Judge: approve (round 1) — "Fix is correct and minimal. No double-decrement
+  possible — the only decrement is in the finally block. _active.pop double-call is safe
+  (idempotent). The test is a genuine reproducer: _HangingProcess.wait() uses asyncio.sleep(9999)
+  so CancelledError propagates through a real awaitable. Verified no existing tests deleted."
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6
+- Notes: last of the first parallel iteration (R25+R26+R27) — all three shipped, judged,
+  and auto-merged. Combined master verified green by the orchestrator: 541 passed.
+  Parallel-iteration learnings journaled: (1) worktree agents must leave BACKLOG/JOURNAL
+  edits to the orchestrator — three-way bookkeeping collisions cost more than they save;
+  (2) journal entries go at the END (two agents prepended at the top); (3) completion
+  notifications drop the orchestrator shell inside the agent worktree — cd back before
+  git operations.
