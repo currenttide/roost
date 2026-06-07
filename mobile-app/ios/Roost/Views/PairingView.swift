@@ -43,6 +43,21 @@ struct PairingView: View {
                 }
                 .padding(.horizontal)
 
+                // R83: while contacting, tell the user WHAT the spinner is doing
+                // (which host) and give them a way out instead of a silent ~30 s wait.
+                if let caption = store.caption {
+                    VStack(spacing: 8) {
+                        Text(caption)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                        Button("Cancel") { store.cancel() }
+                            .font(.footnote)
+                            .accessibilityIdentifier("pair-cancel")
+                    }
+                    .padding(.horizontal)
+                }
+
                 if let error = store.error {
                     Text(error)
                         .font(.footnote)

@@ -86,10 +86,13 @@ struct ApiClient {
 
     // MARK: Endpoints (only those in API.md)
 
-    /// Unauthenticated reachability probe.
-    static func healthz(baseURL: URL, session: URLSession = .shared) async throws -> Healthz {
+    /// Unauthenticated reachability probe. `timeout` is the per-request deadline;
+    /// the pairing flow passes a short one (`Self.pairingProbeSession`) so a dead
+    /// host fails fast instead of the old ~30 s silent wait (R83).
+    static func healthz(baseURL: URL, session: URLSession = .shared,
+                        timeout: TimeInterval = 8) async throws -> Healthz {
         var req = URLRequest(url: baseURL.appendingPathComponent("healthz"))
-        req.timeoutInterval = 8
+        req.timeoutInterval = timeout
         let data: Data, resp: URLResponse
         do { (data, resp) = try await session.data(for: req) }
         catch { throw ApiError.transport(error.localizedDescription) }
@@ -97,6 +100,36 @@ struct ApiClient {
         else { throw ApiError.transport("healthz unreachable") }
         do { return try JSONDecoder().decode(Healthz.self, from: data) }
         catch { throw ApiError.transport("healthz decode") }
+    }
+
+    /// Short, fail-fast timeout for the *pairing* reachability probe (R83). The
+    /// normal app/SSE session (`AppState.makeClient`) keeps its long-lived
+    /// timeouts — log streams stay open for minutes — so the short deadline is
+    /// scoped to this one throwaway probe and never touches steady-state traffic.
+    ///
+    /// 5 s: a control plane on the same LAN answers `/healthz` in tens of ms; a
+    /// dead host on-network (the R83 case) is detectable in well under 5 s, and a
+    /// human typing on a phone reads a ~5 s "couldn't reach it" as snappy, not
+    /// broken — whereas the old ~30 s read as a hang. `waitsForConnectivity`
+    /// stays false (the default) so an unreachable host fails at the deadline
+    /// rather than parking the request until the network changes.
+    static let pairingProbeTimeout: TimeInterval = 5
+
+    /// A dedicated session for the pairing probe with the short deadline baked in
+    /// at the config level (belt-and-suspenders with the per-request timeout) and
+    /// connectivity-waiting explicitly off, so a dead host can never hang it.
+    static func makePairingProbeSession() -> URLSession {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = pairingProbeTimeout
+        config.timeoutIntervalForResource = pairingProbeTimeout
+        #if !canImport(FoundationNetworking)
+        // Apple platforms only: keep connectivity-waiting off (its default) so an
+        // unreachable host fails at the deadline rather than parking the request
+        // until the network changes. On Linux's FoundationNetworking this property
+        // is get-only (and already false), so we leave it alone there.
+        config.waitsForConnectivity = false
+        #endif
+        return URLSession(configuration: config)
     }
 
     func derived(limit: Int = 40) async throws -> Derived {
