@@ -27,7 +27,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
-from typing import Any, AsyncIterator, Optional
+from typing import Any, AsyncIterator, Optional, Union
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import (
@@ -612,7 +612,42 @@ def _resolve_rate(
 def _goal_text(job: dict) -> str:
     spec = job.get("spec") or {}
     g = spec.get("task") or spec.get("intent") or spec.get("command") or ""
-    return (g if isinstance(g, str) else " ".join(g))[:140]
+    # Serializer defense (R70): the §2 run row documents `goal` as a STRING, and
+    # /derived is polled by mobile every 2s — a single un-renderable row 500s the
+    # WHOLE dashboard for every job. `command` is now typed `str | list[str]` at
+    # the door (JobSubmit), but rows already in the DB from before this tightening
+    # (or any future shape drift) must still render. Coerce here so this never
+    # raises: a list renders as space-joined elements (an argv reads naturally as
+    # `git clone …`, not the `"['git', 'clone', …]"` you'd get from str(list)),
+    # and any other type degrades to its str() rather than crashing the slice.
+    if isinstance(g, str):
+        text = g
+    elif isinstance(g, (list, tuple)):
+        text = " ".join(str(x) for x in g)
+    else:
+        text = str(g)
+    return text[:140]
+
+
+def _result_text(res: dict, job: dict) -> str:
+    """Serializer defense (R70) for the run row's `result` display field.
+
+    §2 documents `result` as a STRING. The honest worker always coerces its
+    `output` to str (worker.py), but the worker event plane types `result` as
+    `Any` and DOES NOT enforce that — a non-conformant worker can report
+    `result: {"output": {...}}`, which the server stores verbatim. The defense
+    lives HERE, at read time, rather than as strict typing on JobEvent: a
+    worker's report must never be dropped over a shape nit (the worker plane is
+    lower-trust-but-internal, and a rejected terminal event would strand a
+    finished job). Coerce so /derived — polled by mobile every 2s — never raises
+    on a structured output: slicing a dict/list/etc. would otherwise 500 the
+    whole dashboard for every job."""
+    # Same fallthrough as the original `res.get("output") or job.get("error") or ""`
+    # (a falsy output yields the error text); only the final slice is now str-safe.
+    out = res.get("output") or job.get("error") or ""
+    if not isinstance(out, str):
+        out = str(out)
+    return out[:240]
 
 
 # Phase markers the worker stamps into `last_activity` via a `progress` event when
@@ -797,7 +832,7 @@ def _derive_run(
         "worker": job.get("worker_id"),
         "verified": res.get("verified"),
         "evidence": res.get("evidence"),
-        "result": (res.get("output") or job.get("error") or "")[:240],
+        "result": _result_text(res, job),
         "diagnosis": job.get("diagnosis"),
         "last_activity": job.get("last_activity"),
         "idle_sec": job.get("idle_sec"),
@@ -2395,7 +2430,16 @@ def _prune_logs(db_path: Path, max_age_sec: float, max_rows_per_job: int) -> int
 class JobSubmit(BaseModel):
     intent: Optional[str] = None
     task: Optional[str] = None  # kind: auto — plain-language task; the worker self-assesses
-    command: Optional[Any] = None  # str | list[str]
+    # Submit-side tightening (R70): `command` is `str | list[str]` everywhere it
+    # is legitimately produced (CLI `roost exec` joins to a str; MCP roost_exec →
+    # str; roost_submit's schema documents "string or array"; examples/*.yaml are
+    # strings) and CONSUMED (worker.build_command + _build_docker_argv both accept
+    # only str/list and raise on anything else). Nothing legitimately sends a
+    # list-of-non-strings or a dict, so we reject garbage (e.g. `[1,2,3]`) at the
+    # door with a 422 instead of merely surviving it downstream. This is the FIRST
+    # of the two R70 layers; _goal_text's coercion is the second, defending rows
+    # already in the DB from before this tightening / any future drift.
+    command: Optional[Union[str, list[str]]] = None
     args: Optional[list[str]] = None
     cwd: Optional[str] = None
     env: Optional[dict[str, str]] = None
