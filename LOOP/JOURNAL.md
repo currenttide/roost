@@ -1147,3 +1147,53 @@ Entries are written by the loop; humans read, never need to edit.
 - Notes: iteration #5 slot 2. Design choices documented in PR (single notify_url
   captures host+topic; dual payload). R38 (interactive input) still in flight —
   last Ranked item; replenishment cycle #7 follows its landing.
+
+## 2026-06-07 ~00:20 UTC — R38: interactive follow-up to running agent jobs
+- Verdict: shipped
+- Branch/PR: loop/r38-interactive-input / https://github.com/currenttide/roost/pull/49 (merged 6d26a6e)
+- What changed: the v2 headline. Durable `job_inputs` queue (V14 migration) with
+  three honest states: queued → delivered (bytes written to live process stdin) or
+  dropped (recorded reason). INVESTIGATION FIRST: every job spawned stdin=DEVNULL
+  (claude -p hangs on open TTY-less stdin) — so the honest split: kind:command now
+  spawns stdin=PIPE and gets LIVE delivery; claude/auto/codex/docker are marked
+  dropped with explicit INPUT_DELIVERY_UNSUPPORTED (one-shot stdin-closed agent CLI;
+  docker without -i) — no faked capability. CP: POST /jobs/{id}/input (client tokens;
+  409 on terminal) + GET inputs; heartbeat additively reports owned jobs with pending
+  input; worker-plane fetch + input-ack (owner-scoped, idempotent). CLI: roost send
+  [--wait] + roost status queued/delivered/dropped counts. Documented in README,
+  API.md §4, in code.
+- Evidence:
+  - `python -m pytest -q` → 615 passed (+25)
+  - live smoke: real worker; `roost send <job> "..." --wait` on a running
+    `read l; echo GOT:$l` job → input_queued → delivered to stdin → GOT:<text> →
+    succeeded; dropped path verified live against a real docker job
+  - judge ran its OWN live smoke (GOT:judge-test-input reached the process)
+- Judge: approve (round 1)
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only)
+- Notes: iteration #5 COMPLETE — R36 #47, R37 #48, R38 #49; master 615. Mid-flight
+  rebase over siblings resolved one additive-constant conflict. RANKED DRY →
+  replenishment cycle #7 this turn.
+
+## 2026-06-07 ~00:25 UTC — Replenishment cycle #7 (production-readiness slate)
+- Verdict: shipped (slate promoted; dispatch follows)
+- Branch/PR: direct to master (bookkeeping)
+- What changed: Ranked refilled with 3 feature/production items on loop judgment
+  (Tier B authority per the 2026-06-06 standing direction): R39 `roost backup`
+  (online SQLite backup + DEPLOY.md restore — north star #2 recoverable state),
+  R40 mobile schedule parity (R8's verb reaches phones — north star #3, proven R34
+  pattern), R41 GPU detection failed vs absent (operability/placement truthfulness).
+  Sources: A4 journaled debts + the standing Proposed list, production lens. Also:
+  "drop cred_hash on revoke" tagged security-session (credential lifecycle belongs
+  in the dedicated session, not this loop). Each item gets the two-phase judge
+  (gate check pre-implementation, diff review post) per the R32 precedent.
+- Evidence: survey was Proposed-list + journal-debt review (cheap sources sufficed;
+  A1 captain/steward hunt deferred to cycle #8 — three strong feature items already
+  in hand and the standing direction prioritizes features).
+- Judge: per-item two-phase judging delegated to the implementing agents' judges
+  (slate-level pre-approval superseded by Tier-B loop-judgment authority; every PR
+  still judge-gated).
+- Models: orchestrator claude-opus-4-8
+- Notes: remaining Proposed after promotions: cost-estimation pricing, narration
+  min_interval, MCP docstring examples, verify.py e2e coverage, publish UI wiring
+  (device-heavy), R37 client push wiring (device work), CLI --version (tiny, A6
+  fodder for cycle #8), mac follow-ups, lease-expiry grace analog question.
