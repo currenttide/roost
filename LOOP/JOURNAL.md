@@ -1456,3 +1456,25 @@ Entries are written by the loop; humans read, never need to edit.
   fully consumed. Cycle #11 slate: R50 iOS publish UI (Mac-node evidence path,
   honest cap if unreachable), R51 verify.py e2e (trust-loop coverage), R52
   lease-expiry grace analog (repro-or-clear, closes R19's filed question).
+
+## 2026-06-07 ~05:10 UTC — R52: lease-expiry grace analog — cleared (fast-retry is correct)
+- Verdict: shipped (outcome b — current behavior defended, documented, regression-locked)
+- Branch/PR: loop/r52-lease-grace-analog / https://github.com/currenttide/roost/pull/62 (merged feaf4cc)
+- What changed: docs-in-code + one test; NO behavior change. SEMANTICS DECIDED:
+  fast-retry, deliberately the OPPOSITE of R19's decline fix. A decline is a polite
+  instantaneous "not me" on a job that never ran → re-shop for fit (R19). A lease
+  expiry is a real failure on an already-placed job after ≥60s of silence — the
+  fit metric is itself stale, and recovery should prioritize running again fast
+  over re-shopping; liveness is re-checked by the next attempt's lease+heartbeat,
+  flapping bounded by max_attempts. Empirically confirmed both halves. Comment at
+  the requeue site + test_lease_expiry_requeue_is_fast_retry_not_fresh_grace
+  pinning the asymmetry against future "make it symmetric" churn.
+- Evidence:
+  - `python -m pytest -q` → 653 passed (+1)
+- Judge: approve — adversarially built the strongest bad-outcome scenario
+  (fast-poller stealing a flapping job's last attempt from a recovered better-fit
+  worker), found it worse-but-bounded and explicitly acknowledged in the comment;
+  verified every claim against file:line
+- Models: investigator claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only)
+- Notes: iteration #10 slot 3. R19's filed question is closed. R50 (iOS UI + Mac
+  node) and R51 (verify e2e) in flight.

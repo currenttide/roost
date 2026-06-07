@@ -165,7 +165,7 @@ Done-when: publish screen wired into the iOS app using the existing RoostKit cal
 Surface: tests. A2: the trust loop is the product's core promise; verify.py sits at 87% with the verdict path under-exercised end-to-end (hunt #4 cleared parse_verdict unit-level; e2e through run_job's verify phase with a stubbed verifier process is the gap).
 Done-when: e2e tests drive run_job's verify/self-heal phase with stubbed subprocess(es): verify-pass → succeeded; verify-fail → self-heal attempt(s) → outcome; verifier crash/timeout → documented degradation; budget-exhausted skip path; verify.py + the worker verify-phase branches measurably up, no module down; pytest green.
 
-### R52. Lease-expiry grace analog — investigate, repro-or-clear — `open` `self-promoted`
+### R52. Lease-expiry grace analog — investigate, repro-or-clear — `done (cleared)` *(2026-06-07, PR #62 — fast-retry semantics documented + regression-locked)* `self-promoted`
 Surface: backend/design-question. R19 restarted the placement-grace window for declines only and filed the analog question: should a SWEEPER requeue (lease expiry — a real failure) also restart it? Investigate the actual competitive-placement behavior after a lease-expiry requeue on current code; decide with evidence (R43 pattern): if the current behavior produces a concrete bad outcome (e.g. anti-starvation override permanently armed after one expiry, starving competitive placement), repro it and fix; if the current behavior is defensible, document the rationale in code and close `invalid` with the analysis.
 Done-when: either repro+fix+tests+pytest green, or a judge-verified refutation documented in a code comment at the requeue site; the Proposed question closes either way.
 
