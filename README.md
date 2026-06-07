@@ -270,6 +270,13 @@ plus optional soft `prefer: { worker: "<id>" }`, or a hard `target: "<worker id|
 pins a job to exactly one worker (it stays queued until that worker is free). Runnable specs
 live in [`examples/`](examples/).
 
+**Budgets & runtime caps:** `budget.max_wallclock_min`/`_sec` and `max_tokens` are
+enforced by the worker. A job that sets **no** wallclock budget doesn't run forever —
+a per-kind default cap applies (`command` 120 min, `claude`/`auto` 240 min, `docker`
+360 min) and a capped kill reports `default_runtime_cap_exceeded` (distinct from
+`wallclock_exceeded`). Override per worker via the policy key `default_wallclock_min`
+(a number, or `{kind: minutes}`; `0` opts a worker out of default caps entirely).
+
 **Inspect & control runs:**
 
 | | |

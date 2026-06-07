@@ -128,6 +128,16 @@ Response = full job object; navigate to its `id` immediately. Job objects contai
 `stream: "event"` → `data` is lifecycle JSON (`{"type": "started"|"succeeded"|…}`);
 render as a subtle divider ("started", "succeeded"), or skip unparseable ones.
 
+### Log bounds (server-enforced; transcripts can cap)
+
+- One log line ≤ **64 KiB**; the worker drops longer lines with an
+  `oversized output line dropped…` event divider in their place.
+- A job's stdout/stderr rows cap at **5000** mid-run (and a retention sweep
+  prunes old rows after ~24 h) — a very chatty job's transcript may be
+  partial. Lifecycle `event` rows are **exempt** from the row cap, so the
+  terminal divider ("succeeded"/"failed") always lands. Don't treat a capped
+  transcript as a stalled job — `state`/`health` stay authoritative.
+
 ## 5. Live stream — `GET /jobs/{id}/stream?since=<seq>`
 
 `text/event-stream`; transcript fixture: `stream_succeeded.sse.txt`. Events:

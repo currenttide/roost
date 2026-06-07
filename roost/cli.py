@@ -1437,9 +1437,11 @@ def publish(ctx: click.Context, directory: Optional[str], name: Optional[str],
             list_: bool, unpublish_slug: Optional[str]) -> None:
     """Publish a built directory as a live site on your own control plane.
 
-    One command, end to end: tars the directory, uploads it via the blob store,
-    and the CP extracts it — live at <cp-url>/pub/<slug>/ immediately. Rebuild
-    and re-run to republish (same name replaces the site).
+    One command, end to end: tars the directory and POSTs the bundle straight
+    to the CP in one transactional call (nothing staged, nothing to dangle),
+    which extracts it — live at <cp-url>/pub/<slug>/ immediately. Rebuild and
+    re-run to republish (same name replaces the site). Older control planes
+    without one-shot publish get the two-step blob-store flow automatically.
     """
     url, _, _ = _resolve(ctx)
     with _ctx_client(ctx) as c:
