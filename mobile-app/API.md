@@ -115,6 +115,18 @@ Response = full job object; navigate to its `id` immediately. Job objects contai
 
 ## 4. Session view
 
+> **Job-id prefix lookup (additive, read paths only).** The READ routes here —
+> `GET /jobs/{id}`, `…/derived`, `…/logs`, `…/tree`, `…/inputs`, `…/stream` —
+> resolve `{id}` as an **unambiguous prefix** of ≥ 6 chars as well as the full
+> 12-char id, so a copy-pasted short id resolves server-side. A **full id is itself
+> an unambiguous prefix**, so apps that always send full ids are unaffected — this
+> is purely additive. New error shapes (same `{"detail": …}` envelope as §1):
+> **400** if the prefix is under 6 chars, **409** if it matches more than one job
+> (the `detail` text lists the colliding ids). The **write** routes
+> `DELETE /jobs/{id}` and `POST /jobs/{id}/input` deliberately do **not**
+> prefix-resolve (a fuzzy match to the wrong running job is a footgun) — send the
+> full id there; a prefix is a plain 404 (input) / 409 (cancel).
+
 - Detail: `GET /jobs/{id}` (fixtures `job_detail_{queued,running,succeeded}.json`).
 - One-line story for the header: `GET /jobs/{id}/derived` (fixture `job_derived_running.json`) — same run shape as §2.
 - Catch-up: `GET /jobs/{id}/logs?since=<seq>&limit=1000` → fixture `job_logs.json`:

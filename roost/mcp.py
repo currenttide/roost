@@ -194,12 +194,16 @@ TOOLS: list[dict[str, Any]] = [
             "stuck), `queued_sec`, and `capable_workers` (online workers that satisfy "
             "the job's requires — 0 on a queued job means it can NEVER be placed as "
             "specified). Interpret these yourself; the control plane reports facts, "
-            "not verdicts. Example: {\"job_id\": \"<job_id>\"} → "
+            "not verdicts. `job_id` may be an unambiguous id PREFIX (≥6 chars) as "
+            "well as the full id. Example: {\"job_id\": \"<job_id>\"} → "
             "{state: running, last_activity, idle_sec, capable_workers}."
         ),
         "inputSchema": {
             "type": "object",
-            "properties": {"job_id": {"type": "string"}},
+            "properties": {"job_id": {
+                "type": "string",
+                "description": "Full job id, or an unambiguous id prefix (≥6 chars).",
+            }},
             "required": ["job_id"],
         },
     },
@@ -215,7 +219,10 @@ TOOLS: list[dict[str, Any]] = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "job_id": {"type": "string"},
+                "job_id": {
+                    "type": "string",
+                    "description": "Full job id, or an unambiguous id prefix (≥6 chars).",
+                },
                 "timeout_sec": {"type": "number", "default": 600},
                 "poll_interval_sec": {"type": "number", "default": 1.0},
             },
@@ -236,7 +243,10 @@ TOOLS: list[dict[str, Any]] = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "job_id": {"type": "string"},
+                "job_id": {
+                    "type": "string",
+                    "description": "Full job id, or an unambiguous id prefix (≥6 chars).",
+                },
                 "since": {"type": "integer", "default": 0},
                 "limit": {"type": "integer", "default": 500},
             },
