@@ -501,8 +501,79 @@ def _annotate_liveness(db_path: Path, jobs: list[dict]) -> list[dict]:
 
 STUCK_AFTER = 150.0          # a running job idle this long is a stuck-suspect
 WAITING_AFTER = 90.0         # a queued (but placeable) job waiting this long
-AGENT_SESSION_BASE_USD = 0.018   # ~fixed per-agent-session floor (cached system prompt)
-COST_PER_MTOK_USD = 6.0          # rough marginal $/Mtok on fresh tokens_used (approximate)
+
+# Cost model (R44). The estimate is a near-fixed per-session floor + a small marginal
+# on fresh `tokens_used` (see `_job_cost`). Pricing is per-model: the table maps a
+# model NAME or SUBSTRING → {base_usd, per_mtok_usd}. The `default` entry is the
+# fallback for any job whose model matches no key (and for the common no-model case).
+# Operators override the whole table via the `ROOST_PRICING` env var (a JSON object of
+# the same shape); zero config keeps the numbers below — i.e. today's estimate exactly.
+PRICING_DEFAULT_KEY = "default"
+DEFAULT_PRICING: dict[str, dict[str, float]] = {
+    PRICING_DEFAULT_KEY: {"base_usd": 0.018, "per_mtok_usd": 6.0},
+}
+# Back-compat aliases for the two former module constants (some call sites / tests may
+# still reference them); they remain the documented zero-config fallback.
+AGENT_SESSION_BASE_USD = DEFAULT_PRICING[PRICING_DEFAULT_KEY]["base_usd"]
+COST_PER_MTOK_USD = DEFAULT_PRICING[PRICING_DEFAULT_KEY]["per_mtok_usd"]
+
+
+def _load_pricing(raw: Optional[str]) -> dict[str, dict[str, float]]:
+    """Parse the `ROOST_PRICING` env value (JSON object) into a pricing table,
+    layered over `DEFAULT_PRICING` so a partial override still has a `default`.
+
+    Tolerant by design: unset/blank/garbage JSON, or a non-object, falls back to
+    `DEFAULT_PRICING` unchanged — a bad pricing config must never break the CP or
+    silently zero out cost estimates. Per-entry, a missing/garbage `base_usd` or
+    `per_mtok_usd` field inherits the default entry's value."""
+    table: dict[str, dict[str, float]] = {
+        k: dict(v) for k, v in DEFAULT_PRICING.items()
+    }
+    if not raw or not raw.strip():
+        return table
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return table
+    if not isinstance(parsed, dict):
+        return table
+    base = DEFAULT_PRICING[PRICING_DEFAULT_KEY]
+    for key, entry in parsed.items():
+        if not isinstance(key, str) or not isinstance(entry, dict):
+            continue
+        merged = dict(table.get(key, base))
+        for field in ("base_usd", "per_mtok_usd"):
+            if field in entry:
+                try:
+                    merged[field] = float(entry[field])
+                except (TypeError, ValueError):
+                    pass  # keep the inherited default for a garbage field
+        table[key] = merged
+    return table
+
+
+def _resolve_rate(
+    model: Optional[str], pricing: Optional[dict[str, dict[str, float]]]
+) -> dict[str, float]:
+    """Pick the {base_usd, per_mtok_usd} rate for `model` from `pricing`.
+
+    Matching: exact model name first, then the longest key that is a SUBSTRING of
+    the model (so `"sonnet"` matches `"claude-sonnet-4-6"`); the `default` key is
+    skipped during substring matching and used as the fallback. Unknown/None model
+    → the `default` entry, which (zero config) is today's fixed rate."""
+    table = pricing or DEFAULT_PRICING
+    default = table.get(PRICING_DEFAULT_KEY, DEFAULT_PRICING[PRICING_DEFAULT_KEY])
+    if not isinstance(model, str) or not model:
+        return default
+    if model in table:
+        return table[model]
+    best: Optional[str] = None
+    for key in table:
+        if key == PRICING_DEFAULT_KEY:
+            continue
+        if key and key in model and (best is None or len(key) > len(best)):
+            best = key
+    return table[best] if best is not None else default
 
 
 def _goal_text(job: dict) -> str:
@@ -555,13 +626,22 @@ def _job_health(job: dict) -> dict:
     return {"status": "running", "reason": (job.get("last_activity") or "running")[:160]}
 
 
-def _job_cost(job: dict) -> dict:
+def _job_cost(
+    job: dict, pricing: Optional[dict[str, dict[str, float]]] = None
+) -> dict:
     tok = int(job.get("tokens_used") or 0)
     # Rough $ estimate. tokens_used counts only fresh input+output (not the large
     # cached system-prompt reads that actually dominate an agent session's bill), so
     # a near-fixed per-session floor + a small marginal tracks reality far better than
     # a flat per-token rate. Measured ~$0.02 trivial → ~$0.05 multi-step on Sonnet.
-    est = round(AGENT_SESSION_BASE_USD + tok / 1_000_000 * COST_PER_MTOK_USD, 4) if tok else 0.0
+    # The rate is per-model (R44): the job's own model selects {base_usd, per_mtok_usd}
+    # from `pricing`, falling back to the `default` entry (today's fixed numbers) for an
+    # unknown/absent model. `pricing=None` → DEFAULT_PRICING, so the zero-config estimate
+    # is byte-identical to before. Model comes from the top-level column, then spec.
+    spec = job.get("spec") if isinstance(job.get("spec"), dict) else {}
+    model = job.get("model") or spec.get("model")
+    rate = _resolve_rate(model, pricing)
+    est = round(rate["base_usd"] + tok / 1_000_000 * rate["per_mtok_usd"], 4) if tok else 0.0
     out: dict[str, Any] = {"tokens_used": tok, "cost_est_usd": est}
     tb = job.get("tree_budget_tokens")
     if tb:
@@ -650,7 +730,9 @@ async def _post_notification(
         )
 
 
-def _derive_run(job: dict) -> dict:
+def _derive_run(
+    job: dict, pricing: Optional[dict[str, dict[str, float]]] = None
+) -> dict:
     """One job → the operator-meaningful 'story' fields (D0)."""
     res = job.get("result") if isinstance(job.get("result"), dict) else {}
     return {
@@ -669,7 +751,7 @@ def _derive_run(job: dict) -> dict:
         "queued_sec": job.get("queued_sec"),
         "capable_workers": job.get("capable_workers"),
         "decline_count": job.get("decline_count"),
-        "cost": _job_cost(job),
+        "cost": _job_cost(job, pricing),
         # agentic slots (D2 fills these; empty/deterministic for now)
         "narration": job.get("narration") or job.get("last_activity"),
         "progress": job.get("progress"),
@@ -2313,6 +2395,10 @@ def create_app(
         if notify_url is not None
         else os.environ.get("ROOST_NOTIFY_URL") or None
     )
+    # Per-model cost pricing (R44). `ROOST_PRICING` is a JSON object mapping a model
+    # name/substring → {base_usd, per_mtok_usd}, layered over DEFAULT_PRICING. Unset or
+    # malformed → DEFAULT_PRICING (today's fixed numbers), so the estimate is unchanged.
+    pricing = _load_pricing(os.environ.get("ROOST_PRICING"))
     _init_db(db)
 
     @asynccontextmanager
@@ -2333,6 +2419,7 @@ def create_app(
     app.state.shared_token = shared_token
     app.state.publish_domain = publish_domain
     app.state.notify_url = notify_url
+    app.state.pricing = pricing
     # Hold strong refs to in-flight notify tasks so they aren't GC'd mid-flight
     # (asyncio only keeps weak refs to tasks). Discarded on completion.
     app.state.notify_tasks = set()
@@ -2665,7 +2752,7 @@ def create_app(
         jobs = await asyncio.to_thread(_list_jobs, db, None, None, None, limit)
         jobs = await asyncio.to_thread(_annotate_liveness, db, jobs)
         workers = await asyncio.to_thread(_list_workers, db)
-        runs = [_derive_run(j) for j in jobs]
+        runs = [_derive_run(j, app.state.pricing) for j in jobs]
         return {"generated_at": time.time(),
                 "fleet_verdict": _fleet_verdict(workers, runs),
                 "workers": workers, "runs": runs}
@@ -2676,7 +2763,7 @@ def create_app(
         if not job:
             raise HTTPException(404, "job not found")
         job = (await asyncio.to_thread(_annotate_liveness, db, [job]))[0]
-        return _derive_run(job)
+        return _derive_run(job, app.state.pricing)
 
     @app.get("/metrics", dependencies=[Depends(require_admin)])
     async def metrics_endpoint():

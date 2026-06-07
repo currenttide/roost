@@ -205,6 +205,12 @@ The panel, the terminal dashboard (`scripts/fleet`), and the MCP inbox all rende
 single `GET /derived` model, so they never disagree. Set `ROOST_NARRATE=1` on the control
 plane to add agentic per-job narration to the story.
 
+The `$` estimate uses a per-session floor plus a per-Mtok marginal on each job's fresh
+tokens (one rate ships by default). To price models differently, set `ROOST_PRICING` on the
+control plane to a JSON map of model name/substring → `{base_usd, per_mtok_usd}`; unknown
+models fall back to a `default` entry, and unset = today's numbers exactly. See
+[`docs/DEPLOY.md`](docs/DEPLOY.md#cost-estimation-pricing-per-model-optional).
+
 ### Metrics (Prometheus)
 
 The control plane exposes `GET /metrics` in Prometheus text exposition format

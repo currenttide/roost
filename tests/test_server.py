@@ -716,6 +716,91 @@ def test_job_cost_and_budget():
     assert c["tokens_used"] == 500_000 and c["cost_est_usd"] > 0 and c["budget_pct"] == 25.0
 
 
+def test_job_cost_zero_config_pins_todays_numbers():
+    # R44: zero-config (pricing=None) must be byte-identical to the pre-R44 estimate:
+    #   est = 0.018 (base) + tokens/1e6 * 6.0 (per-Mtok). These exact figures are the
+    #   contract every UI/log/history surface already shows — guard them.
+    assert server._job_cost({"tokens_used": 500_000})["cost_est_usd"] == 3.018
+    assert server._job_cost({"tokens_used": 1_000_000})["cost_est_usd"] == 6.018
+    assert server._job_cost({"tokens_used": 0})["cost_est_usd"] == 0.0
+    # …and unchanged whether or not a model is set, when there's no custom pricing.
+    assert server._job_cost({"tokens_used": 500_000, "model": "claude-sonnet-4-6"})[
+        "cost_est_usd"
+    ] == 3.018
+
+
+def test_job_cost_unknown_model_falls_back_to_default_rate():
+    # A model that matches no pricing key uses the `default` entry — i.e. today's rate.
+    table = server._load_pricing('{"haiku": {"base_usd": 0.005, "per_mtok_usd": 1.5}}')
+    assert server._job_cost({"tokens_used": 1_000_000, "model": "gpt-4o"}, table)[
+        "cost_est_usd"
+    ] == 6.018
+    # None / absent model also falls back to default.
+    assert server._job_cost({"tokens_used": 1_000_000}, table)["cost_est_usd"] == 6.018
+
+
+def test_job_cost_uses_jobs_actual_model():
+    # Per-model pricing: the job's own model selects its rate (substring match, so
+    # "haiku" matches "claude-haiku-4-5"); a different model gets the default rate.
+    table = server._load_pricing('{"haiku": {"base_usd": 0.005, "per_mtok_usd": 1.5}}')
+    assert server._job_cost({"tokens_used": 1_000_000, "model": "claude-haiku-4-5"}, table)[
+        "cost_est_usd"
+    ] == 1.505
+    assert server._job_cost({"tokens_used": 1_000_000, "model": "claude-sonnet-4-6"}, table)[
+        "cost_est_usd"
+    ] == 6.018
+    # Falls back to spec.model when the top-level column is absent.
+    assert server._job_cost(
+        {"tokens_used": 1_000_000, "spec": {"model": "claude-haiku-4-5"}}, table
+    )["cost_est_usd"] == 1.505
+
+
+def test_load_pricing_tolerates_garbage_and_merges_partials():
+    D = server.DEFAULT_PRICING
+    # Unset / blank / non-JSON / non-object → defaults, never an exception or empty table.
+    assert server._load_pricing(None) == D
+    assert server._load_pricing("   ") == D
+    assert server._load_pricing("not json {") == D
+    assert server._load_pricing("[1, 2, 3]") == D
+    # A partial entry inherits the missing field from the default rate.
+    part = server._load_pricing('{"opus": {"per_mtok_usd": 30}}')
+    assert part["opus"] == {"base_usd": 0.018, "per_mtok_usd": 30.0}
+    # The default entry itself is overridable (changes the unknown-model fallback).
+    od = server._load_pricing('{"default": {"base_usd": 0.02}}')
+    assert od["default"] == {"base_usd": 0.02, "per_mtok_usd": 6.0}
+    # A garbage field value is ignored (keeps the inherited default), not fatal.
+    g = server._load_pricing('{"haiku": {"per_mtok_usd": "cheap"}}')
+    assert g["haiku"] == {"base_usd": 0.018, "per_mtok_usd": 6.0}
+
+
+def test_resolve_rate_prefers_exact_then_longest_substring():
+    table = server._load_pricing(
+        '{"claude": {"per_mtok_usd": 5}, "claude-haiku": {"per_mtok_usd": 1}}'
+    )
+    # Longest matching substring wins over a shorter one.
+    assert server._resolve_rate("claude-haiku-4-5", table)["per_mtok_usd"] == 1.0
+    # A model matched only by the shorter key still resolves.
+    assert server._resolve_rate("claude-sonnet-4-6", table)["per_mtok_usd"] == 5.0
+    # Exact name beats substring.
+    exact = server._load_pricing('{"claude-haiku-4-5": {"per_mtok_usd": 9}, "haiku": {"per_mtok_usd": 1}}')
+    assert server._resolve_rate("claude-haiku-4-5", exact)["per_mtok_usd"] == 9.0
+
+
+def test_roost_pricing_env_reaches_app_state(tmp_path: Path, monkeypatch):
+    # End-to-end wiring: the ROOST_PRICING env var is parsed at create_app() time and
+    # stored on app.state.pricing, which the /derived endpoints pass into _job_cost.
+    monkeypatch.setenv(
+        "ROOST_PRICING", '{"haiku": {"base_usd": 0.005, "per_mtok_usd": 1.5}}'
+    )
+    app = server.create_app(db_path=tmp_path / "p.db", token=TOKEN, run_sweeper=False)
+    assert app.state.pricing["haiku"] == {"base_usd": 0.005, "per_mtok_usd": 1.5}
+    assert app.state.pricing["default"]["per_mtok_usd"] == 6.0  # default still present
+    # No env → defaults exactly (zero-config control plane is unchanged).
+    monkeypatch.delenv("ROOST_PRICING", raising=False)
+    app2 = server.create_app(db_path=tmp_path / "p2.db", token=TOKEN, run_sweeper=False)
+    assert app2.state.pricing == server.DEFAULT_PRICING
+
+
 def test_fleet_verdict_flags_problems_first():
     workers = [{"status": "idle"}, {"status": "busy"}]
     bad = server._derive_run({"id": "x", "state": "queued", "capable_workers": 0,

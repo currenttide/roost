@@ -201,3 +201,40 @@ credentials or logs.
 > tracked separately** — it isn't exercisable on the Linux test harness, so it
 > is out of scope for this server-side change. The CP side (config + the POST on
 > terminal states) is complete and tested here.
+
+## Cost estimation pricing (per-model, optional)
+
+Every run carries a rough `$` estimate (shown in the panel, `roost history`, and
+the mobile apps). The control plane computes it from a job's fresh-token count as
+`base_usd + tokens/1e6 × per_mtok_usd`. By default a single rate applies to all
+models (a per-session floor of **$0.018** plus **$6.00/Mtok**) — the figures
+that ship today.
+
+To price models differently (e.g. a cheaper rate for Haiku jobs, a higher one for
+Opus), set **`ROOST_PRICING`** on the CP to a JSON object mapping a model **name or
+substring** → `{base_usd, per_mtok_usd}`:
+
+```bash
+export ROOST_PRICING='{
+  "default": {"base_usd": 0.018, "per_mtok_usd": 6.0},
+  "haiku":   {"base_usd": 0.005, "per_mtok_usd": 1.5},
+  "opus":    {"base_usd": 0.030, "per_mtok_usd": 30.0}
+}'
+docker compose -f docker/stack.yml up -d --build control-plane
+```
+
+- **Matching:** a job's model is matched first by exact name, then by the *longest*
+  key that is a substring of it — so `"haiku"` matches `claude-haiku-4-5`, while
+  `"opus"` matches `claude-opus-4-1`. The job's model comes from its spec (`model`).
+- **Fallback:** any model that matches no key (and any job with no model) uses the
+  **`default`** entry. Omit `default` and the built-in rate above is used.
+- **Partial entries** inherit the default's missing field, so you can override just
+  `per_mtok_usd` and keep the standard floor.
+- **Unset / malformed `ROOST_PRICING` = zero behavior change** — a missing var,
+  bad JSON, or a non-object falls back to the built-in single rate (today's exact
+  numbers); a bad pricing config never breaks the CP or zeroes out estimates.
+
+The estimate is intentionally approximate: `tokens_used` counts only fresh
+input+output, not the cached system-prompt reads that dominate an agent session's
+bill, so a floor + small marginal tracks reality better than a flat per-token rate.
+Tune the rates to your account's actual pricing rather than expecting cent accuracy.
