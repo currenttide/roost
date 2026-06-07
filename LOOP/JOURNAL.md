@@ -1984,3 +1984,47 @@ Entries are written by the loop; humans read, never need to edit.
 - Models: hunter claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only)
 - Notes: iteration #21 complete. Deepening yield holds (hunts #5-#8: 5 bugs).
   Cycle #23 = R72 (bounded teardown). Long-idle counter stays 0.
+
+## 2026-06-07 ~21:20 UTC — R72: bounded docker teardown (hunt #8 consumed)
+- Verdict: shipped
+- Branch/PR: loop/r72-bounded-docker-teardown / https://github.com/currenttide/roost/pull/83 (merged d5c8e50)
+- What changed: DOCKER_TEARDOWN_TIMEOUT = 4.0 per CLI (kill, then rm -f —
+  worst case ~8s; rationale inline: by teardown the job is already dying and a
+  wedged daemon won't recover in-window; 20s would prolong every shutdown path
+  that funnels through _kill_active_job). On expiry: SIGKILL the stuck CLI
+  (unhaltable; post-kill reap returns immediately — the expiry path provably
+  cannot hang), emit a LOUD event naming the container with the literal
+  `docker kill roost-job-<id>` for the operator, continue to the next CLI.
+  Normal responsive-daemon path unchanged.
+- Evidence:
+  - `python -m pytest -q` → 823 passed (+3 promoted incl. a loud-message/
+    teardown-completes pin); repros went ~20s hang → ~8.2s pass;
+    LOOP/repro-a1-hunt8.py deleted
+- Judge: approve (round 1) — promoted tests + 17 existing docker tests + full
+  suite re-run; bounded-both-waits, expiry-can't-hang, message accuracy, and
+  normal-path preservation all verified
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only)
+- Notes: iteration #22 complete.
+
+## 2026-06-07 ~21:30 UTC — LONG-IDLE entered (pacing decision)
+- Verdict: idle (protocol pacing — not an end state)
+- Branch/PR: —
+- What changed: nothing — this entry records the decision. Every unit has been
+  hunted at least once (matcher/placement, blobs/publish, worker executors,
+  captain/steward/verify/watcher, server lifecycle, worker concurrency, mobile
+  contract, docker executor); hunts #5-#8 yielded 5 real bugs but the productive
+  pattern was "hunt freshly-changed code" and no fresh targets remain. Remaining
+  lenses (live systemd installs, chaos e2e, long-horizon clock math already
+  fuzzed 100k-fold) have low expected yield. Per protocol: don't manufacture
+  work; idle is a pause. WAKE BEHAVIOR: max-interval checks — repo changed
+  (human commits) → drift sweep + targeted hunt over the changes; unchanged →
+  no-op re-arm. Resume triggers: human commits, new Ranked items, or direction.
+- Session totals (2026-06-06 evening → 2026-06-07): 53 PRs merged (#31-#83),
+  tests 537 → 823, 19 bugs fixed (5 from hunting our own session's changes),
+  3 hypotheses refuted with regression guards, 16 features shipped, every
+  headline verb on every appropriate surface, branch coverage 63% → 71%+ with
+  six modules at 100%, docs-drift 0, zero open PRs, zero flaky tests.
+- Parked for the human: R22/R23 + cred_hash revocation (security session;
+  repros ready in LOOP/repro-a1-hunt2.py); mac-app schedule-create composer;
+  R37 device-only push transport; mac-app deeper verb scope (product call).
+- Models: orchestrator claude-opus-4-8
