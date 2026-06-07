@@ -922,6 +922,123 @@ def test_derive_run_shape():
     assert "cost" in r and "tokens_used" in r["cost"]
 
 
+# ---------- R70: /derived never 500s on a non-string goal/result field ----------
+#
+# Promoted from LOOP/repro-a1-hunt7.py (A1 hunt #7). One root cause, two surfaces:
+# `_goal_text` did `" ".join(spec.command)` and `_derive_run` sliced
+# `result.output[:240]` without proving str first, so a non-string command (a
+# pre-tightening mobile submit) or a structured worker `result.output` made the
+# mobile dashboard (`GET /derived`, polled every 2s) 500 — and because /derived
+# iterates the whole page, ONE poisoned row broke it for EVERY job.
+#
+# Two layers, both pinned here:
+#   - serializer defense (read-time): /derived renders ANY row already in the DB.
+#   - submit-side tightening: `JobSubmit.command` is now `str | list[str]`, so
+#     garbage (`[1,2,3]`) is rejected at the door (422). The worker event plane
+#     keeps `result: Any` (a worker report must never be dropped over a shape
+#     nit), so its defense is the read-time coercion alone.
+
+
+def test_derived_survives_poisoned_command_row_in_db():
+    """Serializer defense: a row whose stored `command` is a non-string (e.g. a
+    submit from BEFORE the door was tightened, or any future shape drift) must
+    still render through /derived — slicing/joining it must never 500 the page.
+    Injected via _insert_job (stores the spec verbatim) to model an at-rest row
+    that bypasses the submit-side type check."""
+    import tempfile
+    db = Path(tempfile.mkdtemp()) / "roost.db"
+    app = server.create_app(db_path=db, token=TOKEN, run_sweeper=False)
+    # A poisoned at-rest row: a list-of-ints command (what a pre-R70 mobile
+    # `POST /jobs` with command:[1,2,3] would have stored).
+    poisoned = server._insert_job(
+        db, {"kind": "command", "command": [1, 2, 3], "requires": {}})["id"]
+    # A normal job alongside it — proves the poison doesn't take the page down.
+    healthy = server._insert_job(
+        db, {"kind": "command", "command": "echo ok", "requires": {}})["id"]
+    with TestClient(app) as c:
+        c.headers.update({"Authorization": f"Bearer {TOKEN}"})
+        d = c.get("/derived")
+        assert d.status_code == 200, d.text  # the whole dashboard, not 500
+        runs = {r["run_id"]: r for r in d.json()["runs"]}
+        # §2 run shape: `goal`/`result` are strings, coerced not crashed.
+        assert isinstance(runs[poisoned]["goal"], str)
+        assert isinstance(runs[poisoned]["result"], str)
+        assert isinstance(runs[healthy]["goal"], str)
+        # The single-job session header (§4) must survive the same row too.
+        assert c.get(f"/jobs/{poisoned}/derived").status_code == 200
+
+
+def test_goal_text_renders_list_command_joined_not_reprd():
+    """A legit list[str] command must render as a readable space-joined string
+    (an argv reads like `git clone repo`), NOT as the ugly `"['git', ...]"` you
+    get from str(list). Pins the rendering contract for the accepted shape."""
+    assert server._goal_text({"spec": {"command": ["git", "clone", "repo"]}}) == "git clone repo"
+    # And the defensive coercion path for non-string elements is still join-style.
+    assert server._goal_text({"spec": {"command": [1, 2, 3]}}) == "1 2 3"
+    # _result_text coerces a structured output rather than crashing the slice.
+    assert isinstance(server._result_text({"output": {"summary": "done"}}, {}), str)
+
+
+def test_list_str_command_submits_and_renders_joined(client: TestClient):
+    """End-to-end for the ACCEPTED shape: a list[str] command is submitted (200)
+    and its /derived `goal` is the joined string, not a list repr."""
+    r = client.post("/jobs", json={"kind": "command", "command": ["git", "clone", "repo"]})
+    assert r.status_code == 200, r.text
+    jid = r.json()["id"]
+    run = next(x for x in client.get("/derived").json()["runs"] if x["run_id"] == jid)
+    assert run["goal"] == "git clone repo"
+
+
+@pytest.mark.parametrize("bad_command", [
+    [1, 2, 3],            # list of ints (the hunter's repro payload)
+    ["ok", 3],            # mixed list — one non-string element
+    {"cmd": "echo hi"},   # a dict
+    42,                   # a bare int
+])
+def test_garbage_command_shape_rejected_at_door(client: TestClient, bad_command):
+    """Submit-side tightening: `JobSubmit.command` is `str | list[str]`, so a
+    non-conforming shape is rejected with 422 (FastAPI validation) instead of
+    being accepted and only surviving downstream. Garbage is stopped at the door,
+    not stored. (Pydantic does NOT silently coerce these to strings — verified.)"""
+    r = client.post("/jobs", json={"kind": "command", "command": bad_command})
+    assert r.status_code == 422, (
+        f"command={bad_command!r} should be rejected as a non str/list[str] shape, "
+        f"got {r.status_code}: {r.text}"
+    )
+
+
+def test_structured_worker_result_output_does_not_500_the_dashboard(client: TestClient):
+    """Worker-plane surface (lower-trust-but-internal): a non-conformant worker
+    reporting `result: {"output": {...}}` via the event API is ACCEPTED (200) —
+    the worker plane keeps `result: Any` so a report is never dropped over a shape
+    nit — and /derived must coerce that structured output, not 500. The defense
+    here is read-time, not strict event typing."""
+    wid, cred = _enroll_worker(client, {"tools": ["python3"]})
+    wh = {"Authorization": f"Bearer {cred}"}
+    job = client.post(
+        "/jobs",
+        json={"kind": "command", "command": "cat", "requires": {"tools": ["python3"]}},
+    ).json()
+    job_id = job["id"]
+    lease = client.get(f"/workers/{wid}/poll", params={"timeout": 0}, headers=wh)
+    assert lease.status_code == 200, lease.text
+    attempt = lease.json()["attempt"]
+
+    ev = client.post(
+        f"/workers/{wid}/jobs/{job_id}/event",
+        json={"type": "succeeded", "attempt": attempt,
+              "result": {"output": {"summary": "done", "files": 3}, "verified": True}},
+        headers=wh,
+    )
+    assert ev.status_code == 200, ev.text  # the worker report is accepted, not dropped
+
+    assert client.get(f"/jobs/{job_id}").status_code == 200  # raw detail (no _derive_run)
+    d = client.get("/derived")
+    assert d.status_code == 200, d.text  # the dashboard survives the structured output
+    run = next(r for r in d.json()["runs"] if r["run_id"] == job_id)
+    assert isinstance(run["result"], str)
+
+
 # ---------- Audit fixes (C2/H6/M1/M6/L7) ----------
 
 
