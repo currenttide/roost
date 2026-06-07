@@ -3,7 +3,7 @@
     "level": "alert",
     "summary": "1 need attention \u2014 unplaceable: train on the gpu box"
   },
-  "generated_at": 1780862528.2278864,
+  "generated_at": 1780863998.5683541,
   "runs": [
     {
       "capable_workers": 1,
@@ -11,44 +11,14 @@
         "cost_est_usd": 0.0,
         "tokens_used": 0
       },
-      "created_at": 1780862528.2167447,
+      "created_at": 1780863998.5579615,
       "decline_count": 0,
       "diagnosis": null,
       "eta_sec": null,
       "evidence": null,
       "finished_at": null,
-      "goal": "python -V",
-      "health": {
-        "reason": "queued",
-        "status": "queued"
-      },
-      "idle_sec": null,
-      "kind": "docker",
-      "last_activity": null,
-      "narration": null,
-      "phase": "queued",
-      "progress": null,
-      "queued_sec": 0.0,
-      "result": "",
-      "root_job_id": "dfe16f720f32",
-      "run_id": "dfe16f720f32",
-      "state": "queued",
-      "verified": null,
-      "worker": null
-    },
-    {
-      "capable_workers": 1,
-      "cost": {
-        "cost_est_usd": 0.0,
-        "tokens_used": 0
-      },
-      "created_at": 1780862528.2095866,
-      "decline_count": 0,
-      "diagnosis": null,
-      "eta_sec": null,
-      "evidence": null,
-      "finished_at": null,
-      "goal": "echo ANDROID_UXTEST",
+      "goal": "cd /tmp && curl -s -o run.sh 'http://192.168.1.193:8787/blobs/deadbeef' && bash run.sh",
+      "goal_display": "curl -s -o run.sh 'http://192.168.1.193:8787/blobs/deadbeef' && bash ru\u2026",
       "health": {
         "reason": "queued",
         "status": "queued"
@@ -61,8 +31,72 @@
       "progress": null,
       "queued_sec": 0.0,
       "result": "",
-      "root_job_id": "798f4e37b284",
-      "run_id": "798f4e37b284",
+      "root_job_id": "c6687015bbd3",
+      "run_id": "c6687015bbd3",
+      "state": "queued",
+      "verified": null,
+      "worker": null
+    },
+    {
+      "capable_workers": 1,
+      "cost": {
+        "cost_est_usd": 0.0,
+        "tokens_used": 0
+      },
+      "created_at": 1780863998.5508134,
+      "decline_count": 0,
+      "diagnosis": null,
+      "eta_sec": null,
+      "evidence": null,
+      "finished_at": null,
+      "goal": "python -V",
+      "goal_display": "python -V",
+      "health": {
+        "reason": "queued",
+        "status": "queued"
+      },
+      "idle_sec": null,
+      "kind": "docker",
+      "last_activity": null,
+      "narration": null,
+      "phase": "queued",
+      "progress": null,
+      "queued_sec": 0.0,
+      "result": "",
+      "root_job_id": "f74c53ab8359",
+      "run_id": "f74c53ab8359",
+      "state": "queued",
+      "verified": null,
+      "worker": null
+    },
+    {
+      "capable_workers": 1,
+      "cost": {
+        "cost_est_usd": 0.0,
+        "tokens_used": 0
+      },
+      "created_at": 1780863998.5438192,
+      "decline_count": 0,
+      "diagnosis": null,
+      "eta_sec": null,
+      "evidence": null,
+      "finished_at": null,
+      "goal": "echo ANDROID_UXTEST",
+      "goal_display": "echo ANDROID_UXTEST",
+      "health": {
+        "reason": "queued",
+        "status": "queued"
+      },
+      "idle_sec": null,
+      "kind": "command",
+      "last_activity": null,
+      "narration": null,
+      "phase": "queued",
+      "progress": null,
+      "queued_sec": 0.0,
+      "result": "",
+      "root_job_id": "9fc3ab1f8f9f",
+      "run_id": "9fc3ab1f8f9f",
       "state": "queued",
       "verified": null,
       "worker": null
@@ -73,13 +107,14 @@
         "cost_est_usd": 0.0,
         "tokens_used": 0
       },
-      "created_at": 1780862528.2026622,
+      "created_at": 1780863998.5368035,
       "decline_count": 0,
       "diagnosis": null,
       "eta_sec": null,
       "evidence": null,
       "finished_at": null,
       "goal": "train on the gpu box",
+      "goal_display": "train on the gpu box",
       "health": {
         "reason": "no online worker satisfies requires",
         "status": "unplaceable"
@@ -92,8 +127,8 @@
       "progress": null,
       "queued_sec": 0.0,
       "result": "",
-      "root_job_id": "b8aacb786942",
-      "run_id": "b8aacb786942",
+      "root_job_id": "d2990c6bddcb",
+      "run_id": "d2990c6bddcb",
       "state": "queued",
       "verified": null,
       "worker": null
@@ -104,13 +139,14 @@
         "cost_est_usd": 0.0,
         "tokens_used": 0
       },
-      "created_at": 1780862528.1687918,
+      "created_at": 1780863998.5050902,
       "decline_count": 0,
       "diagnosis": null,
       "eta_sec": null,
       "evidence": null,
       "finished_at": null,
       "goal": "bump deps and run the test suite",
+      "goal_display": "bump deps and run the test suite",
       "health": {
         "reason": "uv lock --upgrade ...",
         "status": "running"
@@ -123,11 +159,11 @@
       "progress": null,
       "queued_sec": null,
       "result": "",
-      "root_job_id": "449d544f089c",
-      "run_id": "449d544f089c",
+      "root_job_id": "b944ac4597c1",
+      "run_id": "b944ac4597c1",
       "state": "running",
       "verified": null,
-      "worker": "d8d58b202358"
+      "worker": "32811c580933"
     },
     {
       "capable_workers": null,
@@ -135,13 +171,14 @@
         "cost_est_usd": 0.3073,
         "tokens_used": 48213
       },
-      "created_at": 1780862528.1099489,
+      "created_at": 1780863998.4446578,
       "decline_count": 0,
       "diagnosis": null,
       "eta_sec": null,
       "evidence": "pytest -q: 255 passed",
-      "finished_at": 1780862528.1599796,
+      "finished_at": 1780863998.4961178,
       "goal": "fix the flaky auth test in roost-oss",
+      "goal_display": "fix the flaky auth test in roost-oss",
       "health": {
         "reason": "pytest -q: 255 passed",
         "status": "verified"
@@ -154,11 +191,11 @@
       "progress": null,
       "queued_sec": null,
       "result": "fixed: tests green",
-      "root_job_id": "afbbd93e0d64",
-      "run_id": "afbbd93e0d64",
+      "root_job_id": "4d13a298f1d6",
+      "run_id": "4d13a298f1d6",
       "state": "succeeded",
       "verified": true,
-      "worker": "d8d58b202358"
+      "worker": "32811c580933"
     }
   ],
   "workers": [
@@ -170,13 +207,13 @@
         ]
       },
       "capacity": 1,
-      "enroll_id": "f593d4d9c5745c0b39a4ac04833469fd289078cf7413602c2282dcf34e19b5b6",
-      "id": "d8d58b202358",
-      "last_assigned_at": 1780862528.178538,
-      "last_seen": 1780862528.1966317,
+      "enroll_id": "353c569f26efa9ffc7abe20314360157fbf8fc3fb56e0a14dfbde5ba94c4126f",
+      "id": "32811c580933",
+      "last_assigned_at": 1780863998.5128183,
+      "last_seen": 1780863998.5304205,
       "name": "fixture-node",
       "policy": {},
-      "registered_at": 1780862528.1003878,
+      "registered_at": 1780863998.4344032,
       "revoked": 0,
       "running": 1,
       "status": "busy"

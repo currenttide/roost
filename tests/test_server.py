@@ -1034,6 +1034,126 @@ def test_list_str_command_submits_and_renders_joined(client: TestClient):
     assert run["goal"] == "git clone repo"
 
 
+# ---------- R86: glanceable `goal_display` summary for command jobs ----------
+#
+# `command` jobs put the full raw shell text where a glanceable goal belongs, so
+# verdict bars on every surface (panel, mac popover, Android, iOS) overflow with
+# `cd …; curl -s -o /tmp/x.sh '…'; bash …`. The fix is an ADDITIVE server-side
+# field `goal_display` (one summarizer, four surfaces) — `goal` is untouched
+# (contract: search, detail titles). Agent goals (task/intent) are already
+# glanceable natural language, so for those goal_display == goal. The summarizer
+# inherits R70's defensiveness: it must never raise on a non-str/None/list
+# `command` payload (a pre-tightening at-rest row, or future shape drift).
+
+
+def test_goal_display_summarizes_long_shell_command():
+    """A long raw shell command collapses to a glanceable summary leading with the
+    real program/verb, stripping env-assignment and `cd …` noise prefixes."""
+    # Real fleet shapes (from `roost history`): env-var + subshell, then `cd …; …`.
+    g1 = server._goal_display(
+        {"spec": {"kind": "command",
+                  "command": "U=$(xcrun simctl list devices | grep 'iPhone-17-Pro'); "
+                             "xcodebuild test -scheme Roost -destination \"id=$U\""}})
+    # The `U=$(…); ` env-assignment (subshell with an internal pipe) is peeled —
+    # the summary leads with the real command.
+    assert g1.startswith("xcodebuild")
+    assert "U=$(" not in g1  # the env-assignment noise is gone
+    assert len(g1) <= 80
+
+    g2 = server._goal_display(
+        {"spec": {"kind": "command",
+                  "command": "cd ~/roost-r50 2>/dev/null && git worktree remove "
+                             "/tmp/wt --force && rm -rf /tmp/wt"}})
+    assert g2.startswith("git worktree") or g2.startswith("git")
+    assert "cd ~/roost-r50" not in g2
+    assert len(g2) <= 80
+
+    g3 = server._goal_display(
+        {"spec": {"kind": "command",
+                  "command": "curl -s -o /tmp/r84-macrun.sh "
+                             "'http://192.168.1.193:8787/blobs/abc' && bash /tmp/r84-macrun.sh"}})
+    assert g3.startswith("curl")
+    assert len(g3) <= 80
+
+
+def test_goal_display_for_agent_job_is_the_intent():
+    """An agent goal (task/intent) is already glanceable — goal_display == goal,
+    so clients can uniformly read goal_display with no special-casing."""
+    job = {"spec": {"kind": "claude", "intent": "fix the flaky auth test in roost-oss"}}
+    assert server._goal_display(job) == server._goal_text(job)
+    assert server._goal_display(job) == "fix the flaky auth test in roost-oss"
+    # `task` (kind: auto/captain) is likewise passed through unchanged.
+    tjob = {"spec": {"kind": "auto", "task": "build and release the macOS app"}}
+    assert server._goal_display(tjob) == "build and release the macOS app"
+
+
+def test_goal_display_peels_chained_and_subshell_assignments():
+    """Edge shapes from the fleet: multiple space-separated assignments, and a
+    `$( … )` subshell whose value contains pipes/spaces, all peel off so the
+    summary leads with the program."""
+    assert server._goal_display(
+        {"spec": {"kind": "command",
+                  "command": "UDID=abc BUNDLE=xyz xcrun simctl install booted app.app"}}
+    ).startswith("xcrun simctl install")
+    assert server._goal_display(
+        {"spec": {"kind": "command",
+                  "command": "A=1 B=2 python train.py --epochs 5"}}
+    ).startswith("python train.py")
+    # `cd … 2>/dev/null && …` (a real fleet shape) leaves the post-`&&` command.
+    assert server._goal_display(
+        {"spec": {"kind": "command",
+                  "command": "cd ~/roost-r50 2>/dev/null && git worktree remove /tmp/wt"}}
+    ).startswith("git worktree remove")
+
+
+def test_goal_display_short_command_unchanged():
+    """A command already short/glanceable is shown as-is (no ellipsis churn)."""
+    assert server._goal_display({"spec": {"kind": "command", "command": "echo ok"}}) == "echo ok"
+    assert server._goal_display(
+        {"spec": {"kind": "command", "command": "pytest -q"}}) == "pytest -q"
+
+
+@pytest.mark.parametrize("bad_command", [
+    [1, 2, 3],                 # list of ints (R70 hunter's at-rest poison)
+    {"cmd": "echo hi"},        # a dict
+    42,                        # a bare int
+    None,                      # missing/None
+])
+def test_goal_display_never_raises_on_nonstr_command(bad_command):
+    """R70 lesson: the summarizer inherits _goal_text's serializer defense — a
+    non-str/None/list payload must coerce to a str, never raise (a single
+    un-renderable row 500s the whole dashboard, polled every 2s)."""
+    out = server._goal_display({"spec": {"kind": "command", "command": bad_command}})
+    assert isinstance(out, str)
+    # A list[str] argv still reads naturally (join, not repr).
+    argv = server._goal_display({"spec": {"command": ["git", "clone", "repo"]}})
+    assert isinstance(argv, str) and "git" in argv
+
+
+def test_goal_display_on_empty_spec_is_str():
+    """No spec / empty spec must still yield a string (never None, never raise)."""
+    assert server._goal_display({}) == ""
+    assert isinstance(server._goal_display({"spec": None}), str)
+
+
+def test_derive_run_includes_goal_display(client: TestClient):
+    """The additive field appears on /derived rows, glanceable for a command job
+    while `goal` stays the full text (contract preserved)."""
+    long_cmd = ("cd /tmp && curl -s -o out.sh "
+                "'http://192.168.1.193:8787/blobs/deadbeef' && bash out.sh")
+    r = client.post("/jobs", json={"kind": "command", "command": long_cmd})
+    assert r.status_code == 200, r.text
+    jid = r.json()["id"]
+    run = next(x for x in client.get("/derived").json()["runs"] if x["run_id"] == jid)
+    assert run["goal"] == long_cmd[:140]          # full text preserved (contract)
+    assert run["goal_display"].startswith("curl")  # glanceable summary
+    assert run["goal_display"] != run["goal"]
+    assert len(run["goal_display"]) <= 80
+    # And the single-job session header carries it too.
+    sess = client.get(f"/jobs/{jid}/derived").json()
+    assert sess["goal_display"].startswith("curl")
+
+
 @pytest.mark.parametrize("bad_command", [
     [1, 2, 3],            # list of ints (the hunter's repro payload)
     ["ok", 3],            # mixed list — one non-string element

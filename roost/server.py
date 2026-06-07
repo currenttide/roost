@@ -729,6 +729,55 @@ def _job_kind(job: dict) -> str:
     return kind or "claude"
 
 
+# R86: prefixes that are noise *before* the real verb of a shell `command` goal.
+# Real fleet goals (`roost history`) routinely lead with env-var assignments
+# (`U=$(xcrun …); …`, `UDID=… BUNDLE=…`) and `cd … && …` / `cd …; …`, which push
+# the actual program off the glanceable verdict bar. We strip these so the summary
+# leads with what the job *does* (curl/xcodebuild/git worktree/…).
+GOAL_DISPLAY_MAX = 72  # the verdict-bar budget; clients still ellipsize visually
+_GOAL_CD_PREFIX = re.compile(r"^\s*cd\s+\S+(?:\s+2>\S+)?\s*(?:&&|;)\s*")
+# A leading `NAME=value` assignment (value may be a $( … ) subshell — possibly
+# with internal pipes/parens — a quoted string, or a bare token). It is followed
+# by either whitespace OR a command separator (`;`/`&&`), which we also consume.
+# Strips one at a time so chained `A=1 B=2 cmd` / `U=$(…); cmd` all peel off.
+_GOAL_ASSIGN_PREFIX = re.compile(
+    r"^\s*[A-Za-z_][A-Za-z0-9_]*="
+    r"(?:\$\([^)]*\)|\"[^\"]*\"|'[^']*'|\S*?)"
+    r"\s*(?:&&|;|\s)\s*")
+
+
+def _goal_display(job: dict) -> str:
+    """A *glanceable* one-liner for the verdict bar (R86), additive to `goal`.
+
+    For agent goals (`task`/`intent`) the text is already natural language, so
+    this is identical to ``_goal_text`` — clients can read `goal_display`
+    uniformly. For `command` goals it collapses the raw shell text to a short
+    summary leading with the real program/verb, stripping `cd …` and env-var
+    assignment noise that otherwise fills the bar.
+
+    R70 lesson, inherited: this NEVER raises on a non-str/None/list `command`
+    payload. It builds on ``_goal_text``'s coercion (a list argv joins
+    naturally, anything else degrades to str()), so a single un-renderable
+    at-rest row can't 500 /derived (polled every 2s)."""
+    spec = job.get("spec") if isinstance(job.get("spec"), dict) else {}
+    # Agent goals are already glanceable — pass through unchanged (== goal).
+    if spec.get("task") or spec.get("intent"):
+        return _goal_text(job)
+    text = _goal_text(job)  # str-safe; command coerced (join for argv, str() else)
+    if not text:
+        return text
+    # Peel `cd …` then any run of leading `NAME=value` assignments off the front.
+    prev = None
+    while prev != text:
+        prev = text
+        text = _GOAL_CD_PREFIX.sub("", text, count=1)
+        text = _GOAL_ASSIGN_PREFIX.sub("", text, count=1)
+    text = text.strip()
+    if len(text) > GOAL_DISPLAY_MAX:
+        text = text[: GOAL_DISPLAY_MAX - 1].rstrip() + "…"  # … ellipsis
+    return text
+
+
 def _result_text(res: dict, job: dict) -> str:
     """Serializer defense (R70) for the run row's `result` display field.
 
@@ -927,6 +976,10 @@ def _derive_run(
         "run_id": job.get("id"),
         "goal": _goal_text(job),
         "kind": _job_kind(job),
+        # R86: glanceable summary for the verdict bar; == goal for agent jobs,
+        # collapsed program/verb for raw `command` shell goals. Additive —
+        # clients fall back to `goal` when an older CP omits it.
+        "goal_display": _goal_display(job),
         "state": job.get("state"),
         "phase": _job_phase(job),
         "health": _job_health(job),

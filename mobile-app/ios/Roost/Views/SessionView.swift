@@ -62,7 +62,7 @@ struct SessionView: View {
             Text(store.header?.healthStatus.glyph ?? "▶")
                 .foregroundStyle(store.header?.healthStatus.color ?? .blue)
             VStack(alignment: .leading, spacing: 2) {
-                Text(store.header?.goal ?? jobId)
+                Text(store.header?.displayGoal ?? jobId)
                     .font(.subheadline.weight(.semibold))
                     .lineLimit(1)
                 Text(headerMeta)

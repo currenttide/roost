@@ -193,7 +193,7 @@ struct RunRow: View {
         HStack(alignment: .top, spacing: 10) {
             glyph
             VStack(alignment: .leading, spacing: 2) {
-                Text(run.goal ?? run.runId)
+                Text(run.displayGoal ?? run.runId)
                     .font(.body.weight(.medium))
                     .lineLimit(1)
                 Text(meta)

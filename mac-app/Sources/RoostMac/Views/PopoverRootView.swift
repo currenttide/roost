@@ -281,7 +281,7 @@ struct RunRowView: View {
                 Text(run.isTerminal ? run.verdictGlyph : "◉")
                     .foregroundStyle(run.statusColor)
                     .accessibilityLabel(run.health.status)
-                Text(run.goal.isEmpty ? run.id : run.goal)
+                Text(run.displayGoal.isEmpty ? run.id : run.displayGoal)
                     .font(.callout)
                     .lineLimit(1)
                 Spacer(minLength: 0)

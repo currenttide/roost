@@ -85,6 +85,11 @@ public struct Run: Decodable, Identifiable, Equatable, Sendable {
 
     public let id: String                 // run_id
     public let goal: String
+    /// R86: a glanceable, server-summarized goal for the verdict bar — for raw
+    /// `command` jobs it collapses the shell text to its program/verb; for agent
+    /// goals it equals `goal`. Absent against older control planes; use
+    /// `displayGoal` to read it with the `goal` fallback.
+    public let goalDisplay: String?
     public let state: String              // queued|assigned|running|succeeded|failed|cancelled
     public let phase: String              // state, or verifying|self-healing
     public let health: Health
@@ -115,6 +120,8 @@ public struct Run: Decodable, Identifiable, Equatable, Sendable {
         }
         id = rid
         goal = (try? c.decode(String.self, forKey: "goal")) ?? ""
+        goalDisplay = (try? c.decode(String.self, forKey: "goal_display"))
+            .flatMap { $0.isEmpty ? nil : $0 }
         state = (try? c.decode(String.self, forKey: "state")) ?? ""
         phase = (try? c.decode(String.self, forKey: "phase")) ?? state
         health = (try? c.decode(Health.self, forKey: "health")) ?? Health(status: "", reason: "")
@@ -143,6 +150,14 @@ public struct Run: Decodable, Identifiable, Equatable, Sendable {
     }
 
     public var isActive: Bool { !isTerminal }
+
+    /// R86: the goal to show in a glanceable verdict/list row. Prefers the
+    /// server's summarized `goal_display` (collapses a raw `command`'s shell
+    /// text), falling back to the full `goal` against an older control plane.
+    public var displayGoal: String {
+        if let g = goalDisplay, !g.isEmpty { return g }
+        return goal
+    }
 }
 
 // MARK: - Worker

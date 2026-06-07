@@ -56,6 +56,10 @@ data class Run(
      *  an older CP that doesn't send it — clients then drop the kind subtitle segment
      *  rather than guess (the R85 bug was guessing "claude" for every job). */
     val kind: String?,
+    /** R86: server-summarized glanceable goal for the verdict bar (collapses a
+     *  raw `command`'s shell text). Null against older control planes — read via
+     *  [displayGoal], which falls back to [goal]. */
+    val goalDisplay: String?,
     val state: String,
     val phase: String?,
     val health: Health,
@@ -73,6 +77,11 @@ data class Run(
     val finishedAt: Double?,
     val exitCode: Int?,         // pulled from result/detail when present, else null
 ) {
+    /** R86: glanceable goal for a row — prefers the server's summarized
+     *  [goalDisplay], falling back to the full [goal] against an older CP. */
+    val displayGoal: String
+        get() = goalDisplay?.takeIf { it.isNotBlank() } ?: goal
+
     /** Best one-liner for a row's subtitle. */
     val bestLine: String?
         get() = narration?.takeIf { it.isNotBlank() }
