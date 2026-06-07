@@ -78,6 +78,9 @@ struct SessionView: View {
     private var headerMeta: String {
         var parts: [String] = []
         if let w = store.header?.worker { parts.append(w) }
+        // R85: the job's actual kind (was absent on iOS; Android wrongly hardcoded
+        // "claude"). Omitted when the CP doesn't report it (older server).
+        if let k = Subtitle.kindSegment(store.header?.kind) { parts.append(k) }
         parts.append(store.state.isEmpty ? (store.header?.state ?? "—") : store.state)
         if let e = UIFormat.elapsed(since: store.header?.createdAt),
            store.header?.healthStatus.isActive == true {

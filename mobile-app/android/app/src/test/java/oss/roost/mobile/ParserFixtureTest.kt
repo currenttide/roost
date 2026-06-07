@@ -39,7 +39,7 @@ class ParserFixtureTest {
         val d = Parsers.parseDerived(Fixtures.read("derived.json"))
         assertEquals("alert", d.fleetVerdict.level)
         assertFalse(d.fleetVerdict.isOk)
-        assertEquals(3, d.runs.size)
+        assertEquals(5, d.runs.size)
         assertEquals(1, d.workers.size)
         // worker is busy → live.
         assertTrue(d.workers.first().isLive)
@@ -59,6 +59,13 @@ class ParserFixtureTest {
         val running = d.runs.first { it.state == "running" }
         assertTrue(running.isActive)
         assertEquals("uv lock --upgrade ...", running.bestLine)
+
+        // R85: the run row carries the job's EFFECTIVE kind, so the subtitle reads
+        // the truth instead of a hardcoded "claude". A `command` job is "command";
+        // a docker job is "docker"; an agent job (intent, no/claude kind) is "claude".
+        assertEquals("claude", verified.kind)
+        assertEquals("command", d.runs.first { it.goal == "echo ANDROID_UXTEST" }.kind)
+        assertEquals("docker", d.runs.first { it.goal == "python -V" }.kind)
     }
 
     @Test fun workers() {
@@ -99,7 +106,7 @@ class ParserFixtureTest {
 
     @Test fun jobsList() {
         val jobs = Parsers.parseJobs(Fixtures.read("jobs_list.json"))
-        assertEquals(3, jobs.size)
+        assertEquals(5, jobs.size)
     }
 
     @Test fun tree() {

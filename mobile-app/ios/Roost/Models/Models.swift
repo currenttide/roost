@@ -72,6 +72,11 @@ struct Cost: Codable, Equatable, Hashable {
 struct Run: Codable, Equatable, Identifiable {
     let runId: String
     let goal: String?
+    /// Effective executor kind (API.md §2: "command"|"claude"|"docker"|…). Optional:
+    /// an older CP omits it, so the kind subtitle segment is dropped rather than
+    /// guessed (R85 — guessing "claude" for every job was the bug; iOS previously
+    /// showed no kind at all, this adds the truthful one).
+    let kind: String?
     let state: String
     let phase: String?
     let health: Health?
@@ -95,7 +100,7 @@ struct Run: Codable, Equatable, Identifiable {
 
     enum CodingKeys: String, CodingKey {
         case runId = "run_id"
-        case goal, state, phase, health, worker, verified, evidence, result
+        case goal, kind, state, phase, health, worker, verified, evidence, result
         case narration, progress, cost, diagnosis
         case etaSec = "eta_sec"
         case createdAt = "created_at"

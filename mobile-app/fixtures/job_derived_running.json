@@ -4,7 +4,7 @@
     "cost_est_usd": 0.0,
     "tokens_used": 0
   },
-  "created_at": 1780853830.3262403,
+  "created_at": 1780862528.1687918,
   "decline_count": 0,
   "diagnosis": null,
   "eta_sec": null,
@@ -16,15 +16,16 @@
     "status": "running"
   },
   "idle_sec": 0.1,
+  "kind": "claude",
   "last_activity": "uv lock --upgrade ...",
   "narration": "uv lock --upgrade ...",
   "phase": "running",
   "progress": null,
   "queued_sec": null,
   "result": "",
-  "root_job_id": "da81c96d6627",
-  "run_id": "da81c96d6627",
+  "root_job_id": "449d544f089c",
+  "run_id": "449d544f089c",
   "state": "running",
   "verified": null,
-  "worker": "35d2c0cf1aed"
+  "worker": "d8d58b202358"
 }

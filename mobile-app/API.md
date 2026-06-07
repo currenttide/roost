@@ -62,6 +62,10 @@ Run row (fixture has every field; the app renders a subset):
 {
   "run_id": "c7dedcc11a4c",            // == job id
   "goal": "fix the flaky auth test",   // display title (≤140 chars)
+  "kind": "claude"|"command"|"docker"|"auto"|"codex"|"captain", // effective executor
+                                       // kind (a `command` job reads "command", not
+                                       // "claude"). Older CPs omit it → clients drop
+                                       // the kind segment rather than guess.
   "state": "queued"|"assigned"|"running"|"succeeded"|"failed"|"cancelled",
   "phase": state ∪ "verifying"|"self-healing",
   "health": {"status": <below>, "reason": "<≤160 chars>"},

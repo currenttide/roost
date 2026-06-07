@@ -3,15 +3,77 @@
     "level": "alert",
     "summary": "1 need attention \u2014 unplaceable: train on the gpu box"
   },
-  "generated_at": 1780853830.3693547,
+  "generated_at": 1780862528.2278864,
   "runs": [
+    {
+      "capable_workers": 1,
+      "cost": {
+        "cost_est_usd": 0.0,
+        "tokens_used": 0
+      },
+      "created_at": 1780862528.2167447,
+      "decline_count": 0,
+      "diagnosis": null,
+      "eta_sec": null,
+      "evidence": null,
+      "finished_at": null,
+      "goal": "python -V",
+      "health": {
+        "reason": "queued",
+        "status": "queued"
+      },
+      "idle_sec": null,
+      "kind": "docker",
+      "last_activity": null,
+      "narration": null,
+      "phase": "queued",
+      "progress": null,
+      "queued_sec": 0.0,
+      "result": "",
+      "root_job_id": "dfe16f720f32",
+      "run_id": "dfe16f720f32",
+      "state": "queued",
+      "verified": null,
+      "worker": null
+    },
+    {
+      "capable_workers": 1,
+      "cost": {
+        "cost_est_usd": 0.0,
+        "tokens_used": 0
+      },
+      "created_at": 1780862528.2095866,
+      "decline_count": 0,
+      "diagnosis": null,
+      "eta_sec": null,
+      "evidence": null,
+      "finished_at": null,
+      "goal": "echo ANDROID_UXTEST",
+      "health": {
+        "reason": "queued",
+        "status": "queued"
+      },
+      "idle_sec": null,
+      "kind": "command",
+      "last_activity": null,
+      "narration": null,
+      "phase": "queued",
+      "progress": null,
+      "queued_sec": 0.0,
+      "result": "",
+      "root_job_id": "798f4e37b284",
+      "run_id": "798f4e37b284",
+      "state": "queued",
+      "verified": null,
+      "worker": null
+    },
     {
       "capable_workers": 0,
       "cost": {
         "cost_est_usd": 0.0,
         "tokens_used": 0
       },
-      "created_at": 1780853830.3577662,
+      "created_at": 1780862528.2026622,
       "decline_count": 0,
       "diagnosis": null,
       "eta_sec": null,
@@ -23,14 +85,15 @@
         "status": "unplaceable"
       },
       "idle_sec": null,
+      "kind": "claude",
       "last_activity": null,
       "narration": null,
       "phase": "queued",
       "progress": null,
       "queued_sec": 0.0,
       "result": "",
-      "root_job_id": "c66b2cf578c5",
-      "run_id": "c66b2cf578c5",
+      "root_job_id": "b8aacb786942",
+      "run_id": "b8aacb786942",
       "state": "queued",
       "verified": null,
       "worker": null
@@ -41,7 +104,7 @@
         "cost_est_usd": 0.0,
         "tokens_used": 0
       },
-      "created_at": 1780853830.3262403,
+      "created_at": 1780862528.1687918,
       "decline_count": 0,
       "diagnosis": null,
       "eta_sec": null,
@@ -53,17 +116,18 @@
         "status": "running"
       },
       "idle_sec": 0.0,
+      "kind": "claude",
       "last_activity": "uv lock --upgrade ...",
       "narration": "uv lock --upgrade ...",
       "phase": "running",
       "progress": null,
       "queued_sec": null,
       "result": "",
-      "root_job_id": "da81c96d6627",
-      "run_id": "da81c96d6627",
+      "root_job_id": "449d544f089c",
+      "run_id": "449d544f089c",
       "state": "running",
       "verified": null,
-      "worker": "35d2c0cf1aed"
+      "worker": "d8d58b202358"
     },
     {
       "capable_workers": null,
@@ -71,29 +135,30 @@
         "cost_est_usd": 0.3073,
         "tokens_used": 48213
       },
-      "created_at": 1780853830.2720978,
+      "created_at": 1780862528.1099489,
       "decline_count": 0,
       "diagnosis": null,
       "eta_sec": null,
       "evidence": "pytest -q: 255 passed",
-      "finished_at": 1780853830.3179135,
+      "finished_at": 1780862528.1599796,
       "goal": "fix the flaky auth test in roost-oss",
       "health": {
         "reason": "pytest -q: 255 passed",
         "status": "verified"
       },
       "idle_sec": null,
+      "kind": "claude",
       "last_activity": "re-running: all green",
       "narration": "re-running: all green",
       "phase": "succeeded",
       "progress": null,
       "queued_sec": null,
       "result": "fixed: tests green",
-      "root_job_id": "cbe7a9effe6a",
-      "run_id": "cbe7a9effe6a",
+      "root_job_id": "afbbd93e0d64",
+      "run_id": "afbbd93e0d64",
       "state": "succeeded",
       "verified": true,
-      "worker": "35d2c0cf1aed"
+      "worker": "d8d58b202358"
     }
   ],
   "workers": [
@@ -105,13 +170,13 @@
         ]
       },
       "capacity": 1,
-      "enroll_id": "2b2db662d4012fad15d95ea5b1978ecbae7b694387a9e7775252eea92333fe61",
-      "id": "35d2c0cf1aed",
-      "last_assigned_at": 1780853830.333405,
-      "last_seen": 1780853830.3515098,
+      "enroll_id": "f593d4d9c5745c0b39a4ac04833469fd289078cf7413602c2282dcf34e19b5b6",
+      "id": "d8d58b202358",
+      "last_assigned_at": 1780862528.178538,
+      "last_seen": 1780862528.1966317,
       "name": "fixture-node",
       "policy": {},
-      "registered_at": 1780853830.2634993,
+      "registered_at": 1780862528.1003878,
       "revoked": 0,
       "running": 1,
       "status": "busy"

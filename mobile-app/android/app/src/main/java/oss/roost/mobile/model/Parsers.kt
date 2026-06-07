@@ -151,6 +151,7 @@ object Parsers {
         return Run(
             runId = o.str("run_id") ?: "",
             goal = o.str("goal") ?: "(untitled)",
+            kind = o.str("kind"),
             state = o.str("state") ?: "queued",
             phase = o.str("phase"),
             health = Health(

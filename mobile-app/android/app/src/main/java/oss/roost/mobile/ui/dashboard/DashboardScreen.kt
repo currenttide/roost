@@ -56,6 +56,7 @@ import androidx.compose.ui.unit.dp
 import oss.roost.mobile.AppContainer
 import oss.roost.mobile.model.HealthGlyph
 import oss.roost.mobile.model.Run
+import oss.roost.mobile.model.Subtitle
 import oss.roost.mobile.ui.Semantic
 import oss.roost.mobile.ui.common.Format
 import oss.roost.mobile.ui.common.LifecycleResume
@@ -303,7 +304,11 @@ private fun RunRow(
 private fun subtitle(run: Run): String {
     val parts = ArrayList<String>()
     run.worker?.let { parts.add(it) }
-    parts.add(if (run.state == "running") "claude" else run.state)
+    // R85: the job's actual kind, not a hardcoded "claude" (the old code showed
+    // "claude" for every running job — wrong for a `command` job). Omitted when the
+    // CP doesn't report it (older server); the state always follows.
+    Subtitle.kindSegment(run.kind)?.let { parts.add(it) }
+    parts.add(run.state)
     when (run.state) {
         "running", "assigned" -> {
             val elapsed = (System.currentTimeMillis() / 1000.0) - run.createdAt

@@ -2,13 +2,33 @@ package oss.roost.mobile
 
 import oss.roost.mobile.model.Ansi
 import oss.roost.mobile.model.HealthGlyph
+import oss.roost.mobile.model.Subtitle
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /** Health-glyph mapping (incl. unknown-doesn't-crash) and ANSI stripping. */
 class MapperTest {
+
+    // R85: the subtitle kind segment reflects the job's ACTUAL kind, not a
+    // hardcoded "claude". Pure so the Linux harness exercises it (ui/ isn't
+    // compiled there); the screens used to bake "claude" into every row.
+    @Test fun subtitleKindSegment() {
+        assertEquals("command", Subtitle.kindSegment("command"))
+        assertEquals("claude", Subtitle.kindSegment("claude"))
+        assertEquals("docker", Subtitle.kindSegment("docker"))
+        // Unknown kind from a future server → shown verbatim (not crashed/guessed).
+        assertEquals("codex", Subtitle.kindSegment("codex"))
+    }
+
+    @Test fun subtitleKindSegmentOmittedWhenUnknown() {
+        // Older CP omits `kind` (null) → drop the segment rather than guess "claude".
+        assertNull(Subtitle.kindSegment(null))
+        assertNull(Subtitle.kindSegment(""))
+        assertNull(Subtitle.kindSegment("   "))
+    }
 
     @Test fun knownStatusesMap() {
         assertEquals("✓", HealthGlyph.map("verified").glyph)

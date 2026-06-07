@@ -10,7 +10,7 @@ final class DecodeTests: XCTestCase {
         let d = try dec.decode(Derived.self, from: Fixtures.data("derived.json"))
         XCTAssertEqual(d.fleetVerdict.level, "alert")
         XCTAssertTrue(d.fleetVerdict.isAlert)
-        XCTAssertEqual(d.runs.count, 3)
+        XCTAssertEqual(d.runs.count, 5)
         XCTAssertEqual(d.workers.count, 1)
         // Locate runs by goal/state — ids are random per fixture recording.
         // Run-row `result` is a STRING here (not the job-detail object).
@@ -24,6 +24,11 @@ final class DecodeTests: XCTestCase {
         XCTAssertTrue(unplaceable?.healthStatus.isError ?? false)
         // Live worker count = idle+busy.
         XCTAssertTrue(d.workers[0].isLive)
+        // R85: the run row carries the job's effective kind, so the subtitle reads
+        // the truth instead of omitting it (iOS) / hardcoding "claude" (Android).
+        XCTAssertEqual(verified?.kind, "claude")
+        XCTAssertEqual(d.runs.first { $0.goal == "echo ANDROID_UXTEST" }?.kind, "command")
+        XCTAssertEqual(d.runs.first { $0.goal == "python -V" }?.kind, "docker")
     }
 
     func testJobDetails() throws {
@@ -52,7 +57,7 @@ final class DecodeTests: XCTestCase {
 
     func testJobsListAndTree() throws {
         let list = try dec.decode([Job].self, from: Fixtures.data("jobs_list.json"))
-        XCTAssertEqual(list.count, 3)
+        XCTAssertEqual(list.count, 5)
         let tree = try dec.decode([Job].self, from: Fixtures.data("job_tree.json"))
         XCTAssertEqual(tree.count, 1)
         // Ids are random per recording; pin shape, not value.
