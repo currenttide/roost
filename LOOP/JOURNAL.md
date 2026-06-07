@@ -475,3 +475,27 @@ Entries are written by the loop; humans read, never need to edit.
   already re-verified the numbers — logged here, not silent). A1 bug-hunt
   rotation untouched; first hunt area when needed: matcher/placement (never
   hunted). Human notification in the session summary.
+
+## 2026-06-07 04:10 UTC — R15: Fix confirmed docs drift (publish docstring, default caps, log bounds)
+- Verdict: shipped
+- Branch/PR: loop/r15-docs-drift / https://github.com/currenttide/roost/pull/22
+- What changed: docs-only, three spots. cli.py publish docstring now
+  describes the one-shot transactional POST (+ automatic 422 fallback);
+  README gains a "Budgets & runtime caps" paragraph (per-kind defaults
+  120/240/240/360m, distinct default_runtime_cap_exceeded token,
+  default_wallclock_min override incl. {kind: minutes} / 0 = opt-out);
+  API.md §4 gains an additive "Log bounds" note (64KiB/line + drop marker,
+  5000-row stdout/stderr cap, event exemption, capped ≠ stalled guidance).
+- Evidence:
+  - `python -m pytest -q` → 482 passed in 15.65s (docs-only; fixture drift
+    guard unaffected — prose, not shapes)
+- Judge: approve (round 1) — re-ran pytest (482), confirmed exactly three
+  files / docstring-only cli.py diff, and TRUTH-CHECKED every new claim
+  against code (cap values vs DEFAULT_WALLCLOCK_MIN, error token line,
+  policy override semantics, LOG_* constants, worker drop-marker text,
+  ~24h retention). One nit accepted: README says "0 opts out" where code
+  treats any <=0 the same — degenerate input, not meaningful drift.
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (fenced
+  first-line model-ID block present)
+- Notes: Docs-drift ratchet honestly back to 0. Next: R16 (up-orchestration
+  tests), then R17 (config/triage tests).
