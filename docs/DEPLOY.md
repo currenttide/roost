@@ -68,6 +68,78 @@ mechanisms:
   `last_seen` is recent); a recently-asleep node (e.g. a laptop that slept an hour ago)
   is kept and shown on the panel as **offline** rather than dropped.
 
+## Backup &amp; restore (the fleet state)
+
+The control plane's SQLite DB **is** the entire fleet — enrollments, job history,
+schedules, tokens, blobs metadata. Back it up. A naive `cp roost.db backup.db` while the
+CP is running is **unsafe**: under WAL the main file can be copied without its
+uncheckpointed WAL frames, giving a torn/stale snapshot. Use `roost backup` instead — it
+calls `GET /admin/backup` (admin-only), which takes a **consistent online snapshot** with
+SQLite's backup API and streams it back as a single self-contained `.db` file (already
+checkpointed — no separate `-wal`/`-shm` to ship). It works **without stopping the CP**
+and **against a remote CP** (it's an HTTP download — no filesystem access to the server
+needed).
+
+### Back up
+
+```bash
+# From anywhere that can reach the CP, with the admin token resolved
+# (flags → ROOST_URL/ROOST_TOKEN → ~/.config/roost/config.toml):
+roost backup roost-$(date +%F).db
+# → wrote <N> bytes to roost-2026-06-06.db
+```
+
+The snapshot is written atomically (a sibling `.part` file, renamed on success), so an
+interrupted download never leaves a half-written file at the destination. Verify any
+snapshot before trusting it:
+
+```bash
+sqlite3 roost-2026-06-06.db 'PRAGMA integrity_check;'   # → ok
+sqlite3 roost-2026-06-06.db 'SELECT COUNT(*) FROM jobs;'
+```
+
+Schedule it with `cron` (the token comes from the config file the cron user owns) or as a
+`schedule`d `command` job on a trusted node.
+
+### Restore
+
+Restore is a **stop → swap → start** of the control plane (a live CP holds the DB open;
+swapping the file underneath it corrupts state). Roost's supervised service
+(`roost service …`, `roost/service.py`) manages the **worker** unit only — the CP is run
+directly, so restore steps depend on how *your* CP is launched:
+
+**Docker (the hubbase deployment above):** the DB is the host-mounted file
+`${ROOST_DATA_DIR}/roost.db` (→ `/data/roost.db` in `docker-control-plane-1`).
+
+```bash
+cd /path/to/repo                                  # where docker/stack.yml lives
+export ROOST_DATA_DIR=/home/yang/roost-fleet/data # same value used to deploy
+docker compose -f docker/stack.yml stop control-plane          # 1. stop CP
+cp "$ROOST_DATA_DIR/roost.db" "$ROOST_DATA_DIR/roost.db.bak"   #    keep current state
+rm -f "$ROOST_DATA_DIR/roost.db-wal" "$ROOST_DATA_DIR/roost.db-shm"  # drop stale WAL/SHM
+cp /path/to/roost-2026-06-06.db "$ROOST_DATA_DIR/roost.db"     # 2. swap in the snapshot
+docker compose -f docker/stack.yml start control-plane         # 3. start CP
+```
+
+**Host / systemd-run CP** (if you run `roost serve --db <path>` under your own unit rather
+than Docker): same shape — `systemctl --user stop <your-cp-unit>` (or kill the process),
+back up the current file, remove any `<path>-wal` / `<path>-shm`, copy the snapshot to
+`<path>`, then start the unit again. The snapshot is a complete DB, so removing the old
+WAL/SHM is safe and avoids the CP replaying stale frames over the restored file.
+
+### Verify the restore
+
+```bash
+curl -s http://127.0.0.1:8787/healthz     # {"ok":true,...} — CP is serving
+roost workers                              # the fleet you backed up is present
+roost jobs --limit 5                       # recent job history is intact
+```
+
+Workers re-establish themselves by heartbeat; a node that was online at backup time shows
+up (as **offline** until it next heartbeats, then **idle**/**busy**). If `roost workers`
+is empty or `integrity_check` on the restored file wasn't `ok`, stop and restore the
+`roost.db.bak` you set aside.
+
 ## Public publishing edge (roost.pub)
 
 Published sites are world-reachable via a Cloudflare tunnel on hubbase

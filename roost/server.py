@@ -22,6 +22,7 @@ import os
 import re
 import secrets
 import sqlite3
+import tempfile
 import time
 import uuid
 from contextlib import asynccontextmanager, contextmanager
@@ -131,6 +132,38 @@ def _init_db(db_path: Path) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with _connect(db_path) as conn:
         migrate(conn)
+
+
+def _backup_db(db_path: Path) -> Path:
+    """[R39] Produce a CONSISTENT snapshot of a (possibly live) WAL-mode DB and
+    return the path to a freshly-written temp file holding it.
+
+    Uses SQLite's online backup API (``sqlite3.Connection.backup``), which is the
+    correct, dependency-free way to copy a database that the control plane is
+    still writing to. Unlike a naive file copy — which under WAL can capture a
+    main-db file without its uncheckpointed WAL frames and yield a torn/stale
+    snapshot — the backup API copies page-by-page under SQLite's own locking and
+    restarts the copy if the source changes mid-run, so the destination is a
+    self-consistent, fully-checkpointed standalone database (no separate WAL/SHM
+    to ship). The caller owns the returned file and must delete it once sent.
+    """
+    # NamedTemporaryFile(delete=False): we hand the path to the response and
+    # delete it via a background task after the bytes have been streamed.
+    fd, tmp_name = tempfile.mkstemp(prefix="roost-backup-", suffix=".db")
+    os.close(fd)  # sqlite opens the path itself; we only needed a unique name
+    tmp_path = Path(tmp_name)
+    # 30s busy timeout mirrors _connect, so a momentarily-locked source waits
+    # rather than failing the backup outright.
+    src = sqlite3.connect(db_path, timeout=30.0)
+    try:
+        dst = sqlite3.connect(tmp_path)
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+    finally:
+        src.close()
+    return tmp_path
 
 
 def _row_to_job(row: sqlite3.Row | None) -> Optional[dict[str, Any]]:
@@ -2655,6 +2688,47 @@ def create_app(
         # Prometheus' canonical content type for the 0.0.4 text format.
         return PlainTextResponse(
             body, media_type="text/plain; version=0.0.4; charset=utf-8"
+        )
+
+    @app.get("/admin/backup", dependencies=[Depends(require_admin)])
+    async def backup_endpoint():
+        """[R39] Stream a CONSISTENT snapshot of the control plane's SQLite DB —
+        the entire fleet state — taken while the CP is still running.
+
+        Admin-only (like the other janitorial routes). The snapshot is produced
+        with SQLite's online backup API into a temp file (see `_backup_db`), then
+        streamed as an octet-stream. The temp file is deleted in the generator's
+        ``finally`` — which runs on normal completion AND on a client disconnect
+        (the generator is closed, raising GeneratorExit) — so a snapshot of the
+        whole DB never lingers in the temp dir, even on a flaky download. The
+        download name carries the CP version + a UTC timestamp for easy archival.
+        """
+        tmp_path = await asyncio.to_thread(_backup_db, db)
+        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        filename = f"roost-backup-{__version__}-{stamp}.db"
+        try:
+            size = tmp_path.stat().st_size
+        except OSError:
+            size = None
+
+        def _stream_and_cleanup():
+            try:
+                with open(tmp_path, "rb") as f:
+                    while True:
+                        chunk = f.read(64 * 1024)
+                        if not chunk:
+                            break
+                        yield chunk
+            finally:
+                tmp_path.unlink(missing_ok=True)
+
+        headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+        if size is not None:
+            headers["Content-Length"] = str(size)
+        return StreamingResponse(
+            _stream_and_cleanup(),
+            media_type="application/octet-stream",
+            headers=headers,
         )
 
     @app.get("/jobs/{job_id}", dependencies=[Depends(require_any)])

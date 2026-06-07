@@ -738,3 +738,79 @@ def test_send_terminal_job_errors(monkeypatch):
     res = CliRunner().invoke(roost_cli.send, ["j1", "too late"])
     assert res.exit_code != 0
     assert "terminal" in res.output.lower()
+
+
+# ---------- `roost backup` (R39) ----------
+
+
+def _backup_factory(app, bearer):
+    """Route the backup command's internally-built httpx.Client at an in-process
+    control plane via a sync TestClient (an httpx.Client subclass), carrying the
+    given bearer token. A fresh TestClient per call matches the command opening
+    its client inside a `with` block."""
+    from fastapi.testclient import TestClient
+
+    def _factory(*args, **kwargs):
+        c = TestClient(app)
+        if bearer:
+            c.headers.update({"Authorization": f"Bearer {bearer}"})
+        return c
+
+    return _factory
+
+
+def test_backup_writes_db_file(monkeypatch, tmp_path):
+    from roost import server
+
+    token = "admin-tok"
+    app = server.create_app(
+        db_path=tmp_path / "roost.db", token=token, run_sweeper=False
+    )
+    monkeypatch.setattr(roost_cli, "_resolve", lambda ctx: ("http://cp", token, None))
+    monkeypatch.setattr(roost_cli.httpx, "Client", _backup_factory(app, token))
+
+    dest = tmp_path / "out" / "snapshot.db"
+    dest.parent.mkdir()
+    res = CliRunner().invoke(roost_cli.backup, [str(dest)])
+    assert res.exit_code == 0, res.output
+    assert "wrote" in res.output and "snapshot.db" in res.output
+    # A real, readable SQLite snapshot landed at the destination.
+    assert dest.exists() and dest.stat().st_size > 0
+    import sqlite3
+    conn = sqlite3.connect(dest)
+    try:
+        assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    finally:
+        conn.close()
+    # No partial-download temp file left behind.
+    assert not dest.with_name(dest.name + ".part").exists()
+
+
+def test_backup_non_admin_token_errors(monkeypatch, tmp_path):
+    """A worker/non-admin token is rejected with a clear, actionable message and
+    no destination file is created."""
+    from fastapi.testclient import TestClient
+
+    from roost import server
+
+    token = "admin-tok"
+    app = server.create_app(
+        db_path=tmp_path / "roost.db", token=token, run_sweeper=False
+    )
+    # Mint a worker credential against the same DB, then drive the CLI with it.
+    with TestClient(app) as admin:
+        admin.headers.update({"Authorization": f"Bearer {token}"})
+        etok = admin.post("/enroll-tokens", json={"label": "w"}).json()["token"]
+        cred = admin.post(
+            "/enroll", json={"token": etok, "name": "w", "capabilities": {}},
+            headers={"Authorization": ""},
+        ).json()["credential"]
+
+    monkeypatch.setattr(roost_cli, "_resolve", lambda ctx: ("http://cp", cred, None))
+    monkeypatch.setattr(roost_cli.httpx, "Client", _backup_factory(app, cred))
+
+    dest = tmp_path / "denied.db"
+    res = CliRunner().invoke(roost_cli.backup, [str(dest)])
+    assert res.exit_code != 0
+    assert "admin token" in res.output.lower()
+    assert not dest.exists()

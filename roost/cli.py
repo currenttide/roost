@@ -2110,6 +2110,55 @@ def list_workers_cmd(ctx: click.Context) -> None:
 
 
 @cli.command()
+@click.argument("dest", type=click.Path(dir_okay=False, writable=True))
+@click.pass_context
+def backup(ctx: click.Context, dest: str) -> None:
+    """Download a consistent snapshot of the control plane's DB to DEST.
+
+    Calls the admin-only `GET /admin/backup` endpoint, which uses SQLite's online
+    backup API to snapshot the live fleet state without stopping the CP, and
+    writes the streamed bytes to DEST (a `.db` file). Works against a remote CP —
+    no filesystem access to the server is needed. Requires the admin token.
+
+    Restore is documented in docs/DEPLOY.md (stop CP, swap the file, start, then
+    `roost workers` to sanity-check).
+    """
+    url, token, _ = _resolve(ctx)
+    dest_path = Path(dest)
+    if dest_path.parent and not dest_path.parent.exists():
+        raise click.ClickException(f"destination directory does not exist: {dest_path.parent}")
+    # Stream to a sibling temp file, then atomically rename — an interrupted or
+    # failed download never leaves a half-written file at the destination.
+    tmp = dest_path.with_name(dest_path.name + ".part")
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    total = 0
+    try:
+        with httpx.Client(base_url=url.rstrip("/"), headers=headers,
+                          timeout=httpx.Timeout(connect=10.0, read=None, write=30.0, pool=10.0)) as c:
+            with c.stream("GET", "/admin/backup") as resp:
+                if resp.status_code in (401, 403):
+                    resp.read()
+                    raise click.ClickException(
+                        "backup requires the admin token (set ROOST_TOKEN or --token)")
+                if resp.status_code >= 400:
+                    resp.read()
+                    raise click.ClickException(
+                        f"backup failed: HTTP {resp.status_code}: {resp.text}")
+                with open(tmp, "wb") as f:
+                    for chunk in resp.iter_bytes():
+                        f.write(chunk)
+                        total += len(chunk)
+    except httpx.HTTPError as e:
+        tmp.unlink(missing_ok=True)
+        raise click.ClickException(f"backup failed: {e}")
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    os.replace(tmp, dest_path)
+    click.echo(f"wrote {total} bytes to {dest_path}")
+
+
+@cli.command()
 @click.pass_context
 def ping(ctx: click.Context) -> None:
     """Verify the control plane is reachable."""
