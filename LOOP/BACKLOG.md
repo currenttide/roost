@@ -123,7 +123,7 @@ Done-when: API.md documents the schedule endpoints (list/create/enable/disable/d
 Surface: worker/operability. North star #2. Pre-existing Proposed item: when GPU probing errors (driver hiccup, nvidia-smi missing vs failing), the worker silently advertises no GPU — placement then quietly routes GPU jobs elsewhere and operators can't tell a bare node from a broken one.
 Done-when: detection failure is distinguishable from absence in the worker's advertised capabilities and/or logs (additive — e.g. `gpu_detection: "failed"` capability or a loud structured log + worker event); matcher behavior for GPU constraints unchanged for both cases (failed ≠ schedulable); tests for probe-success/absence/failure paths; pytest green.
 
-### R42. Docs truth pass over the feature wave (PRs #40-#52) — `open` `self-promoted`
+### R42. Docs truth pass over the feature wave (PRs #40-#52) — `done` *(2026-06-07, PR #55)* `self-promoted`
 Surface: docs. A3 drift sweep — eight features landed since the last sweep (metrics, captain plan, one-shot publish mobile, pagination, push notify, interactive input, backup, mobile schedules, GPU detection-failed). README's feature/verb tables, INTEGRATIONS.md's verb table, and the quickstart/oversee skills likely don't mention `roost send`, `roost backup`, `/metrics`, or `--notify-url`. Includes the R32 leftover: add `roost --version` (tiny, fits a docs/CLI-surface truth pass).
 Done-when: every user-facing doc surface (README, INTEGRATIONS.md, DEPLOY.md cross-refs, .claude/skills/roost-*) accurately reflects the new verbs/flags — each claim truth-checked against code; `roost --version` exists and reports `__version__`; docs-drift ratchet back to 0; pytest green.
 
@@ -134,6 +134,14 @@ Done-when: either (a) reproducing test written and FAILS on master, fix makes it
 ### R44. Cost estimation: configurable per-model pricing — `done` *(2026-06-07, PR #53)* `self-promoted` `feature`
 Surface: backend/feature. North star #2 (operability). Cost estimates use a fixed rate (find it — grep worker.py/captain.py/server.py for the pricing constant); real fleets run mixed models and the estimate is wrong for most of them.
 Done-when: per-model pricing configurable (worker policy or CP config — pick the seam that matches where the estimate is computed; document the choice); sane defaults preserved (zero-config behavior unchanged); estimate uses the job's actual model; tests for default + override + unknown-model fallback; pytest green.
+
+### R45. Fix flaky backup temp-file test (xdist race) — `open` `self-promoted`
+Surface: tests/robustness. A4 debt from R42's run: `test_backup_leaves_no_temp_file_behind` globs the SHARED system temp dir and races the adjacent backup test under parallel execution — failed once mid-run, passes in isolation. A flaky suite undermines every future judge gate.
+Done-when: the test isolates its temp observation (dedicated tmp_path-scoped dir for backup temps, or filter by this test's own marker); deterministic under repetition (`pytest tests/test_server.py -k backup -p no:randomly --count`-style or a tight loop) and under parallel runs; pytest green.
+
+### R46. MCP tool docstrings: usage examples — `open` `self-promoted` `feature`
+Surface: MCP/DX. Pre-existing Proposed item, promoted: the captain agent READS these docstrings to decide how to call tools — examples directly improve every captain run's tool-use accuracy. Add a short worked example to each of the 16 tools' descriptions in roost/mcp.py (inputs + what comes back), truth-checked against the real schemas/server behavior.
+Done-when: every TOOLS entry carries an accurate example; examples truth-checked (judge re-checks against schemas + server routes); INTEGRATIONS.md tool table untouched or consistent; pytest green.
 
 ### R21. Make presigned blob PUT single-use and race-safe — `done` *(2026-06-07, PR #30)* `self-promoted`
 Surface: backend/security. A1 hunt #2 reproduced that a presigned `put_url`
@@ -260,7 +268,6 @@ first iteration on that ratchet measures and records it here (no code changes).
 - **A6 (cycle #4, unblocked from Proposed):** Version drift — `pyproject.toml` says `0.1.0`, server self-reports `0.2.0`; single-source via `importlib.metadata`
 - Drop `cred_hash` on worker revoke — make revocation total *(security-session — credential lifecycle belongs in the dedicated session)*
 - Narration re-render `min_interval` configurable
-- MCP tool docstrings: add usage examples for each tool
 - Tests for `triage.py` prompt rendering and `config.py` TOML/perms
 - Broader e2e coverage for `verify.py` verdict path
 - Mac app follow-ups (the native SwiftPM app lands with I1; webview wrapper is the deleted PoC — never resurrect it)

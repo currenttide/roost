@@ -1320,3 +1320,28 @@ Entries are written by the loop; humans read, never need to edit.
   review re-ran suite, verified byte-identical zero-config at multiple token values)
 - Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only)
 - Notes: iteration #7 slot 3. R42 (docs truth pass) last in flight.
+
+## 2026-06-07 ~02:20 UTC — R42: docs truth pass over the feature wave + roost --version
+- Verdict: shipped
+- Branch/PR: loop/r42-docs-truth-pass / https://github.com/currenttide/roost/pull/55 (merged effd420)
+- What changed: 11 drift spots found+fixed across README.md (tree ↳why, gpu
+  DETECTION-FAILED rows, backup row, push-notify note, --version mention, stale
+  "347 tests"→636), INTEGRATIONS.md (verb table /metrics + roost send steer row,
+  roost_submit reason arg, CLI one-liners send/backup/--version, publish
+  pagination), and roost-oversee SKILL.md (nudge-a-stuck-job via roost send with
+  the dropped-with-reason caveat). Verified-no-change: R30/R31 internal; API.md
+  already accurate; quickstart/onboard need nothing. R32 leftover closed:
+  `roost --version` via click version_option ← roost.__version__ + pyproject-match
+  test.
+- Evidence:
+  - `python -m pytest -q` → 636 at merge (now 644 with siblings)
+  - judge produced a per-claim code-citation verification table — every changed
+    claim truth-checked
+- Judge: approve (round 1)
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only)
+- Notes: iteration #7 COMPLETE — R42 #55, R43 invalid+guards #54, R44 #53; master
+  644; docs-drift ratchet back to 0. NEW A4 DEBT surfaced: flaky
+  test_backup_leaves_no_temp_file_behind (shared-tmp glob races under xdist) →
+  promoted as R45. Cycle #9 slate: R45 (flaky fix), R46 (MCP docstring examples —
+  the captain reads these, direct tool-use accuracy win), + A1 hunt #4
+  (captain/steward — last unhunted core area) whose findings feed cycle #10.
