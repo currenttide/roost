@@ -266,7 +266,7 @@ bug items still require a failing repro/test in-PR per A1 before the fix lands (
 items: evidence-table artifact instead). Fleet-ops findings (live CP container rebuild,
 oracle creds, stale Mac clone) are NOT loop items — parked for the human in Proposed.
 
-### R73. mac-app master does not compile (Swift 6.2 ternary type mismatch) — `open`
+### R73. mac-app master does not compile (Swift 6.2 ternary type mismatch) — `done` *(2026-06-07, PR #85 — Mac-node verified; Linux gate-hole documented)*
 Surface: mac-app/correctness. User-test BLOCKER. `mac-app` `PublishView.swift:181`
 `.foregroundStyle(PublishSlug.isValid(pub.name) ? .secondary : .red)` mixes
 `HierarchicalShapeStyle` and `Color`; Swift 6.2 rejects it — nobody can build current
@@ -277,7 +277,7 @@ artifact); additionally close the gate-hole honestly — either the Linux gate t
 the app target too, or mac-app-touching PRs are documented as requiring the Mac-node
 build (pick what's real, journal the choice); pytest green.
 
-### R74. Android dashboard TopAppBar never renders — Publish/Notifications/Schedules unreachable — `open`
+### R74. Android dashboard TopAppBar never renders — Publish/Notifications/Schedules unreachable — `done` *(2026-06-07, PR #86 — emulator-verified, 6 screenshots; root cause corrected: app-wide inset consumption, not per-screen layout)*
 Surface: mobile/Android/correctness. User-test BLOCKER (user-testing/android/03,04).
 `uiautomator` dump shows zero app-bar nodes — no title, no ⋮ overflow, the ONLY entry
 point to Publish/Notifications/Schedules (DashboardScreen.kt:84-86, 326-336): a third of
@@ -315,7 +315,7 @@ the design's slice is Linux-testable); send → input lands queued/delivered via
 endpoint (fixtures additive if needed); pure logic Linux-tested on both harnesses;
 Android emulator screenshot per R74 path, iOS per evidence-table mac path; pytest green.
 
-### R77. `roost schedule --list` dumps a raw httpx traceback on non-2xx — `open`
+### R77. `roost schedule --list` dumps a raw httpx traceback on non-2xx — `done` *(2026-06-07, PR #84 — audit fixed --rm and --enable/--disable too)*
 Surface: CLI/correctness. User-test major (verbatim: `httpx.HTTPStatusError: Client error
 '404 Not Found' for url 'http://127.0.0.1:8787/schedules'`). `cli.py:1564
 _print_schedules` calls `r.raise_for_status()` bare; the create path handles 404 cleanly,
@@ -531,4 +531,5 @@ first iteration on that ratchet measures and records it here (no code changes).
 - Mac-app verb expansion (A6 survey #2): menu bar covers Runs/Workers/Console/Transfers but none of publish/schedules/send/backup/history — which belong in a menu-bar scope is a product call (2026-06-07)
 - **User-testing sweep 2026-06-07 — polish notes (not promoted):** panel bad-token banner says "control plane unreachable — HTTP 401" (it's an auth failure; reachability is fine); `roost token --scope agent` mints `rst-mob-`-prefixed secrets (cosmetic; scope is correct); Android pairing screen is bottom-heavy with large empty margins (android/01); Android `model/Parsers.kt:21` `optString(key, null)` compiler warning.
 - **Commit the headless SwiftUI render harness** from the mac-app user test as a supported test utility *(product call)*: `RenderShots.swift` + 1-line `App.swift` hook gated on `ROOST_RENDER_DIR`, renders real views with live `GET /derived` data via `NSHostingView.cacheDisplay` — the only screenshot path on a TCC-less worker (mac-mini-m4 has no Screen Recording/Automation permission, ungrantable non-interactively).
+- **macOS CI job has never compiled the app** (R73 journaled debt, 2026-06-07; promotion candidate): `mac-app/Package.swift` pins `swift-tools-version:5.10`, but SwiftTerm 1.13.0 pulls swift-argument-parser 1.8.2 which requires tools 6.0 — the macos-14 runner's Swift 5.10 dies at dependency RESOLUTION, so the `App build + tests (macOS)` job is red on every mac-app PR and can catch nothing (it could not have caught R73). Master also has no required-status-check protection, so `--auto` merges fall through immediately. Fix: bump tools-version (the Mac node's 6.2.3 builds fine) or pin an older arg-parser, plus consider branch protection *(the protection setting itself is a human/GitHub-admin action)*.
 - **Fleet ops (human — NOT loop work), from the 2026-06-07 sweep:** (a) live CP container (`docker-ec7c1cae…`) runs roost 0.1.0 (installed Jun 5) — rebuild from master to unbreak `backup`/`schedule`/`/metrics`/one-shot publish against the live fleet; (b) oracle is unhealthy for agent jobs — Claude cred 401 + a broken SessionStart Node hook; (c) mac-mini-m4's `~/roost-r50` clone is a stale single-branch checkout (origin lacks a master ref) — re-clone or fix the remote; (d) consider granting Screen Recording TCC on the Mac for real-window capture.

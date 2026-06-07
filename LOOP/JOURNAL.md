@@ -2028,3 +2028,95 @@ Entries are written by the loop; humans read, never need to edit.
   repros ready in LOOP/repro-a1-hunt2.py); mac-app schedule-create composer;
   R37 device-only push transport; mac-app deeper verb scope (product call).
 - Models: orchestrator claude-opus-4-8
+
+## 2026-06-07 ~17:30 UTC — R77: schedule subverbs surface friendly errors (iteration #23)
+- Verdict: shipped
+- Branch/PR: loop/r77-schedule-list-error / https://github.com/currenttide/roost/pull/84 (merged 14e3c25)
+- What changed: shared `_schedule_http_error(r)` helper in roost/cli.py routes all
+  non-2xx on the schedule subverbs through create-path-parity wording
+  (`schedule failed: HTTP <code>: <text>`). Subverb audit found the bare
+  `raise_for_status()` in THREE places — `--list` (the reported bug), `--rm`
+  (non-404 errors leaked), `--enable/--disable` (same) — all fixed; dedicated
+  404 "schedule not found" messages on the mutate verbs preserved; create path
+  already clean. Other command groups' raise_for_status out of scope (judge
+  agreed the line is defensible). Diff: cli.py +15/-3, tests/test_cli.py +55.
+- Evidence:
+  - Fails-on-master proof: `git checkout 17ccfbd -- roost/cli.py` →
+    `pytest -k "schedule and (404_friendly or 500_friendly)"` → 5 failed
+  - After fix: 15 passed (schedule subset); full `python -m pytest -q` →
+    828 passed in 62.45s (823 base + 5 new)
+  - CLI-only error-handling change, no contract change → no live smoke (noted in PR)
+- Judge: approve (round 1) — independently reverted cli.py to master to confirm
+  the 5 failures, restored, re-ran 828 green; scope/honesty/Done-when verified
+- Models: implementer claude-opus-4-8[1m] / judge claude-sonnet-4-6
+- Notes: LONG-IDLE ended by human direction — commit 17ccfbd promoted R73–R87
+  from the four-agent user-testing sweep (evidence pack:
+  /workspace/yang/agent_fleet/user-testing/). Iteration #23 pick: R73+R74+R77 —
+  R75 deferred one iteration because it edits the same DashboardScreen.kt AND
+  needs the same single Pixel_8 emulator as R74 (protocol conflict-risk rule).
+  Benign tooling note: `gh pr merge --squash --delete-branch` errors on the
+  local-branch delete when run outside a checkout of master; merge itself lands.
+
+## 2026-06-07 ~17:30 UTC — R73: mac-app master compiles again (iteration #23)
+- Verdict: shipped
+- Branch/PR: loop/r73-macapp-compile / https://github.com/currenttide/roost/pull/85 (merged c9b1fa7)
+- What changed: PublishView.swift:181 ternary pinned both branches to `Color`
+  (`? Color.secondary : Color.red`) — Swift 6.2 rejects mixing
+  `HierarchicalShapeStyle`/`Color`. Gate-hole closed by DOCUMENTATION (new
+  mac-app/README "Verifying mac-app changes" section): the RoostMac target is
+  `#if os(macOS)` + AppKit/Carbon/ServiceManagement, so Linux SPM excludes its
+  translation units entirely — type-checking it on Linux is not real; any PR
+  touching mac-app/Sources/RoostMac/** requires a macOS build (CI job or Mac node).
+- Evidence:
+  - Bug proven on the Mac node at master HEAD: `error: static property 'red'
+    requires the types 'HierarchicalShapeStyle' and 'Color' be equivalent`
+  - Fixed branch via roost exec mac-mini-m4: `swift build` → Build complete!
+    (14.02s); `swift test` → 54/54; `./scripts/build.sh` → Roost.app 4.9M
+    ad-hoc-signed arm64 (build-log tail is the artifact — compile fix)
+  - Linux RoostKit (/tmp/swift-toolchain, Swift 6.0.3): 54/54
+  - `python -m pytest -q` → 828 passed (after clean rebase onto 14e3c25)
+- Judge: approve (round 1) — re-ran pytest AND the Mac build via roost exec;
+  confirmed 2-file scope and that documenting the Mac gate is the only honest option
+- Models: implementer claude-opus-4-8[1m] / judge claude-sonnet-4-6
+- Notes: JOURNALED DEBT (→ Proposed): the `App build + tests (macOS)` CI job has
+  been red on EVERY mac-app run — it dies at dependency resolution
+  (Package.swift pins swift-tools-version 5.10; SwiftTerm 1.13.0 pulls
+  swift-argument-parser 1.8.2 which needs tools 6.0; the macos-14 runner's
+  Swift 5.10 can't resolve) — so CI never compiled the app and could not have
+  caught this bug. Master has no required-status-check protection either, so
+  auto-merge falls through to immediate merge. Promotion candidate.
+
+## 2026-06-07 ~17:30 UTC — R74: Android TopAppBar renders; 3 screens unlocked (iteration #23)
+- Verdict: shipped
+- Branch/PR: loop/r74-android-topappbar / https://github.com/currenttide/roost/pull/86 (merged 13343e7)
+- What changed: app-wide inset fix, 2 files. Theme.kt: RoostTheme content wrapped
+  in a root Box with `Modifier.windowInsetsPadding(WindowInsets.systemBars)`
+  (pads AND consumes — per-screen TopAppBar default insets then resolve to zero,
+  no double padding) + `background(colors.background)`. themes.xml: both system
+  bars transparent, windowBackground black→white (no splash flash).
+  ROOT-CAUSE CORRECTION vs the user-test hypothesis: not a per-screen layout
+  difference (both screens use identical Scaffold+TopAppBar; the original
+  05-session.png shows the bar RENDERED but un-inset) — the real cause was that
+  nothing in the Compose tree consumed system-bar insets after
+  MainActivity's `enableEdgeToEdge()` (grep-verified), on a legacy
+  `android:Theme.Material.NoActionBar` XML theme.
+- Evidence:
+  - `python -m pytest -q` → 823 pre-rebase, 828 post-rebase (server untouched)
+  - Android Linux harness (kotlinc 1.9.24 + JUnitCore) → OK (81 tests)
+  - Emulator proof on mac-mini-m4 (AVD Pixel_8, API 36, headless):
+    gradle wrapper → assembleDebug BUILD SUCCESSFUL (APK 15.98 MB) →
+    adb install → deep-link pair → uiautomator dump AFTER fix shows title
+    "Roost" [43,179][192,253] + overflow "More" [975,185][1038,248] (pre-fix:
+    zero app-bar nodes); overflow opens Publish/Notifications/Schedules (all
+    three render); Session back-arrow [43,185][106,248] no longer crowds the
+    status bar
+  - 6 screenshots relayed via blob store, visually confirmed, linked in PR:
+    r74-01-dashboard … 06-session (blob ids in PR body)
+- Judge: approve (round 1) — re-ran pytest + the 81-test JVM harness, inspected
+  all 6 screenshots, verified the pad-and-consume reasoning and scope
+- Models: implementer claude-opus-4-8[1m] / judge claude-sonnet-4-6
+- Notes: Schedules screen shows "Couldn't load schedules" against the LAN CP
+  (404 — the deployed 0.1.0 CP; that's the R78/R81/fleet-ops surface, not R74).
+  Emulator killed, app uninstalled, test pairing token revoked, worktrees removed.
+  Iteration #23 totals: 3/3 shipped (PRs #84 #85 #86), tests 823 → 828, both
+  user-test BLOCKERS cleared, all judges approved round 1.
