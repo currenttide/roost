@@ -10,6 +10,7 @@ struct DashboardView: View {
     @State private var showNew = false
     @State private var showPublish = false
     @State private var showNotifySettings = false
+    @State private var showSchedules = false
     @State private var confirmCancel: Run?
     @State private var path: [String] = []      // navigation stack of job ids
 
@@ -49,6 +50,9 @@ struct DashboardView: View {
                         Button {
                             showNotifySettings = true
                         } label: { Label("Notifications", systemImage: "bell") }
+                        Button {
+                            showSchedules = true
+                        } label: { Label("Schedules", systemImage: "clock.arrow.circlepath") }
                         Divider()
                         Button("Unpair", role: .destructive) { app.unpair() }
                         if let name = app.credential?.name { Text(name) }
@@ -68,6 +72,9 @@ struct DashboardView: View {
             }
             .sheet(isPresented: $showNotifySettings) {
                 NotificationSettingsView()
+            }
+            .sheet(isPresented: $showSchedules) {
+                SchedulesView()
             }
             .confirmationDialog("Cancel this job?",
                                 isPresented: Binding(

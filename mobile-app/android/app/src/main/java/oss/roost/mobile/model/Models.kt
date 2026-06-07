@@ -202,4 +202,17 @@ data class Schedule(
 ) {
     /** Kind of the stored job spec, for a "next: <kind> job" subtitle. */
     val specKind: String? get() = spec["kind"] as? String
+
+    /**
+     * One-liner describing what this schedule runs, for the list row. Prefers the
+     * agent `intent`, then a `command`, then a kind/label fallback so a future
+     * spec shape still renders something (never blank). Mirrors iOS
+     * `Schedule.taskSummary`.
+     */
+    val taskSummary: String
+        get() {
+            (spec["intent"] as? String)?.takeIf { it.isNotEmpty() }?.let { return it }
+            (spec["command"] as? String)?.takeIf { it.isNotEmpty() }?.let { return it }
+            return name ?: specKind?.let { "$it job" } ?: "scheduled job"
+        }
 }
