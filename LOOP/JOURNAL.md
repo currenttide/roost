@@ -2524,3 +2524,24 @@ Entries are written by the loop; humans read, never need to edit.
   (baseline 71% @ 707 tests is stale; suite now 884) + A6 product-gap survey #3
   (the surface grew: prefix lookup, kind/goal_display, composer, XCUITest,
   pane states).
+
+## 2026-06-07 ~22:00 UTC — Replenishment: A2 re-measure + A6 survey #3
+- Verdict: shipped (survey cycle — slates only)
+- Branch/PR: — (slate + ratchet update committed)
+- What changed: A2 — fresh measure **80% TOTAL branch @ 884** (was 71% @ 707;
+  the session's repro discipline lifted it organically; 7 modules at 100%;
+  session-added code FULLY covered — verified per-file). Weakest: cli.py 62%,
+  worker.py 72%. Ratchet baseline updated to 80%. A6 #3 — three gate-passing
+  Tier A: history ignores goal_display (the loop's own R86 missed the CLI
+  surface its docstring names); iOS README harness count STAMPED at 92/92
+  (surveyor ran the harness — was Tier B estimate); panel 401 wording
+  (panel.html:243,412 — every error labeled "unreachable"). Verified clean:
+  mac-app composer parity (R62 had it), prefix/kind/goal_display consistency,
+  MCP docs. Tier B for the human: NO mobile CI exists at all (design call);
+  mac-app schedule-create composer; Android tree empty state; cosmetic nits.
+- Promotion (max 3): R94 (history goal_display), R95 (cli token-surface
+  coverage), R96 (worker argv-builder coverage). Queued Tier-A-judged for the
+  next slot: A6-2 README count, A6-3 panel 401, A2-3 worker process-safety.
+- Models: orchestrator claude-opus-4-8[1m]; surveyors opus; judges sonnet
+- Notes: both judges re-ran the measurements themselves (coverage report
+  re-derived; iOS harness re-run 92/92).

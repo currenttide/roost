@@ -436,6 +436,22 @@ Surface: CLI/robustness. A1 hunt #9. `cli.py:1564-1573` (R78): on one-shot ≥40
 Repro: hunt9 file — `test_repro_publish_loses_oneshot_err_on_fallback_connect_error`, FAIL on master.
 Done-when: the fallback blob POST and second `/publish` POST wrapped so transport exceptions still surface `oneshot_err` in a ClickException; repro promoted; pytest green.
 
+## Replenishment 2026-06-07 night — A2 coverage re-measure + A6 survey #3
+
+Fresh measure: **80% TOTAL branch @ 884 tests** (judge re-measured); session-added code fully covered; weakest: cli.py 62%, worker.py 72%. Six Tier-A items judged across the two slates; three promoted now, three queued (next slot): A6-2 iOS README count (STAMPED 92/92 vs claimed 58/58), A6-3 panel 401 wording (panel.html:243,412), A2-3 worker process-safety branches (_kill_active_job/_kill_aux_procs, worker.py:1205-1310).
+
+### R94. `roost history` ignores `goal_display` — the last raw-shell-text surface — `open` `self-promoted`
+Surface: backend/CLI/consistency. A6 survey #3 rank 1. R86 wired the glanceable summary into panel/mac/iOS/Android and `server.py:985`'s docstring names `roost history` as a consumer — but `_history_row` (cli.py:344) and `_recent_successes` (cli.py:375) read raw `run.get("goal")`. The documented "what went wrong this week" entry point still shows the wall of shell text the R86 nit was filed about.
+Done-when: both render `run.get("goal_display") or run.get("goal")` (fallback = old-CP safe); `_history_runs`'s has-a-real-goal filter stays on `goal`; tests extend tests/test_cli.py:367-426 (summary rendered; fallback when absent); pytest green.
+
+### R95. cli.py client-token surface coverage lift — `open` `self-promoted`
+Surface: tests/ratchet. A2 rank 1 (cli.py 62% branch — weakest module). `pair`/`token`/`revoke` + `_list_client_tokens`/`_revoke_client_token`/`_mint_client_token` (cli.py:941-1052): untested 403/404/empty/≥400 dispatch branches, revoked-vs-active + last-used formatting, distinct loopback warnings (phone vs script), QR fallback. Expected +4-6 branch points on cli.py.
+Done-when: real-behavior assertions via CliRunner + stubbed `_ctx_client`/MockTransport (R16 style, no processes); every error/dispatch branch asserted on observable output or exception type; cli.py branch coverage strictly up (judge re-measures + mutation-probes); no module down; pytest green.
+
+### R96. worker.py pure argv-builder coverage (`_build_auto_argv` + `_build_codex_argv`) — `open` `self-promoted`
+Surface: tests/ratchet. A2 rank 2 (worker.py 72%). Zero existing test references for worker.py:1068-1125: missing task/intent → ValueError; triage-prompt insertion at the CORRECT index incl. bwrap-wrapped argv (security-relevant — R30's bug class); sandbox/model defaulting; codex-missing → FileNotFoundError (monkeypatch shutil.which); args passthrough. Expected +2-3 branch points.
+Done-when: direct pure-function assertions on argv shape + raised errors; judge mutation-probes; no module down; pytest green.
+
 ### R21. Make presigned blob PUT single-use and race-safe — `done` *(2026-06-07, PR #30)* `self-promoted`
 Surface: backend/security. A1 hunt #2 reproduced that a presigned `put_url`
 remains valid after the first upload finalizes the blob: replaying the same URL
@@ -549,7 +565,7 @@ first iteration on that ratchet measures and records it here (no code changes).
 | Ratchet | Measure | Baseline | Direction |
 |---|---|---|---|
 | Test pass | `python -m pytest -q` | 347 passed (2026-06-05) | count may grow; failures never tolerated |
-| Branch coverage of `roost/` | `coverage run --branch -m pytest && coverage report` (dev-only dep, never shipped) | **71% TOTAL** (2026-06-07, 664→707 tests, R54; judge re-measured) | up only |
+| Branch coverage of `roost/` | `coverage run --branch -m pytest && coverage report` (dev-only dep, never shipped) | **80% TOTAL** (2026-06-07 night, 707→884 tests, A2 re-measure; judge re-measured; 7 modules at 100%) | up only |
 | Docs drift | confirmed findings per full drift sweep | 0 (2026-06-07 — sweep found 1+2, R15 fixed all three, judge truth-checked) | stays 0 |
 | Runnable examples | every `examples/*.yaml` accepted by a scratch CP submit | **3/3** (2026-06-07, scratch CP :8789) | stays 100% |
 
