@@ -1842,3 +1842,26 @@ Entries are written by the loop; humans read, never need to edit.
   over the worker-side code THIS SESSION rewrote (R25/R31/R38/R26) under the
   concurrency lens — deepening #1; an all-clear starts the protocol's
   two-clear long-idle counter.
+
+## 2026-06-07 ~15:40 UTC — A1 hunt #6: worker concurrency on our own rewrites
+- Verdict: shipped (repro merged; 1 confirmed, 6 cleared)
+- Branch/PR: loop/replenish-hunt6 / https://github.com/currenttide/roost/pull/77 (merged 6ad9148; repro only)
+- What changed: deepening #1 hunted the code THIS SESSION rewrote. CONFIRMED:
+  _done callback (worker.py:1688) pops _job_tasks unconditionally; _reap_stale_
+  attempt early-returns on old.done() without draining the old task's queued
+  callback → it fires post-respawn and evicts the NEW task. Over-lease, orphaned-
+  from-shutdown, and a path to double execution. Non-tautology proven with the
+  one-line identity guard (fix→pass→revert, md5 cycle). CLEARED (judge attacked
+  each): R31 timeout-then-cancel relay handling; oneshot cancel-path proc-kill
+  (registration ordering + _is_cancelled gate); R38 within-heartbeat double-
+  delivery (serial; documented at-least-once on lost ack); BrokenPipe mid-write;
+  R25+R26 _running balance; _wait_for_free_slot lost-wakeup (clear-then-recheck).
+- Evidence: repro FAILS ×3 on master; `python -m pytest -q` → 800; worker.py
+  byte-identical post-hunt (md5 93d4f66)
+- Judge: APPROVE (round 1) + all 6 clears adversarially confirmed
+- Models: hunter claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only)
+- Notes: iteration #16 complete (single-item hunt cycle). Process note logged by
+  the hunter: early probes imported roost from the MAIN repo instead of the
+  worktree, masking first fix attempts — corrected to import relative to LOOP/;
+  worth encoding in future hunt prompts. Hunt found a bug → long-idle counter
+  stays 0. Cycle #18 = R67 (the fix).

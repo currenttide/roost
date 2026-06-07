@@ -222,9 +222,14 @@ Surface: backend/correctness. A1 hunt #5 (PR #75). No server-side path reconcile
 Repro: `LOOP/repro-a1-hunt5.py` — 4 tests FAIL on master incl. a genuine cancel-race (orphans ~40%/trial, fails 10/10).
 Done-when: each terminal site drops still-queued inputs (`queued`→`dropped` with a reason) inside its existing BEGIN IMMEDIATE; the `_cancel_job` cascade scopes the drop to jobs transitioned in THIS call (not the whole BFS set — children already terminal must be untouched); the lease-expiry REQUEUE path deliberately left alone (job still active); all 4 repros pass, promoted into tests/; repro file deleted; pytest green.
 
-### R66. A1 hunt #6 — worker-side concurrency (this session's own changes) — `open` `self-promoted`
+### R66. A1 hunt #6 — worker-side concurrency (this session's own changes) — `done` *(2026-06-07, PR #77 — 1 confirmed, 6 cleared)* `self-promoted`
 Surface: hunt (protocol deepening #1). The worker was heavily modified this session (R25 try/finally rewrite, R31 relay-task lifecycle, R38 input fetch/deliver/ack loop, R26 OSError path) and has never been hunted under a concurrency lens. Fresh attack surface created by our own changes: heartbeat-reconcile racing input delivery; _reap_stale_attempt vs the new finally cleanup; input-ack racing job teardown; relay cancellation vs the input writer on the same stdin pipe; capacity slots under cancel storms.
 Done-when: repros (LOOP/repro-a1-hunt6.py) for confirmed bugs merged after judge verification, or an honest all-clear (which counts as deepening-clear #1 toward the protocol's long-idle trigger); pytest green.
+
+### R67. Stale done-callback evicts a re-leased job's new task — `open` `self-promoted`
+Surface: backend/correctness. A1 hunt #6 (PR #77). `_spawn_job`'s `_done` callback (worker.py:1688) pops `_job_tasks[_jid]` unconditionally; `_reap_stale_attempt` (:1669) early-returns on `old.done()` WITHOUT awaiting, so the old task's still-queued done-callback fires after the NEW task is installed and evicts it. Harm: capacity gate undercounts → over-lease; shutdown can't cancel the orphan; a later re-lease can't find the running task → two concurrent attempts → double execution.
+Repro: `LOOP/repro-a1-hunt6.py` — FAILS ×3 on master; one-line identity guard (`if self._job_tasks.get(_jid) is t:`) proven to fix (non-tautology cycle md5-verified by the hunter).
+Done-when: the identity guard (or equivalent — consider also draining the old task's callback in _reap_stale_attempt; pick the minimal correct form and justify) lands; repro promoted into tests/; repro file deleted; pytest green.
 
 ### R21. Make presigned blob PUT single-use and race-safe — `done` *(2026-06-07, PR #30)* `self-promoted`
 Surface: backend/security. A1 hunt #2 reproduced that a presigned `put_url`
