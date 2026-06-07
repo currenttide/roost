@@ -858,3 +858,21 @@ Entries are written by the loop; humans read, never need to edit.
   (2) journal entries go at the END (two agents prepended at the top); (3) completion
   notifications drop the orchestrator shell inside the agent worktree — cd back before
   git operations.
+
+## 2026-06-06 ~22:10 UTC — R28: complete INTEGRATIONS.md MCP tool table
+- Verdict: shipped
+- Branch/PR: loop/r28-integrations-tool-table / https://github.com/currenttide/roost/pull/37 (merged 03395c3)
+- What changed: docs-only (+8/-1, docs/INTEGRATIONS.md). The collapsed
+  `roost_status / roost_wait / roost_logs` row split into three; six absent rows
+  added: roost_wait, stage_file, send_file, fetch_file, list_staged,
+  roost_schedule. Table now set-equal to TOOL_IMPL's 16 tools, descriptions
+  match mcp.py; R27's roost_submit row preserved.
+- Evidence:
+  - `python -m pytest -q` → 541 passed (docs-only)
+  - judge cross-checked every row against mcp.py: no missing/extra/dupes
+- Judge: approve (round 1)
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6
+- Notes: iteration #2, slot 1 of 3 (R29 + replenish-prep still in flight).
+  DEVIATION (logged): the worktree env had no Task tool, so the judge ran as an
+  independent `claude -p --model sonnet` process (read-only, re-ran pytest
+  itself) — functionally equivalent, dispatch mechanism differed.

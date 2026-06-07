@@ -70,7 +70,7 @@ Done-when: except broadened to `OSError`; spawn failures post `type="failed"` an
 Surface: MCP/correctness. `roost/mcp.py` defined `kind` enum as `["claude","codex","docker"]`; `"auto"` was absent. Captain agents calling `roost_submit` with `kind: auto` were rejected by MCP schema validation before reaching the server.
 Done-when: `kind` enum includes `"auto"` with description; INTEGRATIONS.md updated; test added; pytest green.
 
-### R28. INTEGRATIONS.md MCP tool table missing 6 of 16 tools — `open` `self-promoted`
+### R28. INTEGRATIONS.md MCP tool table missing 6 of 16 tools — `done` *(2026-06-06, PR #37)* `self-promoted`
 Surface: docs. A6 survey cycle #4 (judge-approved, fast-tracked per protocol). `docs/INTEGRATIONS.md` tool table lists 9 tools; `roost/mcp.py` TOOL_IMPL defines 16. Missing: `stage_file`, `send_file`, `fetch_file`, `list_staged`, `roost_schedule`, `roost_wait` (collapsed into another row). File transfer and scheduling are invisible to new MCP users.
 Done-when: tool table contains every tool in TOOL_IMPL with one-line descriptions matching their mcp.py docstrings; re-verify against current master (R27 already touched the roost_submit row); pytest green (docs-drift ratchet stays 0).
 
