@@ -1274,3 +1274,49 @@ Entries are written by the loop; humans read, never need to edit.
   replenishment cycle #8 promotes R42 (A3 drift sweep over PRs #40-#52 + --version),
   R43 (cred-refresh/lease race — investigate, repro-or-clear), R44 (configurable
   per-model cost pricing). A1 captain/steward hunt remains queued for cycle #9.
+
+## 2026-06-07 ~01:55 UTC — R43: cred-refresh/lease race — REFUTED (invalid)
+- Verdict: invalid (hypothesis refuted; regression guards landed)
+- Branch/PR: loop/r43-refutation-guards / https://github.com/currenttide/roost/pull/54 (merged 028da64; tests-only)
+- What changed: the pre-loop survey hypothesis is structurally impossible — the
+  worker-plane bearer (minted once at enroll, cred_hash in DB, held immutably in
+  self.token; no rotation path exists) and the Claude OAuth creds file (local
+  atomic-rename write, zero DB writes, never used for worker→CP auth) share NO
+  mutable state. All three hypothesized interleavings traced and refuted with
+  file:line citations. Two regression guards landed (real Worker vs real in-process
+  CP via httpx.ASGITransport; refresh truly concurrent with heartbeats via gather)
+  so any future refactor coupling the credentials fails loudly.
+- Evidence:
+  - `python -m pytest -q` → 637 at the time (now 643 with R44); every heartbeat 200
+    across all interleavings incl. truly-concurrent refresh+heartbeat
+- Judge: approve — instructed to PROVE THE REFUTATION WRONG; independently attempted
+  all three interleavings from the cited paths and could not construct the race
+- Models: investigator claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only)
+- Notes: iteration #7 slot 2. Orchestrator judgment call (logged): the (b)-outcome
+  rule said "no PR", but the passing regression guards have standing value — landed
+  them citing the judge's approval of exactly these tests during the refutation
+  review. Adversarial-verification-before-implementation continues to earn its keep:
+  3 of the original survey's items have now been refuted before wasting a fix
+  (R5, R12, R43).
+
+## 2026-06-07 ~02:00 UTC — R44: configurable per-model cost pricing
+- Verdict: shipped
+- Branch/PR: loop/r44-cost-pricing / https://github.com/currenttide/roost/pull/53 (merged b0511be)
+- What changed: the fixed rate lived in the CP (server.py:504-505 —
+  AGENT_SESSION_BASE_USD 0.018 + COST_PER_MTOK_USD 6.0, consumed by _job_cost via
+  GET /derived). Seam: CP config via ROOST_PRICING env (matches the
+  NOTIFY_URL/PUBLISH_DOMAIN/NARRATE style) — JSON map of model name/substring →
+  {base_usd, per_mtok_usd} layered over DEFAULT_PRICING whose `default` entry holds
+  today's numbers; exact-then-longest-substring match; unknown model / unset /
+  malformed config all fall back to today's rate. Loaded once at create_app →
+  app.state.pricing. Deliberately NO input/output token granularity — the estimate
+  only tracks total tokens; inventing direction granularity would be fiction.
+  DEPLOY.md section + README pointer.
+- Evidence:
+  - `python -m pytest -q` → 641 at merge (zero-config byte-identical: 500k → 3.018,
+    0 → 0.0; actual-model selection, unknown-model fallback, garbage-config
+    tolerance all tested)
+- Judge: both phases approve (gate confirmed the fixed rate via git show HEAD;
+  review re-ran suite, verified byte-identical zero-config at multiple token values)
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only)
+- Notes: iteration #7 slot 3. R42 (docs truth pass) last in flight.

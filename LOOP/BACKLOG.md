@@ -127,11 +127,11 @@ Done-when: detection failure is distinguishable from absence in the worker's adv
 Surface: docs. A3 drift sweep — eight features landed since the last sweep (metrics, captain plan, one-shot publish mobile, pagination, push notify, interactive input, backup, mobile schedules, GPU detection-failed). README's feature/verb tables, INTEGRATIONS.md's verb table, and the quickstart/oversee skills likely don't mention `roost send`, `roost backup`, `/metrics`, or `--notify-url`. Includes the R32 leftover: add `roost --version` (tiny, fits a docs/CLI-surface truth pass).
 Done-when: every user-facing doc surface (README, INTEGRATIONS.md, DEPLOY.md cross-refs, .claude/skills/roost-*) accurately reflects the new verbs/flags — each claim truth-checked against code; `roost --version` exists and reports `__version__`; docs-drift ratchet back to 0; pytest green.
 
-### R43. Worker credential refresh racing lease TTL — `open` `self-promoted`
+### R43. Worker credential refresh racing lease TTL — `invalid` *(refuted 2026-06-07; regression guards landed PR #54)* `self-promoted`
 Surface: backend/robustness. Old survey hypothesis (Proposed since pre-loop): the worker's credential refresh can race the lease lifecycle — a refresh mid-lease may invalidate the credential the CP knows, or a lease renewal may race a rotating token. INVESTIGATE FIRST per A1 rules: trace the actual refresh + lease paths in worker.py/server.py; a fix requires a failing repro. If the race is not real on current code, clear the item honestly (that is a valid outcome — journal it `invalid`).
 Done-when: either (a) reproducing test written and FAILS on master, fix makes it pass, pytest green + live smoke; or (b) the hypothesis is refuted with cited code paths and the item closes `invalid`.
 
-### R44. Cost estimation: configurable per-model pricing — `open` `self-promoted` `feature`
+### R44. Cost estimation: configurable per-model pricing — `done` *(2026-06-07, PR #53)* `self-promoted` `feature`
 Surface: backend/feature. North star #2 (operability). Cost estimates use a fixed rate (find it — grep worker.py/captain.py/server.py for the pricing constant); real fleets run mixed models and the estimate is wrong for most of them.
 Done-when: per-model pricing configurable (worker policy or CP config — pick the seam that matches where the estimate is computed; document the choice); sane defaults preserved (zero-config behavior unchanged); estimate uses the job's actual model; tests for default + override + unknown-model fallback; pytest green.
 
