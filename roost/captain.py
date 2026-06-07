@@ -53,7 +53,10 @@ below, but re-check it). Each worker has `status` (idle/busy/stale/offline), \
 plus a `load` block with running/loadavg1/free_vram_gb), and a name.
 2. Decompose my goal into the SMALLEST set of INDEPENDENT sub-jobs. Independent \
 jobs should be submitted together (don't wait for one before submitting the \
-next) so they run in parallel across machines.
+next) so they run in parallel across machines. On EVERY `roost_submit`, set a \
+one-line `reason`: WHY this sub-job exists (its role in the plan and why this \
+placement/order). This is recorded on the job so an operator can later read your \
+plan with `roost tree` — it's how your intent stays visible, not just the jobs.
 3. For each sub-job choose placement by writing its `requires` block to match \
 the capability it truly needs — and no more:
    - GPU work → `{"gpu_vram_gb": ">=N", "tools": [...]}`. CPU work → just the \

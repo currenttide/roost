@@ -165,6 +165,11 @@ TOOLS: list[dict[str, Any]] = [
                 "hierarchy": {"type": "object",
                               "description": "Pass {can_dispatch: true} to let this child "
                                              "spawn grandchildren."},
+                "reason": {"type": "string",
+                           "description": "One short line: WHY this sub-job is part of the "
+                                          "plan (its role + why this placement/order). Recorded "
+                                          "on the job so `roost tree` shows the captain's intent "
+                                          "per child. Keep it to a single phrase."},
                 "cwd": {"type": "string"},
                 "env": {"type": "object"},
                 "args": {"type": "array", "items": {"type": "string"}},

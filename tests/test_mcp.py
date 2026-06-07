@@ -77,6 +77,38 @@ def test_roost_submit_kind_enum_includes_auto():
         assert k in kind_field["enum"], f"kind: {k!r} was unexpectedly removed"
 
 
+def test_roost_submit_schema_exposes_reason():
+    """R33: the captain needs a `reason` field on roost_submit to record per-sub-job
+    plan intent that `roost tree` later renders."""
+    schema = next(t for t in mcp.TOOLS if t["name"] == "roost_submit")["inputSchema"]
+    assert "reason" in schema["properties"]
+    assert schema["properties"]["reason"]["type"] == "string"
+
+
+def test_roost_submit_forwards_reason_to_cp(monkeypatch):
+    """The reason a captain passes must reach the CP body verbatim (it persists in
+    the child spec there)."""
+    posted = {}
+
+    class _Resp:
+        status_code = 200
+        def raise_for_status(self): pass
+        def json(self): return {"id": "j1", "state": "queued"}
+
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def post(self, path, json):
+            posted["body"] = json
+            return _Resp()
+
+    monkeypatch.setattr(mcp, "_client", lambda: _C())
+    monkeypatch.delenv("ROOST_PARENT_JOB_ID", raising=False)
+    out = mcp.tool_roost_submit({"command": "ruff .", "reason": "cheap CPU gate, run first"})
+    assert out["id"] == "j1"
+    assert posted["body"]["reason"] == "cheap CPU gate, run first"
+
+
 def test_roost_do_safe_single_runs(monkeypatch):
     posted = {}
 

@@ -1792,6 +1792,18 @@ def status(ctx: click.Context, job_id: str, verbose: bool) -> None:
         _print_job(r.json(), verbose=verbose)
 
 
+def _plan_reason(job: dict) -> Optional[str]:
+    """The captain's one-line 'why this sub-job' (R33), or None if the job carries
+    no plan annotation — older/non-captain jobs have no `spec.reason` and render
+    exactly as before (graceful absence)."""
+    spec = job.get("spec") if isinstance(job.get("spec"), dict) else {}
+    reason = spec.get("reason")
+    if isinstance(reason, str):
+        reason = reason.strip().replace("\n", " ")
+        return reason or None
+    return None
+
+
 @cli.command()
 @click.argument("job_id")
 @click.option("--json", "as_json", is_flag=True,
@@ -1800,7 +1812,11 @@ def status(ctx: click.Context, job_id: str, verbose: bool) -> None:
               help="Append per-job liveness facts (activity / idle / queued / capable).")
 @click.pass_context
 def tree(ctx: click.Context, job_id: str, as_json: bool, health: bool) -> None:
-    """Show a job's lineage tree (root → children → ...)."""
+    """Show a job's lineage tree (root → children → ...).
+
+    When the captain recorded a plan, each sub-job shows a one-line `why` (its
+    `spec.reason`) so an operator can read the captain's intent, not just state.
+    """
     with _ctx_client(ctx) as c:
         r = c.get(f"/jobs/{job_id}/tree")
         if r.status_code == 404:
@@ -1832,6 +1848,9 @@ def tree(ctx: click.Context, job_id: str, as_json: bool, health: bool) -> None:
             f"{prefix}{job['id']}  {job['state']:<10} "
             f"{job.get('worker_id') or '-':<14}{toks}  {intent}"
         )
+        reason = _plan_reason(job)
+        if reason:
+            click.echo(f"{prefix}    ↳ why: {reason}")
         if health:
             bits = []
             if job.get("idle_sec") is not None:

@@ -49,6 +49,14 @@ def test_build_prompt_carries_goal_and_budget():
     assert "roost_workers" in p  # system instructions present
 
 
+def test_system_prompt_instructs_recording_a_plan_reason():
+    """R33: the captain must be told to set a per-sub-job `reason` so its plan is
+    visible in `roost tree`."""
+    p = captain.SYSTEM_PROMPT
+    assert "reason" in p
+    assert "roost tree" in p
+
+
 def test_build_argv_restricts_tools_and_uses_mcp_config(tmp_path: Path):
     cfg = tmp_path / "mcp.json"
     cfg.write_text("{}")

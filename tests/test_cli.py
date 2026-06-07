@@ -581,3 +581,90 @@ def test_pair_uri_omits_empty_label():
     b64 = uri.split("d=", 1)[1]
     b64 += "=" * (-len(b64) % 4)
     assert "name" not in _json.loads(base64.urlsafe_b64decode(b64))
+
+
+# ---------- `roost tree`: captain plan reasoning (R33) ----------
+
+import httpx
+
+from roost.cli import _plan_reason
+
+
+def test_plan_reason_extracts_and_normalizes():
+    # Present → returned, stripped and collapsed to one line.
+    assert _plan_reason({"spec": {"reason": "  lint first\n(cheap gate)  "}}) == "lint first (cheap gate)"
+
+
+def test_plan_reason_absent_is_graceful():
+    # Older / non-captain jobs: no `reason` key, blank reason, or no/non-dict spec
+    # all yield None so the tree renders exactly as before.
+    assert _plan_reason({"spec": {"intent": "x"}}) is None
+    assert _plan_reason({"spec": {"reason": "   "}}) is None
+    assert _plan_reason({"id": "x"}) is None
+    assert _plan_reason({"spec": None}) is None
+
+
+def _tree_via_mock(monkeypatch, jobs: list[dict]):
+    """Invoke `roost tree <root>` with the CP `/tree` response stubbed."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/tree")
+        return httpx.Response(200, json=jobs)
+
+    monkeypatch.setattr(
+        roost_cli, "_ctx_client",
+        lambda _ctx: httpx.Client(base_url="http://cp", transport=httpx.MockTransport(handler)),
+    )
+    return CliRunner().invoke(roost_cli.tree, ["root1"], obj={})
+
+
+def test_tree_renders_per_child_reason_when_plan_present(monkeypatch):
+    jobs = [
+        {"id": "root1", "state": "running", "worker_id": None, "parent_job_id": None,
+         "intent": "split a goal", "spec": {"intent": "split a goal"}, "tokens_used": 0},
+        {"id": "childA", "state": "succeeded", "worker_id": "w-cpu", "parent_job_id": "root1",
+         "intent": "lint the repo", "tokens_used": 0,
+         "spec": {"command": "ruff .", "reason": "cheap CPU gate, run first"}},
+        {"id": "childB", "state": "running", "worker_id": "w-gpu", "parent_job_id": "root1",
+         "intent": "run the eval", "tokens_used": 0,
+         "spec": {"command": "python eval.py", "reason": "needs the GPU box"}},
+    ]
+    res = _tree_via_mock(monkeypatch, jobs)
+    assert res.exit_code == 0, res.output
+    # Each child shows its one-line WHY under the job line.
+    assert "↳ why: cheap CPU gate, run first" in res.output
+    assert "↳ why: needs the GPU box" in res.output
+    # The reason is attached to the right child (appears after its id).
+    a_idx = res.output.index("childA")
+    assert res.output.index("cheap CPU gate", a_idx) < res.output.index("childB")
+
+
+def test_tree_without_plan_renders_exactly_as_before(monkeypatch):
+    """Graceful absence: no job carries a reason → not a single `why:` line, and
+    the existing id/state/worker line is unchanged."""
+    jobs = [
+        {"id": "root1", "state": "running", "worker_id": None, "parent_job_id": None,
+         "intent": "old plan", "spec": {"intent": "old plan"}, "tokens_used": 0},
+        {"id": "childA", "state": "succeeded", "worker_id": "w1", "parent_job_id": "root1",
+         "intent": "do a thing", "spec": {"command": "true"}, "tokens_used": 0},
+    ]
+    res = _tree_via_mock(monkeypatch, jobs)
+    assert res.exit_code == 0, res.output
+    assert "why:" not in res.output
+    assert "childA" in res.output and "succeeded" in res.output
+
+
+def test_tree_mixed_plan_only_annotates_jobs_with_reason(monkeypatch):
+    """A partially-annotated tree: only the child that has a reason gets a why line."""
+    jobs = [
+        {"id": "root1", "state": "running", "worker_id": None, "parent_job_id": None,
+         "intent": "plan", "spec": {"intent": "plan"}, "tokens_used": 0},
+        {"id": "childA", "state": "succeeded", "worker_id": "w1", "parent_job_id": "root1",
+         "intent": "annotated", "spec": {"command": "a", "reason": "the annotated one"},
+         "tokens_used": 0},
+        {"id": "childB", "state": "succeeded", "worker_id": "w2", "parent_job_id": "root1",
+         "intent": "plain", "spec": {"command": "b"}, "tokens_used": 0},
+    ]
+    res = _tree_via_mock(monkeypatch, jobs)
+    assert res.exit_code == 0, res.output
+    assert res.output.count("why:") == 1
+    assert "↳ why: the annotated one" in res.output
