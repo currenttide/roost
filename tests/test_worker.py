@@ -1625,3 +1625,454 @@ def test_r43_refresh_disabled_on_cp_leaves_lease_auth_intact(tmp_path):
     asyncio.run(go())
 
     asyncio.run(go())
+
+
+# ---------- [R51] verify / self-heal phase, end-to-end through run_job ----------
+#
+# These drive the REAL run_job verify/self-heal phase with stubbed subprocesses.
+# The seam: run_job's executor argv comes from build_command, and the verify /
+# self-heal subprocesses' argv come from _build_claude_argv (inside _oneshot_agent).
+# We patch both to emit a marker argv we can recognise, then patch
+# asyncio.create_subprocess_exec with a factory that dispatches on that marker —
+# so the REAL _run_verifier, _oneshot_agent, the self-heal loop, _phase_progress
+# budget plumbing, and verify.parse_verdict/render_user/render_fix all execute.
+# Nothing real (claude/sh) is ever spawned.
+
+import json  # noqa: E402
+from unittest.mock import patch as _patch  # noqa: E402
+import roost.worker as _wm  # noqa: E402
+from roost.verify import VERIFY_MARKER  # noqa: E402
+
+_EXEC_MARK = "ROOST_TEST_EXEC"
+_ONESHOT_MARK = "ROOST_TEST_ONESHOT"
+
+
+class _ScriptedStream:
+    """Yields the given byte lines, then EOF — an asyncio.StreamReader stand-in."""
+    def __init__(self, data: bytes):
+        self._lines = iter(data.splitlines(keepends=True) + [b""])
+
+    async def readline(self):
+        return next(self._lines, b"")
+
+
+class _ScriptedProc:
+    """A fake subprocess: emits scripted stdout, exits with `returncode`.
+
+    If `hang` is set, wait() blocks until either (a) the caller's asyncio.wait_for
+    cap cancels it (the verify-subprocess TIMEOUT path: _oneshot_agent then calls
+    os.killpg — ProcessLookupError on this fake pid, swallowed — and reaps with a
+    second wait() that returns -9 like a SIGKILLed process), or (b) kill() is
+    called (the server-CANCEL teardown path: _kill_aux_procs SIGKILLs the aux proc,
+    which here trips _killed so wait() returns promptly instead of parking for the
+    full cap). pid is real-ish so the killpg branch runs."""
+    def __init__(self, *, stdout: bytes = b"", returncode: int = 0, hang: bool = False):
+        self.stdout = _ScriptedStream(stdout)
+        self.stderr = _ScriptedStream(b"")
+        self.returncode = returncode
+        self.pid = 424242
+        self._hang = hang
+        self._killed = asyncio.Event()
+
+    def kill(self):
+        # os.killpg on the fake pid raises ProcessLookupError → _kill_aux_procs
+        # falls back to proc.kill(); make that actually release a hanging wait().
+        self.returncode = -9
+        self._killed.set()
+
+    async def wait(self):
+        if self._hang and not self._killed.is_set():
+            try:
+                await self._killed.wait()  # released by kill(); else cancelled by the cap
+            except asyncio.CancelledError:
+                # Timeout path: the cap cancelled this wait(); mark dead so the
+                # follow-up reap wait() (post-SIGKILL) returns -9 immediately.
+                self.returncode = -9
+                self._killed.set()
+                raise
+        return self.returncode
+
+
+def _result_line(text: str) -> bytes:
+    """A claude stream-json `result` line carrying `text` (what the executor /
+    verifier 'said'), so the relay captures it into result_text / the verdict."""
+    return (json.dumps({"type": "result", "result": text}) + "\n").encode()
+
+
+def _verify_e2e_patches(*, executor, verifier):
+    """Context managers that wire run_job's three subprocess seams to fakes.
+
+    `executor`/`verifier` are callables returning a _ScriptedProc. `verifier` is
+    given the spawn index (0-based count of verify/heal subprocesses so far) so a
+    test can vary verdicts across self-heal rounds; its argv tells fix from verify.
+    """
+    calls = {"verify_spawns": 0, "labels": []}
+
+    def _fake_build_command(spec, job_id, **kw):
+        # Executor argv: a recognisable no-op; build_command normally returns
+        # (argv, cwd, tempfiles).
+        return (["/bin/true", _EXEC_MARK, job_id], "/tmp", [])
+
+    def _fake_build_claude_argv(spec, job_id, **kw):
+        # _oneshot_agent passes job_id as f"{parent}-{label}" (…-verify / …-fix1).
+        return ["/bin/true", _ONESHOT_MARK, job_id]
+
+    async def _fake_create(*argv, **kwargs):
+        flat = [str(a) for a in argv]
+        if _EXEC_MARK in flat:
+            return executor()
+        if _ONESHOT_MARK in flat:
+            # _build_claude_argv put the f"{parent}-{label}" job_id right after the
+            # marker; _oneshot_agent then splices --append-system-prompt in after
+            # index 3, so we read the element next to the marker (not flat[-1]).
+            label = flat[flat.index(_ONESHOT_MARK) + 1]
+            calls["labels"].append(label)
+            idx = calls["verify_spawns"]
+            calls["verify_spawns"] += 1
+            return verifier(idx, label)
+        raise AssertionError(f"unexpected spawn argv: {flat}")
+
+    cms = (
+        _patch.object(_wm, "build_command", side_effect=_fake_build_command),
+        _patch.object(_wm, "_build_claude_argv", side_effect=_fake_build_claude_argv),
+        _patch("asyncio.create_subprocess_exec", side_effect=_fake_create),
+    )
+    return cms, calls
+
+
+def _run_verify_job(spec_extra=None, *, executor, verifier, policy=None, job_id="jv"):
+    """Drive run_job for a verifying agent job to completion; return (events, logs,
+    calls). The spec is kind:claude with verify:true so the trust loop engages."""
+    async def go():
+        w, events, logs = _mk_runjob_worker(policy or {})
+        spec = {"kind": "claude", "intent": "do the thing", "task": "make X true",
+                "verify": True}
+        spec.update(spec_extra or {})
+        cms, calls = _verify_e2e_patches(executor=executor, verifier=verifier)
+        with cms[0], cms[1], cms[2]:
+            await asyncio.wait_for(
+                w.run_job({"id": job_id, "spec": spec}), timeout=30.0)
+        await w.close()
+        return events, logs, calls
+
+    return asyncio.run(go())
+
+
+def _terminal(events):
+    t = [e for e in events if e.get("type") in ("succeeded", "failed", "declined")]
+    assert t, f"no terminal event; events={events}"
+    return t[-1]
+
+
+def test_r51_verify_pass_records_verified_success():
+    """Executor exits 0, the independent verifier returns PASS → terminal
+    'succeeded' with verified=True and the verifier's evidence recorded."""
+    def executor():
+        return _ScriptedProc(stdout=_result_line("I made X true."), returncode=0)
+
+    def verifier(idx, label):
+        # Only the verify subprocess should run (no self-heal on a pass).
+        assert "verify" in label, f"unexpected aux subprocess: {label}"
+        return _ScriptedProc(
+            stdout=_result_line(f"Checked X; it holds. {VERIFY_MARKER} PASS — X is true"),
+            returncode=0)
+
+    events, logs, calls = _run_verify_job(executor=executor, verifier=verifier)
+    term = _terminal(events)
+    assert term["type"] == "succeeded", term
+    assert term["result"]["verified"] is True
+    assert term["result"]["self_heal_attempts"] == 0
+    assert "X is true" in term["result"]["evidence"]
+    assert term["result"]["output"] == "I made X true."
+    # Exactly one verify subprocess, no fix.
+    assert calls["verify_spawns"] == 1
+    assert all("fix" not in lbl for lbl in calls["labels"])
+    # The PASS verdict was logged.
+    assert any("PASS" in d for s, d in logs if s == "event")
+
+
+def test_r51_self_heal_succeeds_after_initial_fail():
+    """Verifier FAILs, one self-heal fix runs, re-verify PASSes → 'succeeded'
+    with verified=True and self_heal_attempts=1 (heal recovered the job)."""
+    def executor():
+        return _ScriptedProc(stdout=_result_line("first (bad) attempt"), returncode=0)
+
+    def verifier(idx, label):
+        if "fix" in label:
+            # The self-heal fix subprocess produces a new result_text.
+            return _ScriptedProc(stdout=_result_line("fixed it properly"), returncode=0)
+        # First verify FAILs, the re-verify (after the fix) PASSes.
+        if idx == 0:
+            return _ScriptedProc(
+                stdout=_result_line(f"{VERIFY_MARKER} FAIL — X is still false"),
+                returncode=0)
+        return _ScriptedProc(
+            stdout=_result_line(f"{VERIFY_MARKER} PASS — X now true"), returncode=0)
+
+    events, logs, calls = _run_verify_job(executor=executor, verifier=verifier)
+    term = _terminal(events)
+    assert term["type"] == "succeeded", term
+    assert term["result"]["verified"] is True
+    assert term["result"]["self_heal_attempts"] == 1
+    # The healed result_text replaced the original.
+    assert term["result"]["output"] == "fixed it properly"
+    # verify, fix1, re-verify == three aux spawns.
+    assert calls["verify_spawns"] == 3
+    assert [("fix" in l) for l in calls["labels"]] == [False, True, False]
+    assert any("self-healing attempt 1" in d for s, d in logs if s == "event")
+
+
+def test_r51_self_heal_exhausted_fails_with_honest_error():
+    """Verifier FAILs every time → after MAX_FIX_ATTEMPTS self-heals the job is
+    terminal 'failed' (exit_code 0) with an honest 'verification failed' error,
+    not a false success."""
+    def executor():
+        return _ScriptedProc(stdout=_result_line("attempt"), returncode=0)
+
+    def verifier(idx, label):
+        if "fix" in label:
+            return _ScriptedProc(stdout=_result_line("tried again"), returncode=0)
+        return _ScriptedProc(
+            stdout=_result_line(f"{VERIFY_MARKER} FAIL — still broken"), returncode=0)
+
+    events, logs, calls = _run_verify_job(executor=executor, verifier=verifier)
+    term = _terminal(events)
+    assert term["type"] == "failed", term
+    assert term["exit_code"] == 0  # the executor succeeded; verification did not
+    assert term["result"]["verified"] is False
+    assert term["result"]["self_heal_attempts"] == _wm.MAX_FIX_ATTEMPTS
+    assert "verification failed" in term["error"]
+    assert "still broken" in term["error"]
+    # 1 verify + MAX_FIX_ATTEMPTS * (fix + re-verify).
+    assert calls["verify_spawns"] == 1 + 2 * _wm.MAX_FIX_ATTEMPTS
+    fixes = [l for l in calls["labels"] if "fix" in l]
+    assert len(fixes) == _wm.MAX_FIX_ATTEMPTS
+    # A failed terminal carries a diagnosis (stubbed in _mk_runjob_worker).
+    assert "diagnosis" in term
+
+
+def test_r51_verifier_inconclusive_accepts_unverified_not_false_success():
+    """Pin the degradation: a verifier that produces NO verdict (crash/garbage
+    output) is retried once (M3) and, still inconclusive, the job completes
+    'succeeded' but with verified=None — accepted-unverified, never a confident
+    success and never a self-heal (passed is None, not False)."""
+    def executor():
+        return _ScriptedProc(stdout=_result_line("did something"), returncode=0)
+
+    def verifier(idx, label):
+        # No marker at all → parse_verdict returns (None, ...); _run_verifier
+        # retries once, so we expect exactly two verify spawns.
+        assert "fix" not in label, "inconclusive must NOT trigger self-heal"
+        return _ScriptedProc(stdout=_result_line("I am confused and emit no verdict"),
+                             returncode=0)
+
+    events, logs, calls = _run_verify_job(executor=executor, verifier=verifier)
+    term = _terminal(events)
+    assert term["type"] == "succeeded", term
+    assert term["result"]["verified"] is None  # inconclusive, NOT True
+    assert term.get("verified") is None
+    assert term["result"]["self_heal_attempts"] == 0
+    assert "inconclusive" in term["result"]["evidence"].lower()
+    # M3: one retry → exactly two verify subprocesses, zero fixes.
+    assert calls["verify_spawns"] == 2
+    assert all("fix" not in l for l in calls["labels"])
+    assert any("retrying once" in d for s, d in logs if s == "event")
+
+
+def test_r51_unrecognized_verdict_is_inconclusive_not_pass():
+    """A verifier that emits the marker but a word that is neither PASS nor FAIL
+    (e.g. 'MAYBE') is parsed as no usable verdict (verify.parse_verdict ->
+    (None, 'unrecognized verdict: …')); run_job retries once (M3) then completes
+    'succeeded' with verified=None — an unrecognized verdict must NEVER read as a
+    confident pass, and must NOT trigger self-heal (passed is None, not False)."""
+    def executor():
+        return _ScriptedProc(stdout=_result_line("did something"), returncode=0)
+
+    def verifier(idx, label):
+        assert "fix" not in label, "unrecognized verdict must NOT trigger self-heal"
+        return _ScriptedProc(
+            stdout=_result_line(f"weighing it up… {VERIFY_MARKER} MAYBE, hard to say"),
+            returncode=0)
+
+    events, logs, calls = _run_verify_job(executor=executor, verifier=verifier)
+    term = _terminal(events)
+    assert term["type"] == "succeeded", term
+    assert term["result"]["verified"] is None
+    assert term["result"]["self_heal_attempts"] == 0
+    assert "inconclusive" in term["result"]["evidence"].lower()
+    # M3 retry on the inconclusive (unrecognized) verdict → two verify spawns.
+    assert calls["verify_spawns"] == 2
+    # The unrecognized-verdict reason surfaced in the verifier log line.
+    assert any("unrecognized verdict" in d for s, d in logs if s == "event")
+
+
+def test_r51_verifier_timeout_is_inconclusive_accepted_unverified():
+    """A verifier subprocess that hangs past its cap is SIGKILLed; with no
+    verdict captured the outcome is the same inconclusive accepted-unverified
+    completion (verified=None), exercising the _oneshot_agent timeout branch."""
+    def executor():
+        return _ScriptedProc(stdout=_result_line("did something"), returncode=0)
+
+    def verifier(idx, label):
+        return _ScriptedProc(stdout=b"", returncode=0, hang=True)
+
+    # A tiny per-subprocess cap via an explicit wallclock budget so the verify
+    # subprocess's wait_for trips quickly. job_started is ~now, so a 1.2s budget
+    # leaves ~1.2s headroom for the verify subprocess (capped below default).
+    events, logs, calls = _run_verify_job(
+        executor=executor, verifier=verifier,
+        spec_extra={"budget": {"max_wallclock_sec": 1.2}})
+    term = _terminal(events)
+    assert term["type"] == "succeeded", term
+    assert term["result"]["verified"] is None
+    assert "inconclusive" in term["result"]["evidence"].lower()
+
+
+def test_r51_budget_exhausted_skips_verification_with_unverified_note():
+    """When the token budget is already spent by the time the verify phase
+    starts, _phase_progress returns no cap: verification is SKIPPED, the result
+    is accepted with verified=None and the explicit budget-exhausted note — no
+    verify/heal subprocess is ever spawned."""
+    def executor():
+        # Burn tokens in the executor so tokens_used >= max_tokens before verify.
+        usage = {"type": "result", "result": "ran",
+                 "usage": {"input_tokens": 600, "output_tokens": 600}}
+        return _ScriptedProc(stdout=(json.dumps(usage) + "\n").encode(), returncode=0)
+
+    def verifier(idx, label):  # must never be called
+        raise AssertionError("verification must be skipped when budget exhausted")
+
+    events, logs, calls = _run_verify_job(
+        executor=executor, verifier=verifier,
+        spec_extra={"budget": {"max_tokens": 1000}})
+    term = _terminal(events)
+    assert term["type"] == "succeeded", term
+    assert calls["verify_spawns"] == 0  # no verifier spawned
+    assert term["result"]["verified"] is None
+    assert "budget exhausted" in term["result"]["evidence"]
+    assert "verification skipped" in term["result"]["evidence"]
+
+
+def test_r51_self_heal_blocked_when_no_budget_for_first_fix():
+    """If the FIRST verify FAILs but also spends the whole token budget, the
+    self-heal loop's very first _phase_progress reports exhausted: NO fix
+    subprocess runs (the loop breaks before it), and the FAIL verdict stands ->
+    terminal 'failed' with self_heal_attempts counted but zero fixes spawned."""
+    def executor():
+        return _ScriptedProc(stdout=_result_line("attempt"), returncode=0)
+
+    def verifier(idx, label):
+        # The (single) verify both FAILs and burns the entire budget, so the
+        # self-heal step can't even start a fix.
+        assert "fix" not in label, "no fix may run once the budget is spent"
+        usage = {"type": "result",
+                 "result": f"{VERIFY_MARKER} FAIL — broken",
+                 "usage": {"input_tokens": 5000, "output_tokens": 5000}}
+        return _ScriptedProc(stdout=(json.dumps(usage) + "\n").encode(), returncode=0)
+
+    events, logs, calls = _run_verify_job(
+        executor=executor, verifier=verifier,
+        spec_extra={"budget": {"max_tokens": 1000}})
+    term = _terminal(events)
+    assert term["type"] == "failed", term
+    assert term["result"]["verified"] is False
+    # heals incremented to 1 before _phase_progress returned None and broke.
+    assert term["result"]["self_heal_attempts"] == 1
+    assert calls["verify_spawns"] == 1  # only the verify; no fix, no re-verify
+    assert all("fix" not in l for l in calls["labels"])
+
+
+def test_r51_server_cancel_during_verify_posts_no_terminal_event():
+    """Pin the teardown path (worker.py:2048-2051): if the server cancels the job
+    while it is in the verify phase, run_job detects the teardown after the
+    verifier returns and posts NO terminal (succeeded/failed) event — the control
+    plane has moved on (mirrors the lease-reconciliation contract). We trip the
+    cancel from inside the verifier spawn, the moment the verify subprocess
+    starts, so the post-verify _is_cancelled() check fires deterministically."""
+    captured = {"w": None}
+
+    async def go():
+        w, events, logs = _mk_runjob_worker({})
+        captured["w"] = w
+        spec = {"kind": "claude", "intent": "do the thing", "task": "make X true",
+                "verify": True}
+
+        def executor():
+            return _ScriptedProc(stdout=_result_line("ran"), returncode=0)
+
+        def verifier(idx, label):
+            # Simulate a server cancel landing exactly while the verifier runs:
+            # mark the active entry torn down (what _kill_active_job does).
+            entry = captured["w"]._active.get("jvc")
+            assert entry is not None, "job should be active during verify"
+            entry["cancelled"] = "cancelled"
+            # Return a real PASS so the ONLY reason no success is posted is the
+            # cancel teardown — not a missing/failed verdict.
+            return _ScriptedProc(
+                stdout=_result_line(f"{VERIFY_MARKER} PASS — would have passed"),
+                returncode=0)
+
+        cms, calls = _verify_e2e_patches(executor=executor, verifier=verifier)
+        with cms[0], cms[1], cms[2]:
+            await asyncio.wait_for(
+                w.run_job({"id": "jvc", "spec": spec}), timeout=15.0)
+        await w.close()
+        return events, calls
+
+    events, calls = asyncio.run(go())
+    terminal = [e for e in events if e.get("type") in ("succeeded", "failed")]
+    assert terminal == [], f"cancel during verify must post no terminal event; got {terminal}"
+    # The verifier did run (so we're truly testing the post-verify teardown path,
+    # not a pre-verify short-circuit), and self-heal never started.
+    assert calls["verify_spawns"] == 1
+
+
+def test_r51_self_heal_stops_when_budget_runs_out_midway():
+    """If the budget is exhausted partway through self-heal (after the first
+    fix's tokens land), the loop breaks and the LAST verdict stands — here the
+    first verify FAILed, so the job is terminal 'failed' with the heals counted
+    so far, rather than looping until MAX_FIX_ATTEMPTS."""
+    def executor():
+        return _ScriptedProc(stdout=_result_line("attempt"), returncode=0)
+
+    def verifier(idx, label):
+        if "fix" in label:
+            # The fix burns the rest of the token budget, so the next
+            # _phase_progress ('re-verifying') reports exhausted and breaks.
+            usage = {"type": "result", "result": "tried",
+                     "usage": {"input_tokens": 5000, "output_tokens": 5000}}
+            return _ScriptedProc(stdout=(json.dumps(usage) + "\n").encode(), returncode=0)
+        return _ScriptedProc(
+            stdout=_result_line(f"{VERIFY_MARKER} FAIL — broken"), returncode=0)
+
+    events, logs, calls = _run_verify_job(
+        executor=executor, verifier=verifier,
+        spec_extra={"budget": {"max_tokens": 1000}})
+    term = _terminal(events)
+    # First verify FAILed and the budget cut self-heal short before any re-verify
+    # could flip it; passed is still False → honest failure.
+    assert term["type"] == "failed", term
+    assert term["result"]["verified"] is False
+    assert term["result"]["self_heal_attempts"] == 1
+    # verify (PASS-able? no, FAIL) + exactly one fix, then exhausted — no re-verify.
+    assert calls["verify_spawns"] == 2
+    assert [("fix" in l) for l in calls["labels"]] == [False, True]
+
+
+def test_r51_no_verify_when_disabled_is_plain_success():
+    """Control: verify:false short-circuits the whole trust loop — terminal
+    'succeeded' with a plain {output} result and NO verified/evidence bundle,
+    and the verifier is never spawned."""
+    def executor():
+        return _ScriptedProc(stdout=_result_line("done"), returncode=0)
+
+    def verifier(idx, label):
+        raise AssertionError("verifier must not run when verify:false")
+
+    events, logs, calls = _run_verify_job(
+        executor=executor, verifier=verifier, spec_extra={"verify": False})
+    term = _terminal(events)
+    assert term["type"] == "succeeded", term
+    assert calls["verify_spawns"] == 0
+    assert term.get("result") == {"output": "done"}
+    assert "verified" not in (term.get("result") or {})
