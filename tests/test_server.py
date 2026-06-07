@@ -408,6 +408,42 @@ def test_liveness_capable_workers_fact(client: TestClient):
     assert j2["capable_workers"] == 1
 
 
+def test_job_pinned_to_nonexistent_target_is_unplaceable(client: TestClient):
+    # R48 regression (promoted from LOOP/repro-a1-hunt4.py): capable_workers must
+    # honor the hard `target` worker-pin with the same id-or-name semantics
+    # _try_assign_one enforces — not `requires` matching alone. A job pinned to a
+    # worker that does not exist can NEVER be placed, so it must report
+    # capable_workers=0 / health "unplaceable", not a placeable "queued".
+    _enroll_named(client, "alpha", {"tools": ["python3"]})
+    job = client.post(
+        "/jobs", json={"command": "true", "target": "ghost-worker-does-not-exist"}
+    ).json()
+
+    derived = client.get(f"/jobs/{job['id']}/derived").json()
+    assert derived["state"] == "queued"
+    assert derived["capable_workers"] == 0
+    assert derived["health"]["status"] == "unplaceable", (
+        f"a job pinned to a non-existent target reported "
+        f"{derived['health']['status']!r} with capable_workers="
+        f"{derived['capable_workers']!r}; the target pin is ignored when counting "
+        f"capable workers"
+    )
+
+
+def test_job_pinned_to_existing_capable_target_counts(client: TestClient):
+    # Parity check for R48: a job pinned (by id AND, separately, by name) to a real
+    # online capable worker still counts that worker — the pin must not over-restrict.
+    beta_id, _ = _enroll_named(client, "beta", {"tools": ["python3"]})
+    by_id = client.post(
+        "/jobs", json={"command": "true", "requires": {"tools": ["python3"]}, "target": beta_id}
+    ).json()
+    by_name = client.post(
+        "/jobs", json={"command": "true", "requires": {"tools": ["python3"]}, "target": "beta"}
+    ).json()
+    assert client.get(f"/jobs/{by_id['id']}/derived").json()["capable_workers"] == 1
+    assert client.get(f"/jobs/{by_name['id']}/derived").json()["capable_workers"] == 1
+
+
 # ---------- [R3] lease reconciliation: owned-jobs heartbeat signal ----------
 
 
