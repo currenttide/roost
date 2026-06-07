@@ -97,7 +97,7 @@ Survey claim was wrong: the guards at roost/server.py:222, 513, 725, 984 roll ba
 Surface: mobile/tests. Contract verified in sync on 2026-06-05 (all 9 API.md endpoints match server.py) — but nothing *automated* signals when server response shapes drift from `mobile-app/fixtures/*.json`; today it takes a manual audit like that one.
 Done-when: a pytest that round-trips live server responses against the golden fixtures' shapes (additive-only rule from API.md §7 enforced: new fields OK, removals/renames fail); wired into the default test run.
 
-### R15. Fix confirmed docs drift: publish docstring + default-caps + log-bounds notes — `open` `self-promoted` *(A3 drift sweep, 2026-06-07, judge-approved)*
+### R15. Fix confirmed docs drift: publish docstring + default-caps + log-bounds notes — `done` *(2026-06-07, PR #22 — drift ratchet back to 0)* `self-promoted`
 Surface: docs. Confirmed: roost/cli.py:~1440 `roost publish` docstring still says "uploads it via the blob store" (one-shot since PR #15; blob path is only the 422 fallback). Omissions: README "Job kinds" never says unbudgeted jobs get per-kind default caps (worker.py:~863, 120/240/240/360m, `default_runtime_cap_exceeded`); mobile-app/API.md §4 logs section doesn't mention the R11 write-time bounds (64KiB/append, 5000-row ceiling, events exempt).
 Done-when: three spots corrected (additive, no contract change); Docs-drift ratchet back to 0; pytest green.
 
@@ -124,7 +124,7 @@ first iteration on that ratchet measures and records it here (no code changes).
 |---|---|---|---|
 | Test pass | `python -m pytest -q` | 347 passed (2026-06-05) | count may grow; failures never tolerated |
 | Branch coverage of `roost/` | `coverage run --branch -m pytest && coverage report` (dev-only dep, never shipped) | **63% TOTAL** (2026-06-07, 482 tests; judge-verified) | up only |
-| Docs drift | confirmed findings per full drift sweep | 0 (2026-06-05, 27-agent pass) — 2026-06-07 sweep found 1 confirmed + 2 omissions → R15 restores 0 | stays 0 |
+| Docs drift | confirmed findings per full drift sweep | 0 (2026-06-07 — sweep found 1+2, R15 fixed all three, judge truth-checked) | stays 0 |
 | Runnable examples | every `examples/*.yaml` accepted by a scratch CP submit | **3/3** (2026-06-07, scratch CP :8789) | stays 100% |
 
 ## Proposed (loop appends here; only humans promote)
