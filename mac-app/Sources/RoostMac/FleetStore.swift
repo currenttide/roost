@@ -213,6 +213,17 @@ final class FleetStore {
         poke()
     }
 
+    /// Steer a running job (R38): queue a follow-up message. The ack is always
+    /// `queued`; the caller polls `client.jobInputs(id:)` for the honest
+    /// delivered/dropped outcome (command jobs deliver; agent/docker drop).
+    @discardableResult
+    func sendInput(to id: String, text: String) async throws -> JobInputAck {
+        guard let client else { throw RoostClientError.transport("not connected") }
+        let ack = try await client.sendInput(id: id, text: text)
+        poke()
+        return ack
+    }
+
     /// Resubmit a failed run's goal as a NEW run (the app never mutates a
     /// finished job).
     @discardableResult

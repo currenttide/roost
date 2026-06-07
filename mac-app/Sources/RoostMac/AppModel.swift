@@ -9,6 +9,8 @@ enum MainSection: String, CaseIterable, Identifiable {
     case workers = "Workers"
     case console = "Console"
     case transfers = "Transfers"
+    case publish = "Publish"
+    case schedules = "Schedules"
 
     var id: String { rawValue }
 
@@ -18,6 +20,8 @@ enum MainSection: String, CaseIterable, Identifiable {
         case .workers: "server.rack"
         case .console: "terminal"
         case .transfers: "arrow.up.arrow.down.circle"
+        case .publish: "globe"
+        case .schedules: "clock.arrow.circlepath"
         }
     }
 }

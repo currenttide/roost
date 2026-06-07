@@ -331,6 +331,151 @@ public struct Job: Decodable, Identifiable, Equatable, Sendable {
     }
 }
 
+// MARK: - Published site (from POST /publish, GET /publish)
+
+/// A published static site — `roost/publish.py::public_dict`. `url` is the LAN
+/// address (always present); `publicUrl` is the internet-facing one, present only
+/// when the control plane has a publish domain configured.
+public struct Site: Decodable, Identifiable, Equatable, Sendable {
+    public let slug: String
+    public let url: String
+    public let publicURL: String?
+    public let files: Int
+    public let size: Int
+    public let createdAt: Double?
+    public let updatedAt: Double?
+
+    public var id: String { slug }
+
+    /// Best link to offer the user: internet-facing when available, else LAN.
+    public var shareURL: String { publicURL ?? url }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: AnyCodingKey.self)
+        guard let s = try? c.decode(String.self, forKey: "slug") else {
+            throw DecodingError.keyNotFound(
+                AnyCodingKey("slug"),
+                .init(codingPath: decoder.codingPath, debugDescription: "site without slug"))
+        }
+        slug = s
+        url = (try? c.decode(String.self, forKey: "url")) ?? ""
+        publicURL = try? c.decode(String.self, forKey: "public_url")
+        files = (try? c.decode(Int.self, forKey: "files")) ?? 0
+        size = (try? c.decode(Int.self, forKey: "size")) ?? 0
+        createdAt = try? c.decode(Double.self, forKey: "created_at")
+        updatedAt = try? c.decode(Double.self, forKey: "updated_at")
+    }
+}
+
+// MARK: - Schedules (from POST/GET/PATCH /schedules)
+
+/// An interval schedule — `roost/server.py::_schedule_to_public`. The control
+/// plane re-submits `spec` every `intervalSec`; the app renders the clock and
+/// toggles `enabled`.
+public struct Schedule: Decodable, Identifiable, Equatable, Sendable {
+    public let id: String
+    public let name: String?
+    public let spec: JSONValue
+    public let intervalSec: Double
+    public let enabled: Bool
+    public let nextRunAt: Double?
+    public let lastRunAt: Double?
+    public let lastJobID: String?
+    public let createdAt: Double?
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: AnyCodingKey.self)
+        guard let sid = try? c.decode(String.self, forKey: "id") else {
+            throw DecodingError.keyNotFound(
+                AnyCodingKey("id"),
+                .init(codingPath: decoder.codingPath, debugDescription: "schedule without id"))
+        }
+        id = sid
+        name = try? c.decode(String.self, forKey: "name")
+        spec = (try? c.decode(JSONValue.self, forKey: "spec")) ?? .object([:])
+        intervalSec = (try? c.decode(Double.self, forKey: "interval_sec")) ?? 0
+        // SQLite booleans arrive as 0/1.
+        if let b = try? c.decode(Bool.self, forKey: "enabled") {
+            enabled = b
+        } else {
+            enabled = ((try? c.decode(Int.self, forKey: "enabled")) ?? 0) != 0
+        }
+        nextRunAt = try? c.decode(Double.self, forKey: "next_run_at")
+        lastRunAt = try? c.decode(Double.self, forKey: "last_run_at")
+        lastJobID = try? c.decode(String.self, forKey: "last_job_id")
+        createdAt = try? c.decode(Double.self, forKey: "created_at")
+    }
+
+    /// One-liner describing what this schedule runs, for the list row. Prefers the
+    /// agent `intent`/`task`, then a `command`, then a generic kind/label fallback
+    /// so a future spec shape still renders something (never blank). Mirrors the
+    /// server's `_goal_text` ordering and the iOS `Schedule.taskSummary`.
+    public var taskSummary: String {
+        if let intent = spec["intent"]?.stringValue, !intent.isEmpty { return intent }
+        if let task = spec["task"]?.stringValue, !task.isEmpty { return task }
+        if let command = spec["command"]?.stringValue, !command.isEmpty { return command }
+        if let parts = spec["command"]?.arrayValue?.compactMap(\.stringValue), !parts.isEmpty {
+            return parts.joined(separator: " ")
+        }
+        if let name, !name.isEmpty { return name }
+        if let kind = spec["kind"]?.stringValue, !kind.isEmpty { return "\(kind) job" }
+        return "scheduled job"
+    }
+}
+
+// MARK: - Job inputs (from POST /jobs/{id}/input, GET /jobs/{id}/inputs)
+
+/// Ack for `POST /jobs/{id}/input` — the state is always `queued` here; the live
+/// delivered/dropped outcome arrives via `GET /jobs/{id}/inputs` (R38).
+public struct JobInputAck: Decodable, Sendable {
+    public let inputID: String
+    public let jobID: String
+    public let state: String
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: AnyCodingKey.self)
+        inputID = (try? c.decode(String.self, forKey: "input_id")) ?? ""
+        jobID = (try? c.decode(String.self, forKey: "job_id")) ?? ""
+        state = (try? c.decode(String.self, forKey: "state")) ?? "queued"
+    }
+}
+
+/// One queued follow-up and its delivery state (`queued`/`delivered`/`dropped`),
+/// from `GET /jobs/{id}/inputs`. `detail` carries the worker's drop reason.
+public struct JobInput: Decodable, Identifiable, Equatable, Sendable {
+    public let id: String
+    public let state: String
+    public let detail: String?
+    public let createdAt: Double?
+    public let deliveredAt: Double?
+    public let createdBy: String?
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: AnyCodingKey.self)
+        id = (try? c.decode(String.self, forKey: "id")) ?? ""
+        state = (try? c.decode(String.self, forKey: "state")) ?? ""
+        detail = try? c.decode(String.self, forKey: "detail")
+        createdAt = try? c.decode(Double.self, forKey: "created_at")
+        deliveredAt = try? c.decode(Double.self, forKey: "delivered_at")
+        createdBy = try? c.decode(String.self, forKey: "created_by")
+    }
+}
+
+/// `GET /jobs/{id}/inputs` envelope.
+public struct JobInputsResponse: Decodable, Sendable {
+    public let jobID: String
+    public let state: String
+    public let inputs: [JobInput]
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: AnyCodingKey.self)
+        jobID = (try? c.decode(String.self, forKey: "job_id")) ?? ""
+        state = (try? c.decode(String.self, forKey: "state")) ?? ""
+        inputs = ((try? c.decode([Tolerant<JobInput>].self, forKey: "inputs")) ?? [])
+            .compactMap(\.value)
+    }
+}
+
 // MARK: - Logs
 
 public struct LogLine: Decodable, Identifiable, Equatable, Sendable {
@@ -476,6 +621,30 @@ public struct PruneResponse: Decodable, Sendable {
         let c = try decoder.container(keyedBy: AnyCodingKey.self)
         pruned = (try? c.decode(Int.self, forKey: "pruned")) ?? 0
         names = (try? c.decode([String].self, forKey: "names")) ?? []
+    }
+}
+
+/// Body for `POST /jobs/{id}/input` (R38) — just the message text.
+public struct JobInputSubmit: Encodable, Sendable {
+    public let text: String
+    public init(text: String) { self.text = text }
+}
+
+/// Body for `PATCH /schedules/{id}` — enable/disable (server `SchedulePatch`).
+public struct SchedulePatchBody: Encodable, Sendable {
+    public let enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
+/// `DELETE /schedules/{id}` response (`{"deleted": true, "id": …}`).
+public struct ScheduleDeleteResponse: Decodable, Sendable {
+    public let deleted: Bool
+    public let id: String
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: AnyCodingKey.self)
+        deleted = (try? c.decode(Bool.self, forKey: "deleted")) ?? false
+        id = (try? c.decode(String.self, forKey: "id")) ?? ""
     }
 }
 
