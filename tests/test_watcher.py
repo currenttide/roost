@@ -13,10 +13,13 @@ import pytest
 
 from roost import watcher
 from roost.watcher import (
+    DEFAULT_MIN_INTERVAL,
+    MIN_INTERVAL_FLOOR,
     jobs_needing_narration,
     narrate_job,
     parse_narration,
     render_narration_prompt,
+    resolve_min_interval,
     watch_once,
 )
 
@@ -291,3 +294,36 @@ def test_watch_once_continues_when_one_store_fails():
 def test_watch_once_empty_when_nothing_to_do():
     n = run(watch_once([], _canned_runner("{}"), lambda j, p: None))
     assert n == 0
+
+
+# ---------- resolve_min_interval (ROOST_NARRATE_INTERVAL) ----------
+
+
+def test_resolve_interval_default_is_pinned_at_20():
+    # Pins today's value EXACTLY: unset must keep the historical 20s cadence.
+    assert DEFAULT_MIN_INTERVAL == 20.0
+    assert resolve_min_interval(None) == 20.0
+    assert resolve_min_interval(None) == DEFAULT_MIN_INTERVAL
+
+
+def test_resolve_interval_blank_falls_back_to_default():
+    assert resolve_min_interval("") == DEFAULT_MIN_INTERVAL
+    assert resolve_min_interval("   ") == DEFAULT_MIN_INTERVAL
+
+
+def test_resolve_interval_accepts_override_above_floor():
+    assert resolve_min_interval("90") == 90.0
+    assert resolve_min_interval("12.5") == 12.5
+
+
+def test_resolve_interval_clamps_to_floor():
+    # Demos want it fast, but never faster than the sweep cadence.
+    assert resolve_min_interval("1") == MIN_INTERVAL_FLOOR
+    assert resolve_min_interval("0") == MIN_INTERVAL_FLOOR
+    assert resolve_min_interval("-30") == MIN_INTERVAL_FLOOR
+    assert MIN_INTERVAL_FLOOR == 5.0
+
+
+def test_resolve_interval_garbage_falls_back_to_default():
+    for bad in ("fast", "20s", "abc", "1e", "nan", "inf", "-inf"):
+        assert resolve_min_interval(bad) == DEFAULT_MIN_INTERVAL

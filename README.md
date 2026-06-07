@@ -204,7 +204,10 @@ It gives you, at a glance:
 
 The panel, the terminal dashboard (`scripts/fleet`), and the MCP inbox all render the same
 single `GET /derived` model, so they never disagree. Set `ROOST_NARRATE=1` on the control
-plane to add agentic per-job narration to the story.
+plane to add agentic per-job narration to the story. Each active job is re-narrated at most
+once per `ROOST_NARRATE_INTERVAL` seconds (default `20`; busy fleets can raise it to cut
+token cost, demos can lower it); values below the `5`s floor — the sweep cadence — are
+clamped, and a blank or garbage value falls back to the default.
 
 The `$` estimate uses a per-session floor plus a per-Mtok marginal on each job's fresh
 tokens (one rate ships by default). To price models differently, set `ROOST_PRICING` on the

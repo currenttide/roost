@@ -3576,23 +3576,30 @@ def _make_narration_store(db_path: Path):
     return store
 
 
-async def _narrate_pass(db_path: Path) -> None:
+async def _narrate_pass(db_path: Path, min_interval: float) -> None:
     """D2: refresh agentic narration for running jobs (opt-in via ROOST_NARRATE=1;
     requires `claude` on the control-plane host). Best-effort: deterministic health
-    in `/derived` works regardless. Never blocks the sweep loop."""
+    in `/derived` works regardless. Never blocks the sweep loop. ``min_interval``
+    is the re-narration cadence (ROOST_NARRATE_INTERVAL; see watcher)."""
     jobs = await asyncio.to_thread(_list_jobs, db_path, "running", None, None, 30)
     jobs += await asyncio.to_thread(_list_jobs, db_path, "assigned", None, None, 30)
     if not jobs:
         return
-    for j in watcher.jobs_needing_narration(jobs, time.time()):
+    todo = watcher.jobs_needing_narration(jobs, time.time(),
+                                          min_interval=min_interval)
+    for j in todo:
         j["log_tail"] = await asyncio.to_thread(_log_tail, db_path, j["id"])
     await watcher.watch_once(jobs, watcher.default_claude_runner,
-                             _make_narration_store(db_path))
+                             _make_narration_store(db_path),
+                             min_interval=min_interval)
 
 
 async def _sweep_loop(db_path: Path) -> None:
     last_prune = 0.0
     narrate = os.environ.get("ROOST_NARRATE") == "1"
+    narrate_interval = watcher.resolve_min_interval(
+        os.environ.get("ROOST_NARRATE_INTERVAL")
+    )
     while True:
         try:
             await asyncio.to_thread(_sweep, db_path)
@@ -3608,7 +3615,7 @@ async def _sweep_loop(db_path: Path) -> None:
             print(f"[roost] schedule tick error: {e}", flush=True)
         if narrate:
             try:
-                await _narrate_pass(db_path)
+                await _narrate_pass(db_path, narrate_interval)
             except Exception as e:  # noqa: BLE001
                 print(f"[roost] narration error: {e}", flush=True)
         # Throttled, best-effort log retention (M1): never let a prune error

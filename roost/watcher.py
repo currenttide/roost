@@ -36,8 +36,36 @@ NARRATION_MODEL = "claude-sonnet-4-6"
 
 # Default re-narration cadence (seconds). A job is re-narrated only if its cached
 # narration is missing or older than this — keeps LLM spend bounded regardless of
-# how often the sweep loop runs.
+# how often the sweep loop runs. Configurable via ROOST_NARRATE_INTERVAL (see
+# resolve_min_interval); this constant is the exact default when unset.
 DEFAULT_MIN_INTERVAL = 20.0
+
+# Floor for the re-narration cadence (seconds). The control-plane sweep loop ticks
+# every few seconds, so re-narrating faster than this can never gain freshness — it
+# would only hammer the LLM (one billed agent call per active job per tick). Five
+# seconds matches the sweep cadence and keeps the worst case bounded.
+MIN_INTERVAL_FLOOR = 5.0
+
+
+def resolve_min_interval(raw: Optional[str]) -> float:
+    """Parse the ``ROOST_NARRATE_INTERVAL`` env value into a re-narration cadence.
+
+    Mirrors the tolerant style of the server's pricing/notify env parsing: an
+    unset, blank, or garbage value falls back to :data:`DEFAULT_MIN_INTERVAL`
+    unchanged, so a bad config can never break narration or silently disable the
+    cadence guard. A parsed value is clamped up to :data:`MIN_INTERVAL_FLOOR` so
+    operators cannot hammer the LLM faster than the sweep loop can use.
+    """
+    if raw is None or not raw.strip():
+        return DEFAULT_MIN_INTERVAL
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_MIN_INTERVAL
+    if val != val or val in (float("inf"), float("-inf")):
+        return DEFAULT_MIN_INTERVAL  # NaN/inf are not sane cadences
+    return max(val, MIN_INTERVAL_FLOOR)
+
 
 # How much of the job's recent log tail to feed the narrator (chars). Small on
 # purpose: the narrator only needs the *recent* gist, and small prompts are cheap
