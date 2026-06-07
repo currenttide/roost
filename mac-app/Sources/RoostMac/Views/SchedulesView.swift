@@ -17,11 +17,24 @@ final class SchedulesModel {
 
     private(set) var schedules: [Schedule] = []
     private(set) var loading = false
-    var error: String?
+    private(set) var hasLoaded = false
+    /// Classified failure from the last load. A 404 (older CP without `/schedules`)
+    /// classifies as `.endpointMissing`, NOT a generic error — see `displayState`.
+    private(set) var loadError: SchedulesLoadError?
     /// Schedule ids with a toggle in flight, to disable the row's control.
     private(set) var pending: Set<String> = []
 
     init(store: FleetStore) { self.store = store }
+
+    /// The single pane state. The decision (404 ⇒ unavailable, not an error
+    /// stacked on the empty state) lives in RoostKit so it's Linux-tested.
+    var displayState: SchedulesListState {
+        SchedulesListState.decide(
+            scheduleCount: schedules.count,
+            loadError: loadError,
+            loading: loading,
+            hasLoaded: hasLoaded)
+    }
 
     func refresh() async {
         guard let client = store.client else { return }
@@ -29,13 +42,16 @@ final class SchedulesModel {
         defer { loading = false }
         do {
             schedules = try await client.schedules()
-            error = nil
-        } catch RoostClientError.unauthorized {
-            error = "An admin (or scheduler) token is required to manage schedules."
+            loadError = nil
         } catch {
-            self.error = error.localizedDescription
+            loadError = SchedulesLoadError.from(error)
         }
+        hasLoaded = true
     }
+
+    /// A failed enable/disable toggle, shown inline. Kept separate from the load
+    /// state so a transient toggle error doesn't masquerade as "list unavailable".
+    var toggleError: String?
 
     /// Flip a schedule's enabled flag. The server returns the updated row (re-enabling
     /// restarts the clock), so we replace it in place rather than inventing fields.
@@ -48,11 +64,11 @@ final class SchedulesModel {
             if let i = schedules.firstIndex(where: { $0.id == updated.id }) {
                 schedules[i] = updated
             }
-            error = nil
+            toggleError = nil
         } catch RoostClientError.unauthorized {
-            error = "An admin (or scheduler) token is required to manage schedules."
+            toggleError = "An admin (or scheduler) token is required to manage schedules."
         } catch {
-            self.error = error.localizedDescription
+            self.toggleError = error.localizedDescription
         }
     }
 }
@@ -94,20 +110,42 @@ struct SchedulesPane: View {
             .padding(.vertical, 8)
             Divider()
 
-            if let error = sched.error {
-                Label(error, systemImage: "exclamationmark.triangle")
+            // A toggle failure is an action error, distinct from the load state.
+            if let toggleError = sched.toggleError {
+                Label(toggleError, systemImage: "exclamationmark.triangle")
                     .font(.caption)
                     .foregroundStyle(.red)
                     .padding(8)
             }
 
-            if sched.schedules.isEmpty && !sched.loading {
+            // One state, one screen — the RoostKit decision guarantees the 404,
+            // error, empty, and list states never stack on each other.
+            switch sched.displayState {
+            case .loading:
+                Spacer()
+                ProgressView().controlSize(.small)
+                Spacer()
+            case .unavailable:
+                ContentUnavailableView {
+                    Label("Schedules not available", systemImage: "clock.badge.xmark")
+                } description: {
+                    Text("This control plane doesn't support schedules (older server). Update the control plane to manage interval jobs from here.")
+                }
+            case .error(let message):
+                ContentUnavailableView {
+                    Label("Couldn't load schedules", systemImage: "exclamationmark.triangle")
+                } description: {
+                    Text(message)
+                } actions: {
+                    Button("Retry") { Task { await sched.refresh() } }
+                }
+            case .empty:
                 ContentUnavailableView {
                     Label("No schedules", systemImage: "clock.arrow.circlepath")
                 } description: {
                     Text("Create one from the CLI: `roost schedule \"<goal>\" --every 6h`.")
                 }
-            } else {
+            case .list:
                 List(sched.schedules) { schedule in
                     ScheduleRow(schedule: schedule,
                                 busy: sched.pending.contains(schedule.id)) { enabled in
