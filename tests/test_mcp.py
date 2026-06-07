@@ -64,6 +64,19 @@ def test_roost_do_schema_has_confirm():
     assert "confirm" in schema["properties"]
 
 
+def test_roost_submit_kind_enum_includes_auto():
+    """kind: auto must be in the roost_submit inputSchema enum (R27)."""
+    schema = next(t for t in mcp.TOOLS if t["name"] == "roost_submit")["inputSchema"]
+    kind_field = schema["properties"]["kind"]
+    assert "auto" in kind_field["enum"], (
+        "kind: auto missing from roost_submit schema — captain agents cannot use "
+        "the self-selecting verified path via MCP"
+    )
+    # The other kinds must still be present
+    for k in ("claude", "codex", "docker"):
+        assert k in kind_field["enum"], f"kind: {k!r} was unexpectedly removed"
+
+
 def test_roost_do_safe_single_runs(monkeypatch):
     posted = {}
 
