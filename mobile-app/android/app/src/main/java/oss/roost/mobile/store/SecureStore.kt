@@ -71,10 +71,25 @@ class SecureStore(context: Context) {
 
     private fun cursorKey(jobId: String) = "cursor_$jobId"
 
+    // ---- notification topic (R37 / DESIGN.md §6) ---------------------------------
+    // Non-secret (a pub/sub channel name, not a token) → plain prefs. Stored as the
+    // canonical subscribe URL produced by NtfyTopic.normalize().
+
+    fun loadNotifyTopicUrl(): String? = prefs.getString(KEY_NOTIFY_TOPIC, null)
+
+    fun saveNotifyTopicUrl(url: String) {
+        prefs.edit().putString(KEY_NOTIFY_TOPIC, url).apply()
+    }
+
+    fun clearNotifyTopicUrl() {
+        prefs.edit().remove(KEY_NOTIFY_TOPIC).apply()
+    }
+
     private companion object {
         const val KEY_URL = "cp_url"
         const val KEY_TOKEN_ENC = "cp_token_enc"
         const val KEY_NAME = "cp_name"
         const val KEY_RECENTS = "recent_prompts"
+        const val KEY_NOTIFY_TOPIC = "notify_topic_url"
     }
 }

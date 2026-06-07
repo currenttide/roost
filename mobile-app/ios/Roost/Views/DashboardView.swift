@@ -9,6 +9,7 @@ struct DashboardView: View {
 
     @State private var showNew = false
     @State private var showPublish = false
+    @State private var showNotifySettings = false
     @State private var confirmCancel: Run?
     @State private var path: [String] = []      // navigation stack of job ids
 
@@ -45,6 +46,9 @@ struct DashboardView: View {
                         Button {
                             showPublish = true
                         } label: { Label("Publish a site", systemImage: "globe") }
+                        Button {
+                            showNotifySettings = true
+                        } label: { Label("Notifications", systemImage: "bell") }
                         Divider()
                         Button("Unpair", role: .destructive) { app.unpair() }
                         if let name = app.credential?.name { Text(name) }
@@ -61,6 +65,9 @@ struct DashboardView: View {
             }
             .sheet(isPresented: $showPublish) {
                 PublishView()
+            }
+            .sheet(isPresented: $showNotifySettings) {
+                NotificationSettingsView()
             }
             .confirmationDialog("Cancel this job?",
                                 isPresented: Binding(

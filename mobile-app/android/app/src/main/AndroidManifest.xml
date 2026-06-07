@@ -6,6 +6,10 @@
          recognizer is unavailable). -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- POST_NOTIFICATIONS (Android 13+): show terminal-job notifications
+         (R37 / DESIGN.md §6 v1.1). Requested at runtime; degrades to foreground
+         SSE if denied. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!-- Android 11+ package visibility: we query for a speech-recognition service. -->
     <queries>
