@@ -1656,3 +1656,26 @@ Entries are written by the loop; humans read, never need to edit.
 - Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only)
 - Notes: iteration #12 slot 3. R57 (mcp/schema coverage) last in flight — gates
   the cycle-#14 dispatch (test_mcp.py collision with R60).
+
+## 2026-06-07 ~10:20 UTC — R57: mcp.py + schema.py coverage lift
+- Verdict: shipped
+- Branch/PR: loop/r57-mcp-schema-coverage / https://github.com/currenttide/roost/pull/69 (merged 3862d99)
+- What changed: tests-only (+730 test_mcp.py, +411 new test_schema.py). mcp.py 61%
+  → 99% branch (only the __main__ guard uncovered); schema.py 62% → 100%.
+  Schema: fresh-install jump; full V0→CURRENT walk with root_job_id backfill +
+  row survival; per-step tests 0..13; idempotency; _add_missing partial-columns
+  guard. MCP: TOOL_IMPL↔TOOLS routing integrity + handle() dispatch; HTTP error
+  mapping matrix; all simple tools; roost_wait terminal+timeout; roost_exec
+  detach/ambiguous; transfer-tool error paths; all roost_schedule subactions;
+  the JSON-RPC main() loop. Implementer self-caught a probe gap pre-judge
+  (injected-fake handle() tests wouldn't catch a route swap) and added
+  route-pinning tests.
+- Evidence:
+  - `python -m pytest -q` → 778 passed (was 707; +71)
+  - judge mutation probes 3/3 caught (dropped V12→V13 step; broken _add_missing
+    idempotency; swapped status→cancel dispatch route)
+- Judge: approve — re-measured both sides, ran the probes
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only)
+- Notes: iteration #12 COMPLETE — R56 survey, R57 #69, R58 #68; master 778.
+  Cycle #14 gate cleared → dispatching R59 (input visibility), R60
+  (roost_publish), R61 (mobile schedules UI) now.

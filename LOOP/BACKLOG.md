@@ -185,7 +185,7 @@ Done-when: settings + payload-routing logic landed on both clients with the logi
 Surface: survey. The product surface roughly doubled this session (metrics, backup, send/input, mobile schedules, publish UIs, push, pagination, captain plans, cost pricing). Re-run the A6 user-lens survey over the grown surface: README/INTEGRATIONS/API.md/DESIGN.md vs code; CLI help vs docs; what would a daily operator or phone user now hit? Apply the four A6 gates per finding; output a judged slate for cycle #14 (promotables + Proposed notes). Survey #1 found the kind:auto schema hole within minutes — the surface has grown 10× since.
 Done-when: every user-facing surface swept; each finding gated + judge-verified (re-checkable evidence); slate of ≤3 promotables + Proposed additions reported to the orchestrator; no code changes (survey only).
 
-### R57. mcp.py + schema.py coverage lift — `open` `self-promoted`
+### R57. mcp.py + schema.py coverage lift — `done` *(2026-06-07, PR #69 — mcp 61→99%, schema 62→100%)* `self-promoted`
 Surface: tests. A2: post-R54 the weakest modules are mcp.py 61% and schema.py 62%. mcp.py's untested reach: tool dispatch paths, error mapping, the R46 example-bearing tools' impl branches; schema.py: migration paths V1→V14 (synthetic old-version DBs, the R19/R38 migration pattern from tests).
 Done-when: both modules' branch coverage strictly up (≥8 points each); migration tests cover every version step incl. idempotency; no module down; real assertions (judge mutation-probes); pytest green (707 base).
 
