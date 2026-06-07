@@ -1,6 +1,6 @@
 [project]
 name = "roost"
-version = "0.1.0"
+version = "0.2.0"
 description = "Pull-based orchestrator for agent jobs across heterogeneous, non-approximate nodes"
 requires-python = ">=3.10"
 dependencies = [

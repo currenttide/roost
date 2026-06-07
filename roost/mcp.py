@@ -20,9 +20,11 @@ from typing import Any, Optional
 
 import httpx
 
+from . import __version__
+
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_NAME = "roost-mcp"
-SERVER_VERSION = "0.2.0"
+SERVER_VERSION = __version__  # single-sourced from roost/__init__.py (pyproject)
 
 
 def _client() -> httpx.Client:

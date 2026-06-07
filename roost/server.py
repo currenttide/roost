@@ -35,6 +35,7 @@ from fastapi.responses import (
 )
 from pydantic import BaseModel, Field
 
+from . import __version__
 from . import blobs as blobstore
 from . import publish as publishlib
 from . import triage
@@ -1756,7 +1757,7 @@ def create_app(
             except asyncio.CancelledError:
                 pass
 
-    app = FastAPI(title="Roost", version="0.2.0", lifespan=lifespan)
+    app = FastAPI(title="Roost", version=__version__, lifespan=lifespan)
     app.state.db_path = db
     app.state.shared_token = shared_token
     app.state.publish_domain = publish_domain
@@ -1860,7 +1861,7 @@ def create_app(
 
     @app.get("/healthz")
     async def healthz():
-        return {"ok": True, "version": "0.2.0"}
+        return {"ok": True, "version": __version__}
 
     @app.get("/readyz")
     async def readyz():
@@ -1875,7 +1876,7 @@ def create_app(
             n = await asyncio.to_thread(_probe)
         except Exception as e:  # noqa: BLE001
             return JSONResponse(status_code=503, content={"ready": False, "error": str(e)})
-        return {"ready": True, "workers": n, "version": "0.2.0"}
+        return {"ready": True, "workers": n, "version": __version__}
 
     @app.get("/install.sh", response_class=PlainTextResponse)
     async def install_sh(request: Request):
