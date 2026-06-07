@@ -23,7 +23,13 @@ jobs:
 
   app-macos:
     name: App build + tests (macOS)
-    runs-on: macos-14
+    # macos-15's default Xcode (16.4 → Swift 6.1) satisfies the Swift tools >= 6.0
+    # that SwiftTerm 1.13's transitive swift-argument-parser 1.8.2 manifest requires.
+    # macos-14 defaults to Xcode 15.4 (Swift 5.10), which dies at dependency
+    # resolution before ever compiling the app (R92). Our own manifest stays
+    # swift-tools-version:5.10 — a newer toolchain builds it fine, so this is a
+    # toolchain unblock, not a language-mode (Swift 6 concurrency) migration.
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - name: swift build
