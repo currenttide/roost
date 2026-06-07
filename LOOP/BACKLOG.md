@@ -97,6 +97,18 @@ Survey claim was wrong: the guards at roost/server.py:222, 513, 725, 984 roll ba
 Surface: mobile/tests. Contract verified in sync on 2026-06-05 (all 9 API.md endpoints match server.py) — but nothing *automated* signals when server response shapes drift from `mobile-app/fixtures/*.json`; today it takes a manual audit like that one.
 Done-when: a pytest that round-trips live server responses against the golden fixtures' shapes (additive-only rule from API.md §7 enforced: new fields OK, removals/renames fail); wired into the default test run.
 
+### R15. Fix confirmed docs drift: publish docstring + default-caps + log-bounds notes — `open` `self-promoted` *(A3 drift sweep, 2026-06-07, judge-approved)*
+Surface: docs. Confirmed: roost/cli.py:~1440 `roost publish` docstring still says "uploads it via the blob store" (one-shot since PR #15; blob path is only the 422 fallback). Omissions: README "Job kinds" never says unbudgeted jobs get per-kind default caps (worker.py:~863, 120/240/240/360m, `default_runtime_cap_exceeded`); mobile-app/API.md §4 logs section doesn't mention the R11 write-time bounds (64KiB/append, 5000-row ceiling, events exempt).
+Done-when: three spots corrected (additive, no contract change); Docs-drift ratchet back to 0; pytest green.
+
+### R16. Tests for `roost up` orchestration in cli.py — `open` `self-promoted` *(A4 journal debt from R9, 2026-06-07, judge-approved)*
+Surface: tests. cli.py `up` (≈line 503+) spawns processes and drives boot.ping_ok/wait_for_health/wait_for_worker; zero tests reach it (cli.py at 28% branch coverage).
+Done-when: unit tests with bootstrap helpers + process-spawning mocked (R10 style); failure paths covered (CP already up, health timeout, worker never registers); pytest green.
+
+### R17. Tests for config.py + triage.py — `open` `self-promoted` *(A2 coverage gaps, 2026-06-07, judge-approved)*
+Surface: tests. Measured: config.py 48% branch (60 stmts), triage.py 67% (30 stmts); no dedicated test file for either (pre-listed in Proposed).
+Done-when: dedicated tests asserting real behavior (config TOML read/write/perms/resolution order; triage prompt rendering); both modules' branch coverage strictly up, no other module down; pytest green.
+
 ### R14. Docs truth pass — `done` *(closed 2026-06-05)*
 Completed by the 27-agent repo-map workflow: README publish/kinds/test-count fixed, plus 5 stale docstrings/comments across server/worker/service/schema. The other two survey claims were already false — the verb matrix IS documented (docs/INTEGRATIONS.md) and `cancel --tree` IS documented (README.md:276, INTEGRATIONS.md:33). 347/347 tests green after edits.
 
@@ -111,9 +123,9 @@ first iteration on that ratchet measures and records it here (no code changes).
 | Ratchet | Measure | Baseline | Direction |
 |---|---|---|---|
 | Test pass | `python -m pytest -q` | 347 passed (2026-06-05) | count may grow; failures never tolerated |
-| Branch coverage of `roost/` | `coverage run -m pytest && coverage report` (dev-only dep, never shipped) | unset | up only |
-| Docs drift | confirmed findings per full drift sweep | 0 (2026-06-05, 27-agent pass) | stays 0 |
-| Runnable examples | every `examples/*.yaml` accepted by a scratch CP submit | unset | stays 100% |
+| Branch coverage of `roost/` | `coverage run --branch -m pytest && coverage report` (dev-only dep, never shipped) | **63% TOTAL** (2026-06-07, 482 tests; judge-verified) | up only |
+| Docs drift | confirmed findings per full drift sweep | 0 (2026-06-05, 27-agent pass) — 2026-06-07 sweep found 1 confirmed + 2 omissions → R15 restores 0 | stays 0 |
+| Runnable examples | every `examples/*.yaml` accepted by a scratch CP submit | **3/3** (2026-06-07, scratch CP :8789) | stays 100% |
 
 ## Proposed (loop appends here; only humans promote)
 
