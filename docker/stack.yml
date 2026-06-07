@@ -28,6 +28,10 @@ services:
       # for <slug>.<domain> serve that site only (API unreachable under it) and
       # `roost publish` prints the shareable https URL. Empty = LAN-only.
       ROOST_PUBLISH_DOMAIN: ${ROOST_PUBLISH_DOMAIN:-}
+      # Opt-in terminal-job push notifications (see docs/DEPLOY.md). When set to
+      # an ntfy.sh topic or UnifiedPush webhook, the CP fire-and-forget POSTs a
+      # notification as each job ends. Empty = no notifications.
+      ROOST_NOTIFY_URL: ${ROOST_NOTIFY_URL:-}
     ports:
       - "8787:8787"
     volumes:
