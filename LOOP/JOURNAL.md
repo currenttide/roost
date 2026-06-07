@@ -1745,3 +1745,27 @@ Entries are written by the loop; humans read, never need to edit.
   consumed. Cycle #15: R62 mac-app verbs (Tier-B call: menu-bar-natural trio),
   R63 drift sweep #3 (PRs #65-#72), R64 hunt #5 (server lifecycle, concurrency
   lens — protocol deepening).
+
+## 2026-06-07 ~12:40 UTC — R63: drift sweep #3 (PRs #65-#72)
+- Verdict: shipped
+- Branch/PR: loop/r63-drift-sweep-3 / https://github.com/currenttide/roost/pull/73 (merged 2736c81)
+- What changed: 3 confirmed drifts fixed: README test count 636→792 (re-run
+  verified); oversee SKILL.md gains the inputs entry in the per-node facts list
+  (R59's new operator capability feeds the STUCK?/waiting-on-stdin judgment);
+  DESIGN.md §8 gains "Post-v1 screens (shipped)" marking Publish/Notifications/
+  Schedules beyond the original two-screen v1 scope. 6 surfaces verified clean
+  (INTEGRATIONS tool table + verb matrix, API.md, DESIGN §8a symbol-for-symbol,
+  README captain-reach line — correctly NOT claiming captain publishes (its
+  ALLOWED_TOOLS is still 6; the MCP front door is what publishes), mac-app docs,
+  quickstart). DISCIPLINE NOTE: dated "verified on DATE" historical counts in
+  in-PR surfaces flagged but NOT rewritten — editing a dated verification record
+  without re-verifying would itself create a false claim.
+- Evidence:
+  - `python -m pytest -q` → 792 passed; drift guard 26/26
+- Judge: approve (round 1) — truth-checked all 3 changes at file:line, ran 3
+  adversarial missed-drift spot-checks on UNCHANGED surfaces (all clean). Judge's
+  own grep undercounted tools (13 vs 17 — missed the transfer tools); immaterial
+  (no numeric claim exists) and caught by the implementer's report.
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only)
+- Notes: iteration #14 slot 2. Cross-surface drift rate is falling (11 spots in
+  R42's sweep → 3 here) — in-PR doc discipline is working. R62 + R64 in flight.

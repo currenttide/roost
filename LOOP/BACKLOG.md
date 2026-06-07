@@ -209,7 +209,7 @@ Done-when: Schedules sheet on both platforms (list + create with every-interval 
 Surface: mac-app/feature. Tier-B loop judgment on the survey-#2 Proposed note: north star #3 says complete surfaces, and the menu bar already submits/cancels — the missing verbs follow. Scope to the menu-bar-natural ones: publish (one-shot, file picker), schedules (list/toggle), send (steer a selected running job). Backup/history stay CLI (operator tasks, not menu-bar). RoostClient.swift + AppModel patterns established; mac-app has a Linux-runnable test suite (I1: swift test 30/30 on /tmp/swift-toolchain).
 Done-when: the three verbs reachable from the menu bar following existing section patterns; client calls + pure logic Linux-tested (mac-app swift test); UI-render claims capped per evidence table unless a Mac-node build+screenshot is run (bonus); pytest green (server untouched).
 
-### R63. Drift sweep #3 — PRs #65-#72 — `open` `self-promoted`
+### R63. Drift sweep #3 — PRs #65-#72 — `done` *(2026-06-07, PR #73 — 3 drifts fixed, 6 surfaces verified clean)* `self-promoted`
 Surface: docs. A3: eight PRs landed since R42's sweep (Android publish UI, cli coverage, push slice, survey, mcp/schema tests, config reference, input visibility, roost_publish, mobile schedules). Most were doc-disciplined in-PR; sweep for cross-surface misses: README feature claims, INTEGRATIONS verb matrix vs the 17-tool reality, API.md §7 schedules now having UI, DESIGN.md §8a accuracy, skills (oversee/quickstart) vs new capabilities.
 Done-when: every confirmed drift fixed additively with claims truth-checked; docs-drift ratchet stays 0; pytest green.
 
