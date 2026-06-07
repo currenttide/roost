@@ -697,8 +697,15 @@ def test_triage_prompt_endpoint(client: TestClient):
 def test_job_phase_derivation():
     assert server._job_phase({"state": "succeeded"}) == "succeeded"
     assert server._job_phase({"state": "running", "last_activity": "🔎 verifying result"}) == "verifying"
+    assert server._job_phase({"state": "running", "last_activity": "🔎 re-verifying result"}) == "verifying"
     assert server._job_phase({"state": "running", "last_activity": "🔧 self-healing (1)"}) == "self-healing"
     assert server._job_phase({"state": "running", "last_activity": "→ Bash"}) == "running"
+    # R47: the phase anchors on the worker's exact emoji marker, NOT a bare
+    # substring — ordinary activity text that merely contains "verifying" /
+    # "self-healing" must keep the job's real state so it stays eligible for the
+    # stuck check.
+    assert server._job_phase({"state": "running", "last_activity": "verifying build artifacts"}) == "running"
+    assert server._job_phase({"state": "running", "last_activity": "self-healing the cache"}) == "running"
 
 
 def test_job_health_verdicts():
@@ -936,6 +943,45 @@ def test_job_health_does_not_flag_stuck_during_verify_or_heal():
     assert server._job_health(j2)["status"] == "self-healing"
     # but a genuinely idle running job (no verify marker) is still flagged
     assert server._job_health({"state": "running", "idle_sec": 999})["status"] == "stuck?"
+
+
+def test_stuck_job_with_verifying_in_activity_is_still_flagged_stuck(client: TestClient):
+    # R47 regression (promoted from LOOP/repro-a1-hunt4.py): a genuinely-stuck job
+    # whose OWN activity text legitimately contains "verifying" (e.g. "verifying
+    # build artifacts", NOT the worker's "🔎 verifying result" trust-loop marker)
+    # must still be flagged stuck — _job_phase used to match the bare word and
+    # short-circuit _job_health before the idle/stuck check.
+    worker_id, cred = _enroll_named(client, "w-exec", {"tools": ["python3"]})
+    wh = {"Authorization": f"Bearer {cred}"}
+
+    job = client.post(
+        "/jobs", json={"intent": "build and verify the release", "verify": False}
+    ).json()
+    job_id = job["id"]
+    assigned = client.get(
+        f"/workers/{worker_id}/poll", params={"timeout": 0}, headers=wh
+    ).json()
+    assert assigned["id"] == job_id
+    client.post(
+        f"/jobs/{job_id}/events",
+        json={"type": "started", "attempt": assigned["attempt"]},
+        headers=wh,
+    )
+
+    # Stamp last_activity_at well past STUCK_AFTER, with an activity line that
+    # legitimately mentions "verifying" but is NOT a worker phase marker.
+    stale = time.time() - (server.STUCK_AFTER + 600)
+    with server._connect(client.app.state.db_path) as conn:
+        conn.execute(
+            "UPDATE jobs SET last_activity_at=?, last_activity=? WHERE id=?",
+            (stale, "verifying build artifacts", job_id),
+        )
+
+    derived = client.get(f"/jobs/{job_id}/derived").json()
+    assert derived["health"]["status"] == "stuck?", (
+        f"a stuck job was masked as {derived['health']['status']!r} because its "
+        f"activity text contains 'verifying' (phase={derived['phase']!r})"
+    )
 
 
 # ---------- Hardening fixes (final audit) ----------
