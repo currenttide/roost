@@ -1023,3 +1023,28 @@ Entries are written by the loop; humans read, never need to edit.
   and it scoped down — noted as correct behavior)
 - Notes: the last pre-auto-merge era debt is cleared; no open PRs remain. Feature wave
   (R33/R34/R35) still in flight.
+
+## 2026-06-06 ~23:15 UTC — R35: /metrics endpoint (Prometheus text, no new deps)
+- Verdict: shipped
+- Branch/PR: loop/r35-metrics-endpoint / https://github.com/currenttide/roost/pull/44 (merged a1119e4)
+- What changed: hand-rolled Prometheus text exposition (no prometheus_client —
+  dependency-light rule). Admin-gated GET /metrics; 11 series families, DB-derived
+  so they survive CP restarts: roost_jobs{state=…} (all 6 states always emitted),
+  roost_queue_depth, roost_workers_online/total, roost_blobs_count/bytes,
+  roost_sites_count, roost_schedules_count/enabled, roost_lease_expirations_total
+  (from job_logs events; ages with ~24h retention — documented in HELP),
+  roost_schedule_beats_total (process-local, resets on restart — documented).
+  README gains an ops note + scrape_configs snippet. 384 insertions, additions-only.
+- Evidence:
+  - `python -m pytest -q` → 554 passed at merge (now 565 with R33's concurrent merge)
+  - judge validated exposition with its own parser (content-type, HELP/TYPE per
+    family, label escaping, trailing newline), spot-checked values against a DB it
+    hand-seeded, verified auth matrix (401/401/403/200)
+- Judge: approve (round 1)
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only)
+- Notes: iteration #4 slot 3. Mid-flight rebase over PR #43 auto-merged cleanly
+  (regions never collided); one adjacent-insertion test-file conflict resolved by
+  keeping both blocks. Implementer corrected the judge's narration ("a test was
+  removed" — diff is zero-deletion; count delta fully explained) — honesty works
+  both directions. R33 merged concurrently (#45, journal entry on its notification);
+  R34 (mobile parity) still in flight.

@@ -95,7 +95,7 @@ Done-when: captain dispatch records a structured plan on the parent job (additiv
 Surface: mobile/feature. Completes the half-landed R7 feature (north star #3: complete surfaces). Server has `POST /publish?name=` (raw body) since PR #15; mobile API.md §6 still documents only the two-step blob flow; neither client can use the one-shot path.
 Done-when: API.md §6 documents the one-shot path; `record_fixtures.py` records it (regen is values-only additive); iOS + Android decode layers + Linux-runnable tests; pytest green + both mobile harnesses green (per evidence table).
 
-### R35. `/metrics` endpoint (Prometheus text format, no new deps) — `open` `self-promoted` `feature`
+### R35. `/metrics` endpoint (Prometheus text format, no new deps) — `done` *(2026-06-06, PR #44)* `self-promoted` `feature`
 Surface: backend/feature. North star #2: a production fleet needs scrapeable metrics; today the only visibility is CLI polling. Hand-rolled Prometheus text exposition (no client library — dependency-light rule).
 Done-when: `GET /metrics` (admin auth) returns valid Prometheus text with ≥8 meaningful series (jobs by state, queue depth, workers online/total, lease expirations, schedule beats, blob count/bytes); values read from DB so they survive CP restarts; README ops section documents it; format + seeded-value tests; pytest green.
 
