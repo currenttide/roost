@@ -466,22 +466,37 @@ def _annotate_liveness(db_path: Path, jobs: list[dict]) -> list[dict]:
 
       idle_sec        seconds since the job's last sign of life (running/assigned)
       queued_sec      seconds a job has sat queued
-      capable_workers count of online workers whose capabilities satisfy `requires`
+      capable_workers count of online workers that could actually take this job —
+                      capabilities satisfy `requires` AND (when the job carries a
+                      hard `target` worker-pin) the worker IS that target, with
+                      the same id-or-name semantics `_try_assign_one` enforces.
 
     `capable_workers == 0` on a queued job is the mechanical fact behind a
-    silently-unplaceable plan; an overseer agent decides what it means.
+    silently-unplaceable plan; an overseer agent decides what it means. A job
+    pinned to a worker that does not exist / is offline therefore counts 0 — it
+    can never be placed (R48), matching the placement contract.
     """
     jobs = [j for j in jobs if j]
     if not jobs:
         return jobs
     now = time.time()
-    # Online workers (fresh enough to poll) and their capabilities, fetched once.
+    # Online workers (fresh enough to poll), fetched once. We need id/name/status
+    # too (not just capabilities) so a job's `target` pin can be honored with the
+    # exact eligibility rule placement uses.
     with _connect(db_path) as conn:
         rows = conn.execute(
-            "SELECT capabilities FROM workers WHERE last_seen >= ?",
+            "SELECT id, name, status, capabilities FROM workers WHERE last_seen >= ?",
             (now - STALE_AFTER,),
         ).fetchall()
-    online_caps = [json.loads(r["capabilities"]) for r in rows]
+    online = [
+        {
+            "id": r["id"],
+            "name": r["name"],
+            "status": r["status"],
+            "caps": json.loads(r["capabilities"]),
+        }
+        for r in rows
+    ]
     for j in jobs:
         state = j.get("state")
         if j.get("last_activity_at") and state in ("running", "assigned"):
@@ -489,8 +504,26 @@ def _annotate_liveness(db_path: Path, jobs: list[dict]) -> list[dict]:
         if state == "queued":
             j["queued_sec"] = round(now - float(j["created_at"]), 1)
             req = j.get("requires") or {}
-            j["capable_workers"] = sum(1 for caps in online_caps if matches(caps, req))
+            spec = j.get("spec") if isinstance(j.get("spec"), dict) else {}
+            target = spec.get("target")
+            j["capable_workers"] = sum(
+                1
+                for w in online
+                if matches(w["caps"], req) and _worker_satisfies_target(w, target)
+            )
     return jobs
+
+
+def _worker_satisfies_target(worker: dict, target: Optional[str]) -> bool:
+    """Whether `worker` is eligible to take a job pinned to `target`, with parity
+    to the hard-pin rule in `_try_assign_one`: no target → any worker; otherwise
+    the worker's id == target, OR its name == target while it is not offline
+    (id OR name pin, per R20). `worker` carries id/name/status keys."""
+    if target is None:
+        return True
+    return worker.get("id") == target or (
+        worker.get("name") == target and worker.get("status") != "offline"
+    )
 
 
 # ---------- Derived observability model (ease-of-use-plan Part II, D0) ----------
