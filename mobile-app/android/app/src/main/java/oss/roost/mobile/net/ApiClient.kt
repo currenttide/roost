@@ -6,6 +6,8 @@ import oss.roost.mobile.model.CancelAck
 import oss.roost.mobile.model.Derived
 import oss.roost.mobile.model.Healthz
 import oss.roost.mobile.model.Job
+import oss.roost.mobile.model.JobInputAck
+import oss.roost.mobile.model.JobInputs
 import oss.roost.mobile.model.LogPage
 import oss.roost.mobile.model.Parsers
 import oss.roost.mobile.model.Run
@@ -69,6 +71,21 @@ class ApiClient(
         Parsers.parseCancel(
             requestText("DELETE", "/jobs/${enc(id)}${if (cascade) "?tree=true" else ""}", null)
         )
+
+    /**
+     * Queue a follow-up message for a RUNNING job (R38, API.md §4). The CP returns
+     * `{input_id, job_id, state:"queued"}`; the owning worker delivers it on its
+     * heartbeat. A terminal job is rejected 409, empty text 400, >64 KiB 413 — all
+     * surfaced as [ApiException] with the server detail.
+     */
+    suspend fun sendInput(id: String, text: String): JobInputAck =
+        Parsers.parseJobInputAck(
+            requestText("POST", "/jobs/${enc(id)}/input",
+                JSONObject().put("text", text).toString()))
+
+    /** Poll a job's follow-up queue for delivery outcome (API.md §4). */
+    suspend fun inputs(id: String): JobInputs =
+        Parsers.parseJobInputs(getText("/jobs/${enc(id)}/inputs"))
 
     /**
      * Submit a job (API.md §3). Sends ONLY the contract fields. `requires` is {} for

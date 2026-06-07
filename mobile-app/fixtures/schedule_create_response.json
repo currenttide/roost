@@ -1,12 +1,12 @@
 {
-  "created_at": 1780813813.621949,
+  "created_at": 1780853830.5102153,
   "enabled": true,
-  "id": "a37e5a189ca0",
+  "id": "4598baa843ca",
   "interval_sec": 21600.0,
   "last_job_id": null,
   "last_run_at": null,
   "name": "nightly-tidy",
-  "next_run_at": 1780835413.621949,
+  "next_run_at": 1780875430.5102153,
   "spec": {
     "hierarchy": {
       "can_dispatch": true

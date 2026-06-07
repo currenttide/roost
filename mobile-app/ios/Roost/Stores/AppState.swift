@@ -24,9 +24,19 @@ final class AppState: ObservableObject {
     /// tapping through the menu. Same spirit as `ROOST_PAIR_URI`.
     let autoOpenPublish: Bool
 
+    /// Automation hook (same spirit as `autoOpenPublish`): set
+    /// `ROOST_OPEN_SESSION=<job-id>` and the dashboard pushes straight into that
+    /// job's Session screen on appear, so a screenshot of the composer is
+    /// deterministic without tapping a run row (the session screen is otherwise
+    /// tap-gated; XCUITest is R84). Also lays the groundwork for that UI-test work.
+    let autoOpenSession: String?
+
     init() {
         autoOpenPublish =
             ProcessInfo.processInfo.environment["ROOST_OPEN_PUBLISH"] == "1"
+        autoOpenSession =
+            ProcessInfo.processInfo.environment["ROOST_OPEN_SESSION"]
+                .flatMap { $0.isEmpty ? nil : $0 }
         restore()
         // Automation hook (simulator demos / UI tests): pair from an injected
         // URI without the system open-URL confirm dialog, e.g.

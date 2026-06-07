@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import oss.roost.mobile.AppContainer
+import oss.roost.mobile.model.Composer
 import oss.roost.mobile.model.Run
 import oss.roost.mobile.model.StreamEvent
 import oss.roost.mobile.net.ApiClient
@@ -32,7 +33,16 @@ data class SessionUiState(
     val done: DoneResult? = null,
     val children: List<ChildRow> = emptyList(),
     val error: String? = null,
-)
+    // Follow-up composer (DESIGN §3.2 / API.md §4, R38).
+    val draft: String = "",
+    val sending: Boolean = false,
+    val sendOutcome: String? = null,   // last input's queued/delivered/dropped line
+) {
+    /** Composer is live only while the job can still accept input (server 409s a
+     *  terminal job). Mirrors the server's `terminal` gate + iOS `isTerminal`. */
+    val isTerminal: Boolean
+        get() = state == "succeeded" || state == "failed" || state == "cancelled" || done != null
+}
 
 data class ChildRow(val id: String, val intent: String, val state: String, val depth: Int)
 
@@ -173,6 +183,58 @@ class SessionViewModel(
     fun cancel() {
         viewModelScope.launch {
             try { container.api.cancel(jobId) } catch (_: Exception) {}
+        }
+    }
+
+    /** Composer text changed (DESIGN §3.2). */
+    fun onDraftChange(text: String) {
+        _state.value = _state.value.copy(draft = text)
+    }
+
+    /**
+     * Send the composer draft as a follow-up input (R38, API.md §4): POST it,
+     * clear the field, then poll the inputs queue so the user learns whether it
+     * was delivered or dropped (agent/docker jobs run with stdin closed → dropped
+     * with a reason). Mirrors `roost send --wait` (cli.py) and iOS `SessionStore`.
+     */
+    fun sendFollowUp() {
+        val text = _state.value.draft
+        if (_state.value.sending || !Composer.canSend(text)) return
+        viewModelScope.launch {
+            _state.value = _state.value.copy(sending = true, error = null, sendOutcome = null)
+            val ack = try {
+                container.api.sendInput(jobId, text)
+            } catch (e: ApiClient.ApiException) {
+                handleAuth(e)
+                _state.value = _state.value.copy(sending = false, error = e.detail)
+                return@launch
+            } catch (e: Exception) {
+                _state.value = _state.value.copy(
+                    sending = false, error = e.message ?: "send failed")
+                return@launch
+            }
+            // Sent: clear the field, show it's queued, then poll for the outcome.
+            _state.value = _state.value.copy(
+                draft = "", sending = false,
+                sendOutcome = Composer.outcome("queued", null))
+            pollInputOutcome(ack.inputId)
+        }
+    }
+
+    /** Poll GET /jobs/{id}/inputs for ~10 s until this input leaves the queue. */
+    private fun pollInputOutcome(inputId: String) {
+        viewModelScope.launch {
+            repeat(10) {
+                try {
+                    val row = container.api.inputs(jobId).inputs.firstOrNull { it.id == inputId }
+                    if (row != null && row.state != "queued") {
+                        _state.value = _state.value.copy(
+                            sendOutcome = Composer.outcome(row.state, row.detail))
+                        return@launch
+                    }
+                } catch (_: Exception) { /* keep the queued line; polling is best-effort */ }
+                kotlinx.coroutines.delay(1000)
+            }
         }
     }
 

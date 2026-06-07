@@ -17,6 +17,11 @@ final class SessionStore: ObservableObject {
     @Published private(set) var tree: [Job] = []
     @Published private(set) var streamError: String?
 
+    // Follow-up composer (DESIGN §3.2 / API.md §4, R38).
+    @Published var draft: String = ""
+    @Published private(set) var sending = false
+    @Published private(set) var sendOutcome: String?   // last input's queued/delivered/dropped line
+
     private weak var app: AppState?
     private var streamTask: Task<Void, Never>?
     private var seen = Set<Int>()     // guards against any double-append
@@ -89,6 +94,51 @@ final class SessionStore: ObservableObject {
         do { try await api.cancel(jobId); await loadHeader() }
         catch ApiError.unauthorized { app?.handleUnauthorized() }
         catch { streamError = "Cancel failed." }
+    }
+
+    /// Send the composer draft as a follow-up input (R38, API.md §4): POST it,
+    /// clear the field, then poll the inputs queue so the user learns whether it
+    /// was delivered or dropped (agent/docker jobs run with stdin closed → dropped
+    /// with a reason). Mirrors `roost send --wait` (cli.py) and the Android VM.
+    func sendFollowUp() async {
+        guard let api = app?.api, !sending, Composer.canSend(draft) else { return }
+        let text = draft
+        sending = true
+        streamError = nil
+        sendOutcome = nil
+        do {
+            let ack = try await api.sendInput(jobId, text: text)
+            // Sent: clear the field, show it's queued, then poll for the outcome.
+            draft = ""
+            sending = false
+            sendOutcome = Composer.outcome(state: "queued", detail: nil)
+            await pollInputOutcome(ack.inputId)
+        } catch ApiError.unauthorized {
+            sending = false
+            app?.handleUnauthorized()
+        } catch let ApiError.http(_, detail) {
+            sending = false
+            streamError = detail
+        } catch let ApiError.forbidden(detail) {
+            sending = false
+            streamError = detail
+        } catch {
+            sending = false
+            streamError = "Send failed."
+        }
+    }
+
+    /// Poll `GET /jobs/{id}/inputs` for ~10 s until this input leaves the queue.
+    private func pollInputOutcome(_ inputId: String) async {
+        guard let api = app?.api else { return }
+        for _ in 0..<10 {
+            if let row = try? await api.inputs(jobId).inputs.first(where: { $0.id == inputId }),
+               row.state != "queued" {
+                sendOutcome = Composer.outcome(state: row.state, detail: row.detail)
+                return
+            }
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+        }
     }
 
     // MARK: - Event handling

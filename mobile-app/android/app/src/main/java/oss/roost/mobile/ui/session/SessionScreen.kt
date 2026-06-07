@@ -15,6 +15,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -25,6 +26,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -45,6 +47,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
 import oss.roost.mobile.AppContainer
+import oss.roost.mobile.model.Composer
 import oss.roost.mobile.sse.RenderedLine
 import oss.roost.mobile.ui.Semantic
 import oss.roost.mobile.ui.common.Format
@@ -162,6 +165,48 @@ fun SessionScreen(
                 }) {
                     Text(if (showTree) "Hide tree" else "Tree ▸")
                 }
+            }
+
+            // Follow-up composer (DESIGN §3.2 / API.md §4, R38): react fast — type
+            // a steering message and send it to the live job. Hidden once terminal
+            // (the server 409s a terminal job), matching the Cancel button's gate.
+            if (!state.isTerminal) {
+                HorizontalDivider()
+                FollowUpComposer(state, vm)
+            }
+        }
+    }
+}
+
+@Composable
+private fun FollowUpComposer(state: SessionUiState, vm: SessionViewModel) {
+    Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp)) {
+        state.sendOutcome?.let {
+            Text(
+                it,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(bottom = 4.dp),
+            )
+        }
+        Row(
+            Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            OutlinedTextField(
+                value = state.draft,
+                onValueChange = vm::onDraftChange,
+                modifier = Modifier.weight(1f),
+                placeholder = { Text("Follow up…") },
+                maxLines = 4,
+                enabled = !state.sending,
+            )
+            IconButton(
+                onClick = vm::sendFollowUp,
+                enabled = !state.sending && Composer.canSend(state.draft),
+            ) {
+                Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
             }
         }
     }

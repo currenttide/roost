@@ -132,6 +132,18 @@ def capture(db_path: Path) -> dict[str, Any]:
         out["job_cancel_response.json"] = c.delete(
             f"/jobs/{queued_id}", headers=mh).json()
 
+        # -- follow-up input (R38, API.md §4) — AS the mobile token -----------
+        # The phone steers a RUNNING job: POST /jobs/{id}/input queues a message;
+        # GET /jobs/{id}/inputs reports its delivery state. We target the running
+        # job so the POST is accepted (a terminal job 409s). No worker poll runs
+        # here, so the input stays `queued` — the exact shape the composer renders
+        # right after Send, before the worker pulls it.
+        out["job_input_response.json"] = c.post(
+            f"/jobs/{running_id}/input",
+            json={"text": "also check the integration suite"}, headers=mh).json()
+        out["job_inputs_list.json"] = c.get(
+            f"/jobs/{running_id}/inputs", headers=mh).json()
+
         # -- publish (API.md §6) — entirely AS the mobile token ------------
         def _bundle(page: bytes) -> bytes:
             buf = io.BytesIO()

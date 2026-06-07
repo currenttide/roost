@@ -181,4 +181,26 @@ class ParserFixtureTest {
         assertEquals(1, list.size)
         assertEquals(sched.id, list.first().id)
     }
+
+    @Test fun followUpInput() {
+        // Ack for POST /jobs/{id}/input (R38, API.md §4): queued immediately.
+        val ack = Parsers.parseJobInputAck(Fixtures.read("job_input_response.json"))
+        assertTrue(ack.inputId.isNotEmpty())
+        assertTrue(ack.jobId.isNotEmpty())
+        assertEquals("queued", ack.state)
+
+        // GET /jobs/{id}/inputs: the job's queue. The fixture is the running job
+        // with one freshly-queued input (no worker has pulled it yet).
+        val inputs = Parsers.parseJobInputs(Fixtures.read("job_inputs_list.json"))
+        assertEquals("running", inputs.state)          // the JOB's state
+        assertEquals(ack.jobId, inputs.jobId)
+        assertEquals(1, inputs.inputs.size)
+        val row = inputs.inputs.first()
+        assertEquals(ack.inputId, row.id)
+        assertEquals("queued", row.state)
+        assertTrue(row.isQueued)
+        assertFalse(row.isDelivered)
+        assertNull(row.deliveredAt)                    // not delivered yet
+        assertNull(row.detail)
+    }
 }

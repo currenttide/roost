@@ -397,6 +397,62 @@ struct ScheduleDeleteResponse: Codable, Equatable {
     let id: String
 }
 
+// MARK: - Follow-up input (R38, API.md §4)
+
+/// Ack for `POST /jobs/{id}/input` (`job_input_response.json`). `state` here is
+/// always `queued`; the worker's later delivery shows up via `JobInput`.
+struct JobInputAck: Codable, Equatable {
+    let inputId: String
+    let jobId: String
+    let state: String
+
+    enum CodingKeys: String, CodingKey {
+        case state
+        case inputId = "input_id"
+        case jobId = "job_id"
+    }
+}
+
+/// One follow-up input row of `GET /jobs/{id}/inputs` (`job_inputs_list.json`).
+/// `detail` carries the drop reason when `state == "dropped"` (agent/docker jobs
+/// run with stdin closed, so their input is honestly dropped, not delivered).
+struct JobInput: Codable, Equatable, Identifiable {
+    let id: String
+    let state: String          // "queued" | "delivered" | "dropped"
+    let detail: String?
+    let createdAt: Double
+    let deliveredAt: Double?
+    let createdBy: String?
+
+    var isDelivered: Bool { state == "delivered" }
+    var isDropped: Bool { state == "dropped" }
+    var isQueued: Bool { state == "queued" }
+
+    enum CodingKeys: String, CodingKey {
+        case id, state, detail
+        case createdAt = "created_at"
+        case deliveredAt = "delivered_at"
+        case createdBy = "created_by"
+    }
+}
+
+/// `GET /jobs/{id}/inputs` response: the job's follow-up queue (API.md §4).
+struct JobInputs: Codable, Equatable {
+    let jobId: String
+    let state: String          // the JOB's state
+    let inputs: [JobInput]
+
+    enum CodingKeys: String, CodingKey {
+        case state, inputs
+        case jobId = "job_id"
+    }
+}
+
+/// `POST /jobs/{id}/input` request body (API.md §4).
+struct JobInputSubmit: Encodable, Equatable {
+    let text: String
+}
+
 // MARK: - Error envelope (API.md §1)
 
 struct ErrorEnvelope: Codable, Equatable {
