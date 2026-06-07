@@ -93,6 +93,7 @@ curl -sN -H "$H" "$ROOST_URL/jobs/$ID/stream"        # …or stream: SSE state/l
 roost do "summarize today's logs in /var/log and write the digest to /tmp/digest.md"
 roost exec gpu-box -- nvidia-smi          # run a command on one named node, no SSH
 roost submit spec.yaml --detach           # precise spec: exact requires/kind/container/budget
+roost history --failed                     # recent runs that failed or weren't verified
 ```
 
 `roost do` is the front door (classify → route → run → verify); in non-interactive

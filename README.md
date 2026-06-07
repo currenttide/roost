@@ -282,12 +282,14 @@ a per-kind default cap applies (`command` 120 min, `claude`/`auto` 240 min, `doc
 | | |
 |---|---|
 | `roost jobs` | recent jobs |
+| `roost history [--failed]` | recent finished runs with outcome, worker & cost; `--failed` shows only runs that failed or weren't verified ("what went wrong this week") |
 | `roost status <id>` | one job's state |
 | `roost logs <id> [--follow]` | job output |
 | `roost exec <worker> -- <cmd>` | run a command on one specific node — no SSH, via the job channel (great for a node whose SSH is unreachable) |
 | `roost tree <root> --health` | a dispatch's whole job tree + per-job liveness |
 | `roost cancel <id> [--tree]` | cancel a job (or its lineage) |
 | `roost workers` | the live fleet |
+| `roost prune-workers [--days N]` | (admin) delete ghost worker rows not seen in N days (default 7); never touches live or running nodes |
 | `roost capabilities` | what the fleet can do, in plain language |
 
 ---
