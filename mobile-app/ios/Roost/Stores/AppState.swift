@@ -18,7 +18,15 @@ final class AppState: ObservableObject {
     /// screen is on-screen; the pairing view consumes it on appear.
     @Published var pendingPairURL: URL?
 
+    /// Automation hook (simulator demos / UI tests / screenshot capture): set
+    /// `ROOST_OPEN_PUBLISH=1` and the dashboard presents the publish sheet on
+    /// appear, so a screenshot of the publish screen is deterministic without
+    /// tapping through the menu. Same spirit as `ROOST_PAIR_URI`.
+    let autoOpenPublish: Bool
+
     init() {
+        autoOpenPublish =
+            ProcessInfo.processInfo.environment["ROOST_OPEN_PUBLISH"] == "1"
         restore()
         // Automation hook (simulator demos / UI tests): pair from an injected
         // URI without the system open-URL confirm dialog, e.g.

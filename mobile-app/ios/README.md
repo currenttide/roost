@@ -129,13 +129,13 @@ errors (3× `catch`-binding shadowing of an `error` property, 1× `.tint` in a
 ## Linux pure-layer harness
 
 The Models/Net parsing layer is pure Foundation, so the full test suite minus
-UI runs on Linux (verified 2026-06-05, 32/32 green on Swift 6.0.3):
+UI runs on Linux (verified 2026-06-07, 46/46 green on Swift 6.0.3):
 
 ```sh
 # one-time: toolchain from swift.org into /tmp/swift-toolchain
 mkdir -p /tmp/ios-linux-check/{Sources/Roost,Tests/RoostTests} && cd /tmp/ios-linux-check
 # Package.swift: target Roost + testTarget RoostTests (see mac-app for the pattern)
-# symlink: Models/*.swift, Net/{SSE,Pairing,Ansi,ApiClient,OfflineCache}.swift → Sources/Roost
+# symlink: Models/*.swift, Net/{SSE,Pairing,Ansi,ApiClient,OfflineCache,Publish}.swift → Sources/Roost
 #          RoostTests/*.swift → Tests/RoostTests
 ROOST_FIXTURES=$REPO/mobile-app/fixtures /tmp/swift-toolchain/usr/bin/swift test
 ```

@@ -16,6 +16,21 @@ enum UIFormat {
         guard let epoch else { return nil }
         return duration(Date().timeIntervalSince1970 - epoch)
     }
+
+    /// Human byte size like "32 B", "1.2 KB", "3.4 MB" (publish sheet, §6).
+    /// Decimal units to match how sizes read on the web.
+    static func bytes(_ count: Int) -> String {
+        let n = Double(max(0, count))
+        if n < 1000 { return "\(Int(n)) B" }
+        let units = ["KB", "MB", "GB", "TB"]
+        var value = n / 1000
+        var unit = 0
+        while value >= 1000 && unit < units.count - 1 {
+            value /= 1000
+            unit += 1
+        }
+        return String(format: "%.1f %@", value, units[unit])
+    }
 }
 
 extension HealthStatus {
