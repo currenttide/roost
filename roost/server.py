@@ -925,6 +925,20 @@ def _cancel_job(db_path: Path, job_id: str, cascade: bool) -> int:
             ).fetchall()
             for fr in freed:
                 _refresh_worker_status(conn, fr["worker_id"])
+            # [R65] Resolve queued inputs on the jobs THIS call transitioned to
+            # cancelled (finished_at=now). Scoping to the same predicate the `freed`
+            # query uses keeps the cascade honest: a child already terminal before
+            # this cancel is NOT in this set, so its input rows are untouched and
+            # keep their original outcome/reason. Atomic with the cancel — this is
+            # the write that wins the cancel-vs-input-POST race.
+            transitioned = [
+                r["id"] for r in conn.execute(
+                    f"SELECT id FROM jobs WHERE id IN ({placeholders}) "
+                    f"AND state='cancelled' AND finished_at=?",
+                    [*ids, now],
+                ).fetchall()
+            ]
+            _drop_pending_inputs(conn, transitioned, now)
             for jid in ids:
                 conn.execute(
                     "INSERT INTO job_logs(job_id, seq, stream, data, ts) "
@@ -974,6 +988,10 @@ def _finalize_job(
                     job_id,
                 ),
             )
+            # [R65] Terminal now — resolve any input still queued (R38). A captain
+            # root has no worker, so the heartbeat back-channel never offered it;
+            # without this it would strand in `queued` forever.
+            _drop_pending_inputs(conn, [job_id], now)
             conn.execute("COMMIT")
             return True
         except Exception:
@@ -1569,6 +1587,12 @@ def _apply_event(
                 )
                 # Freed a slot — may flip the worker from saturated 'busy' to 'idle'.
                 _refresh_worker_status(conn, worker_id)
+                # [R65] The job is terminal: resolve any input still queued for it.
+                # The worker just reported done and is dropping the job from its
+                # _active map, and the heartbeat back-channel only offers delivery
+                # for assigned/running jobs — so no actor would ever pull it. Drop
+                # it (R38: never silently lost), atomically with the transition.
+                _drop_pending_inputs(conn, [job_id], now)
             elif etype == "declined":
                 # Bare-worker self-selection: this worker judged itself a poor fit.
                 # Record it in the decliner set and requeue for a capable node. Escalate
@@ -1670,6 +1694,55 @@ def _apply_event(
 #
 # POSTing to a terminal job is rejected at the API (409) so the caller learns
 # immediately rather than discovering a dropped row later.
+
+# [R65] The drop reason recorded when a job goes terminal with input still queued.
+# Mirrors the existing `job_terminal` vocabulary (the terminal-notification event,
+# server.py ~728) and the README's "the job went terminal before pickup" wording.
+INPUT_DROP_JOB_TERMINAL = "job_terminal"
+
+
+def _drop_pending_inputs(conn: sqlite3.Connection, job_ids: list[str], now: float) -> int:
+    """[R65] Resolve every still-`queued` input of the given jobs to `dropped`,
+    closing R38's "never silently lost" contract on terminal transitions.
+
+    MUST be called inside the caller's already-open `BEGIN IMMEDIATE` transaction so
+    the drop is ATOMIC with the state change that made the job terminal — that
+    atomicity is what kills the cancel-vs-input-POST race: once the cancel's txn
+    holds the write lock, a concurrent POST either committed first (its row is
+    `queued` and we drop it here) or blocks until we commit and then sees the job
+    terminal and is rejected 409. No window leaves a row stranded.
+
+    Only `queued` rows are touched, so an already-`delivered`/`dropped` row keeps its
+    original outcome + reason (idempotent; a re-cancel never relabels resolved rows).
+    Returns the number of rows dropped. A no-op (empty `job_ids`) returns 0."""
+    if not job_ids:
+        return 0
+    placeholders = ",".join("?" * len(job_ids))
+    cur = conn.execute(
+        f"UPDATE job_inputs SET state='dropped', detail=?, delivered_at=? "
+        f"WHERE state='queued' AND job_id IN ({placeholders})",
+        [INPUT_DROP_JOB_TERMINAL, now, *job_ids],
+    )
+    dropped = cur.rowcount
+    if dropped:
+        # One log divider per affected job so the drop is visible in the stream,
+        # mirroring _ack_job_input's per-input dividers. Re-query the rows we just
+        # flipped (delivered_at=now pins exactly this call's drops).
+        rows = conn.execute(
+            f"SELECT id, job_id FROM job_inputs "
+            f"WHERE state='dropped' AND delivered_at=? AND job_id IN ({placeholders})",
+            [now, *job_ids],
+        ).fetchall()
+        for r in rows:
+            conn.execute(
+                "INSERT INTO job_logs(job_id, seq, stream, data, ts) "
+                "VALUES (?, (SELECT COALESCE(MAX(seq), 0)+1 FROM job_logs WHERE job_id=?), 'event', ?, ?)",
+                (r["job_id"], r["job_id"],
+                 json.dumps({"type": "input_dropped", "input_id": r["id"],
+                             "detail": INPUT_DROP_JOB_TERMINAL}),
+                 now),
+            )
+    return dropped
 
 
 def _queue_job_input(
@@ -1890,6 +1963,11 @@ def _sweep(db_path: Path) -> dict[str, int]:
                         (now, row["id"]),
                     )
                     counts["failed_attempts"] += 1
+                    # [R65] This terminal (failed) path strands queued input —
+                    # resolve it (R38). The REQUEUE branch below deliberately does
+                    # NOT: the job stays active and the input must survive for the
+                    # next attempt's worker to deliver.
+                    _drop_pending_inputs(conn, [row["id"]], now)
                 else:
                     # Semantics: fast-retry, NOT fresh-grace (R52 — the analog of
                     # R19's decline fix, deliberately the OPPOSITE choice).
