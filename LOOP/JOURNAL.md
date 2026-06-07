@@ -1507,3 +1507,31 @@ Entries are written by the loop; humans read, never need to edit.
   address). Pre-PR rebase verified byte-identical mobile-app/ios subtree, so the
   Mac evidence applies to the merged commit. The fleet built and verified its own
   client app — the most production-real evidence loop to date. R51 last in flight.
+
+## 2026-06-07 ~06:30 UTC — R51: verify.py e2e coverage (trust loop fully exercised)
+- Verdict: shipped
+- Branch/PR: loop/r51-verify-e2e / https://github.com/currenttide/roost/pull/64 (merged 164dad1)
+- What changed: tests-only (+451 in test_worker.py). 11 e2e tests drive the REAL
+  run_job verify/self-heal phase via a _ScriptedProc harness patching only the
+  subprocess seam — _run_verifier, _oneshot_agent, the heal loop, _phase_progress
+  budget plumbing, and verify.py all execute for real. Scenarios: verify-pass;
+  heal-succeeds; heal-exhausted → honest failed; verifier inconclusive/timeout →
+  accepted-unverified verified=None (degradation now PINNED: retry once then accept
+  with explicit evidence — never a confident pass, never a heal); unrecognized
+  verdict; budget-exhausted skip + mid-heal cutoffs; server-cancel-during-verify;
+  verify:false control.
+- Evidence:
+  - coverage: verify.py 87% → 100% (0 missing); worker.py 63% → 72% with the
+    verify-phase region (1989-2074) + _run_verifier (2225-2257) fully covered;
+    no module down (git-stash before/after)
+  - `python -m pytest -q` → 663 at merge (now 664)
+  - MUTATION PROBES: 5/5 caught (exhausted failed→succeeded; verified always-True;
+    heal loop disabled; inconclusive→True; parse_verdict FAIL→PASS) — run
+    independently by BOTH implementer and judge
+- Judge: approve (round 1) — re-ran suite, re-measured coverage via git-stash,
+  ran the 5 mutations itself; one non-blocking note (timeout test doesn't pin
+  spawn count)
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only)
+- Notes: iteration #10 COMPLETE — R50 #63 (Mac-verified iOS publish UI), R51 #64,
+  R52 #62 (cleared). Master 664. Cycle #12: R53 Android publish parity, R54
+  ratchet re-measure + cli.py lift, R55 push client wiring (Linux-testable slice).

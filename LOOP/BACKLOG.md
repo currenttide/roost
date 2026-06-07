@@ -161,13 +161,25 @@ Done-when: interval configurable via the same config style as ROOST_NARRATE (env
 Surface: mobile/iOS/feature. North star #3. The decode layers + contract landed with R6/R34; the iOS app still has no publish screen — pick-bundle → upload (or one-shot) → publish → share-link. Evidence table mac-path applies: build + test + simctl screenshot via a Roost job on the Mac node (mac-mini-m4, proven in I0); if the Mac is unreachable, cap claims at "compiles, needs-mac-verify" and mark blocked honestly.
 Done-when: publish screen wired into the iOS app using the existing RoostKit calls (one-shot preferred); Linux-runnable logic tests for any new view-model; Mac node run: xcodebuild build+test green + simctl screenshot of the publish screen returned as a blob artifact and linked in the PR; pytest green (server untouched or additive only).
 
-### R51. verify.py e2e coverage — `open` `self-promoted`
+### R51. verify.py e2e coverage — `done` *(2026-06-07, PR #64 — verify.py 87→100%, worker 63→72%)* `self-promoted`
 Surface: tests. A2: the trust loop is the product's core promise; verify.py sits at 87% with the verdict path under-exercised end-to-end (hunt #4 cleared parse_verdict unit-level; e2e through run_job's verify phase with a stubbed verifier process is the gap).
 Done-when: e2e tests drive run_job's verify/self-heal phase with stubbed subprocess(es): verify-pass → succeeded; verify-fail → self-heal attempt(s) → outcome; verifier crash/timeout → documented degradation; budget-exhausted skip path; verify.py + the worker verify-phase branches measurably up, no module down; pytest green.
 
 ### R52. Lease-expiry grace analog — investigate, repro-or-clear — `done (cleared)` *(2026-06-07, PR #62 — fast-retry semantics documented + regression-locked)* `self-promoted`
 Surface: backend/design-question. R19 restarted the placement-grace window for declines only and filed the analog question: should a SWEEPER requeue (lease expiry — a real failure) also restart it? Investigate the actual competitive-placement behavior after a lease-expiry requeue on current code; decide with evidence (R43 pattern): if the current behavior produces a concrete bad outcome (e.g. anti-starvation override permanently armed after one expiry, starving competitive placement), repro it and fix; if the current behavior is defensible, document the rationale in code and close `invalid` with the analysis.
 Done-when: either repro+fix+tests+pytest green, or a judge-verified refutation documented in a code comment at the requeue site; the Proposed question closes either way.
+
+### R53. Android publish UI parity — `open` `self-promoted` `feature`
+Surface: mobile/Android/feature. North star #3. R50 landed the iOS publish screen (PR #63); Android has the decode layers (R34) but no screen. Mirror the iOS UX in the Compose app: pick tar.gz (SAF document picker) → name with slug preview → one-shot publish → show site URL with share intent.
+Done-when: Compose screen wired following the app's existing screen/viewmodel patterns; ALL slug/intent/state logic in a Linux-testable layer (kotlinc+JUnitCore harness) with tests mirroring iOS PublishTests; UI-render claims capped honestly per the evidence table (no Android emulator in the fleet — say so in the PR); pytest green (server untouched).
+
+### R54. Coverage ratchet re-measure + cli.py lift — `open` `self-promoted`
+Surface: tests/ratchet. A5+A2: the branch-coverage ratchet baseline is stale (63% TOTAL at 482 tests, 2026-06-07 early; suite now 664). First re-measure and record the new TOTAL; then lift the weakest module — cli.py was 36% branch at last measure (process-spawning paths were excused, but command surfaces like send/backup/schedule/history/prune-workers have grown since R16 with uneven test reach).
+Done-when: fresh `coverage run --branch -m pytest` TOTAL recorded (judge re-measures); targeted tests raise cli.py branch coverage measurably (≥5 points) with real assertions (R16 style: runner + stubbed HTTP, no processes); no module down; pytest green.
+
+### R55. Push-notification client wiring — Linux-testable slice — `open` `self-promoted` `feature`
+Surface: mobile/feature. R37 landed the CP webhook (ntfy-compatible); the deferred client side has a real codeable slice even without devices: (iOS) a notification-settings screen storing the ntfy topic/URL derived from the CP config + deep-link plumbing from a notification payload to the job detail screen; (Android) the same settings + an UnifiedPush-style receiver whose payload→navigation mapping is pure logic. Read mobile-app/DESIGN.md v1.1's client section first and implement what it actually specifies.
+Done-when: settings + payload-routing logic landed on both clients with the logic layer Linux-tested (payload parse → expected deep-link route table); device-only pieces (actual push registration/display) explicitly capped in the PR per the evidence table; API.md/DESIGN.md updated only if the implemented slice needs it (additive); pytest + both mobile harnesses green.
 
 ### R21. Make presigned blob PUT single-use and race-safe — `done` *(2026-06-07, PR #30)* `self-promoted`
 Surface: backend/security. A1 hunt #2 reproduced that a presigned `put_url`
