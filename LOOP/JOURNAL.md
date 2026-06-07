@@ -7,7 +7,7 @@ Entries are written by the loop; humans read, never need to edit.
 
 ## 2026-06-06 — R26: broaden OSError catch in run_job spawn handler
 - Verdict: shipped
-- Branch/PR: loop/r26-oserror-escape / https://github.com/currenttide/roost/pull/33
+- Branch/PR: loop/r26-oserror-escape / https://github.com/currenttide/roost/pull/34
 - What changed: `except (FileNotFoundError, PermissionError)` → `except OSError` in
   `roost/worker.py` at the `asyncio.create_subprocess_exec` call site (one line).
   Added `test_bug4_other_oserror_does_not_escape_run_job` in `tests/test_worker.py`
@@ -17,10 +17,11 @@ Entries are written by the loop; humans read, never need to edit.
 - Evidence:
   - `pytest tests/test_worker.py::test_bug4_other_oserror_does_not_escape_run_job -v` → PASSED
   - `python -m pytest -q` → 539 passed in 16.39s
-- Judge: claude-sonnet-4-6 — APPROVE. "The change is correct and the motivation is
-  sound. OSError is the documented base class for all OS-level failures from
-  asyncio.create_subprocess_exec. Catching it here is the right level of specificity.
-  Test quality is high."
+- Judge: claude-sonnet-4-6 — APPROVE. "OSError is the documented base class for all
+  OS-level exceptions from asyncio.create_subprocess_exec. The fix is correct and
+  minimal. The existing error path (send_log, post_event, decrement _running) was
+  already correct; broadening except simply ensures it is reached for the full
+  OSError hierarchy. All five Done-When criteria satisfied."
 
 ---
 
