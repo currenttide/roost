@@ -421,15 +421,15 @@ Done-when: when the peel loop empties the string, fall back to the (72-char-trun
 
 ### R90. `roost publish` loses the one-shot error when the fallback raises a transport exception — `done` *(2026-06-07, PR #101)* `self-promoted`
 
-### R91. README test-count drift — fix structurally — `open` `self-promoted`
+### R91. README test-count drift — fix structurally — `done` *(2026-06-07, PR #103 — count-free phrasing; ratchet → 0)* `self-promoted`
 Surface: docs. Drift sweep #4 F1 (Tier A judged), promoted this cycle. `README.md:474` says `# 792 tests`; the suite is 884 and the number drifts with EVERY PR — the exact-count claim is the structural problem.
 Done-when: the line no longer states a hardcoded count (e.g. `# full suite` or a phrasing the judge confirms can't drift); any OTHER hardcoded suite-count claims found by grep get the same treatment; docs-drift ratchet back to 0; pytest green.
 
-### R92. macOS CI job has never compiled the app — fix the toolchain pin — `open` `self-promoted`
+### R92. macOS CI job has never compiled the app — fix the toolchain pin — `done` *(2026-06-07, PR #102 — macos-15 runner; first-ever green compile+test run; branch-protection rec'd to human)* `self-promoted`
 Surface: CI/mac-app. A4 journaled debt (R73 notes), promoted: `mac-app/Package.swift` pins `swift-tools-version:5.10`, but SwiftTerm 1.13.0 pulls swift-argument-parser 1.8.2 requiring tools 6.0 — the macos-14 runner's Swift 5.10 dies at dependency RESOLUTION, so the `App build + tests (macOS)` job is red on every mac-app PR and catches nothing (it could not have caught R73's compile break).
 Done-when: the workflow's macOS job actually compiles RoostMac and runs swift test, GREEN ON THIS PR's own CI run (that run is the proof — judge re-checks it); seam chosen deliberately (bump tools-version — the Mac node's 6.2.3 builds fine — and/or newer Xcode/runner image; justify); local Mac-node build still green; mac-app/README CI claims updated if behavior changed; pytest green. Branch-protection (required checks) is a GitHub-admin action — note it for the human, out of scope.
 
-### R93. mac-app Publish + Transfers panes surface load errors — `open` `self-promoted` `feature`
+### R93. mac-app Publish + Transfers panes surface load errors — `done` *(2026-06-07, PR #104 — per-pane seams, RoostKit 115; transport-error state render-proven)* `self-promoted` `feature`
 Surface: mac-app/UX. A4 journaled finding (R81 notes), promoted: `(try? client.sites()) ?? sites` and `try? refreshStaged()` swallow load failures entirely — against a CP missing those endpoints the panes look empty with zero feedback (the inverse of the fixed R81 double-stack). Mirror the proven `SchedulesListState` decision-seam pattern (PR #91).
 Done-when: each pane gets a RoostKit decision seam (loading/list/empty/error-or-unavailable, mutually exclusive) with Linux swift tests; views become dumb switches; 404-on-old-CP renders a single clear "not available" state, transport errors a retryable error state; Mac-node build + swift test green; render proven via the headless-harness pattern or capped honestly; pytest green (server untouched).
 Surface: CLI/robustness. A1 hunt #9. `cli.py:1564-1573` (R78): on one-shot ≥400, `oneshot_err` is saved, but only an HTTP-STATUS fallback failure wraps it — a transport exception (`httpx.ConnectError`, connection refused mid-fallback) from the blob POST propagates raw, so the user loses the original diagnosis, contradicting the R78 docstring promise (cli.py:1514-1515).

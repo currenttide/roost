@@ -2469,3 +2469,58 @@ Entries are written by the loop; humans read, never need to edit.
 - Notes: iteration #28 totals: 3/3 shipped (PRs #99 #100 #101), tests 867→884,
   all round-1. Every hunt-9 bug closed same-day. Next: promote drift F1 +
   A4 debts (macOS CI; silent-swallow panes) as R91-R93 → iteration #29.
+
+## 2026-06-07 ~21:36 UTC — R91: count-free README claim (iteration #29)
+- Verdict: shipped
+- Branch/PR: loop/r91-readme-count / https://github.com/currenttide/roost/pull/103 (merged e613f15)
+- What changed: README.md:474 `# 792 tests` → `# full suite` — the structural
+  fix (exact counts drift every PR). Repo-wide grep classified the rest:
+  fixture evidence strings + iOS-harness count (separate Tier B) + false
+  positives all correctly frozen/untouched. Docs-drift ratchet → 0.
+- Evidence: pytest 884 (docs-only); classification table in PR; judge re-ran both
+- Judge: approve (round 1)
+- Models: implementer claude-opus-4-8[1m] / judge claude-sonnet-4-6
+
+## 2026-06-07 ~21:36 UTC — R92: macOS CI compiles the app for the FIRST TIME (iteration #29)
+- Verdict: shipped
+- Branch/PR: loop/r92-macos-ci / https://github.com/currenttide/roost/pull/102 (merged a1cf472)
+- What changed: one-line seam — `app-macos` job macos-14 → macos-15 (Xcode 16.4 /
+  Swift 6.1 satisfies arg-parser 1.8.2's tools-6.0 requirement). DELIBERATELY
+  did NOT bump swift-tools-version: that would flip Swift-6 strict-concurrency
+  language mode and turn a toolchain unblock into a migration. README CI note
+  updated.
+- Evidence: THE PR'S OWN CI RUN — App build + tests (macOS) PASS 1m44s
+  (https://github.com/currenttide/roost/actions/runs/27105090402): swift build
+  Build complete (35.14s), 83 tests 0 failures, Roost.app assembled — all three
+  steps that had NEVER run before (old runs died at resolution ~50s). Old
+  failure shape confirmed gone vs an old log. Linux RoostKit 83/0; Mac node
+  83/0; pytest 884.
+- Judge: approve (round 1) — re-checked the CI run + an old failed run itself
+- Models: implementer claude-opus-4-8[1m] / judge claude-sonnet-4-6
+- Notes: FOR THE HUMAN (GitHub admin): make `App build + tests (macOS)` a
+  required status check on master now that it is meaningful.
+
+## 2026-06-07 ~21:36 UTC — R93: Publish + Transfers panes surface load errors (iteration #29)
+- Verdict: shipped
+- Branch/PR: loop/r93-pane-errors / https://github.com/currenttide/roost/pull/104 (merged 86d526d)
+- What changed: per-pane RoostKit decision seams (PublishListState +
+  TransfersListState, faithful mirrors of R81's SchedulesListState; both
+  classifiers handle BOTH 404 shapes — a slight improvement the judge noted);
+  five mutually-exclusive states each; views became exhaustive switches;
+  refreshSites/refreshStaged record the classified error instead of
+  try?-swallowing. The R81-finding inverse failure mode (silent empty pane) is
+  closed.
+- Evidence: RoostKit Linux 115 (83+32); Mac node build + 115/115; pytest 884
+  (git diff -- roost/ empty); render-proven TRANSPORT-ERROR state via headless
+  harness against a dead port (red "Couldn't load…" + Retry, screenshot
+  round-tripped + inspected) — the live CP actually serves /publish + /blobs so
+  404→unavailable is covered by the Linux tests instead (honest cap); CI: both
+  checks green INCLUDING the R92-fixed macOS job validating this very PR.
+- Judge: approve (round 1)
+- Models: implementer claude-opus-4-8[1m] / judge claude-sonnet-4-6
+- Notes: iteration #29 totals: 3/3 (PRs #102 #103 #104), RoostKit 83→115,
+  drift ratchet 0, CI now real. Session since LONG-IDLE wake: 21 PRs (#84–#104),
+  pytest 823→884. Ranked dry → next replenishment: A2 coverage re-measure
+  (baseline 71% @ 707 tests is stale; suite now 884) + A6 product-gap survey #3
+  (the surface grew: prefix lookup, kind/goal_display, composer, XCUITest,
+  pane states).
