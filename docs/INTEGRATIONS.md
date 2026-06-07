@@ -28,7 +28,7 @@ That registers Roost's stdio MCP server. Your agent now has these tools (from
 | `roost_runs` | The inbox: recent + in-flight runs with phase, verified flag, one-line result. |
 | `roost_result` | Wait for a run and return its verified outcome `{state, verified, evidence, output}`. |
 | `roost_capabilities` | What the fleet can do (nodes, cores, GPUs) in plain language. |
-| `roost_submit` | Submit a precise sub-job (`kind` claude/codex/docker, `requires`, `container`, `budget`). |
+| `roost_submit` | Submit a precise sub-job (`kind` auto/claude/codex/docker, `requires`, `container`, `budget`). Use `kind: auto` for the self-selecting verified path (equivalent to `roost do`). |
 | `roost_status` / `roost_wait` / `roost_logs` | One job's state + liveness facts / block to terminal / its logs. |
 | `roost_cancel` | Cancel a job (`tree: true` for its descendants). |
 | `roost_workers` | List workers and a capability summary. |

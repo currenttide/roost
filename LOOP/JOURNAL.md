@@ -787,3 +787,25 @@ Entries are written by the loop; humans read, never need to edit.
   `claude-sonnet-4-6`.
 - Models: implementer gpt-5 (Codex) / judge claude-sonnet-4-6
 - Notes: R22 and R23 remain open and untouched; R22 is now top Ranked.
+
+## 2026-06-06 — R27: `roost_submit` MCP schema missing `kind: auto`
+- Verdict: shipped
+- Branch/PR: loop/r27-roost-submit-kind-auto
+- What changed:
+  - `roost/mcp.py`: `kind` enum expanded from `["claude","codex","docker"]` to
+    `["auto","claude","codex","docker"]`; added inline `description` field explaining
+    each option, with `auto` explicitly named as the self-selecting verified path
+    equivalent to `roost do`
+  - `docs/INTEGRATIONS.md`: `roost_submit` tool table row updated to show
+    `kind auto/claude/codex/docker` and explain `kind: auto`
+  - `tests/test_mcp.py`: new test `test_roost_submit_kind_enum_includes_auto` asserts
+    `"auto"` is in the enum and all three pre-existing kinds remain
+- Evidence:
+  - `python -m pytest -q` → 539 passed in 16.90s (implementer)
+  - Judge (round 1, claude-sonnet-4-6): APPROVED — schema change correct and additive,
+    server.py confirmed to accept `kind: auto` (lines 270–276), docs update accurate,
+    test well-targeted, no existing tests deleted or weakened
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (fenced MODEL block present)
+- Notes: Promoted from Proposed (A6 cycle #4, judge-pre-approved). Fix was purely additive —
+  no server changes required since the server already handled `kind: auto`; the gap was
+  only at the MCP schema validation layer.

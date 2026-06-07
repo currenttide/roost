@@ -126,7 +126,18 @@ TOOLS: list[dict[str, Any]] = [
                 "command": {"description": "Shell command (string) or argv (array). "
                                            "Use this OR intent. For kind=docker this is the "
                                            "command run INSIDE the container."},
-                "kind": {"type": "string", "enum": ["claude", "codex", "docker"]},
+                "kind": {
+                    "type": "string",
+                    "enum": ["auto", "claude", "codex", "docker"],
+                    "description": (
+                        "'auto' — self-selecting verified path (equivalent to `roost do`): "
+                        "the worker classifies the task and the independent verifier confirms "
+                        "the outcome. Prefer this when you want trust-loop guarantees. "
+                        "'claude' — explicit agent job (unverified). "
+                        "'codex' — codex agent job. "
+                        "'docker' — isolated container job; supply `image`."
+                    ),
+                },
                 "image": {"type": "string",
                           "description": "kind=docker only: container image to run the job in "
                                          "(e.g. pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime)."},
