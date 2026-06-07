@@ -85,3 +85,47 @@ deploy env alongside ROOST_TOKEN/ROOST_DATA_DIR) — that's what turns on the
 host router and the public-edge guard (requests under roost.pub can only reach
 site content, never the API). Forgetting it = published sites lose their
 public URLs but nothing is exposed; the tunnel just 404s via the apex rule.
+
+## Mobile push notifications (opt-in)
+
+The CP can fire a notification on **every terminal job** (succeeded / failed /
+cancelled) so the mobile apps (and any other receiver) learn a session finished
+without polling. This is the v1.1 push feature from `mobile-app/DESIGN.md`. It is
+**off by default** — set one env var (or `--notify-url`) to turn it on:
+
+```bash
+# ntfy.sh (hosted) — pick an unguessable topic and subscribe to it in the app
+export ROOST_NOTIFY_URL=https://ntfy.sh/roost-7f3a91c2
+# …or a self-hosted ntfy / any UnifiedPush-style webhook:
+# export ROOST_NOTIFY_URL=https://ntfy.mybox.lan/roost
+docker compose -f docker/stack.yml up -d --build control-plane
+```
+
+or `roost serve --notify-url https://ntfy.sh/<topic>`. CLI flag wins over env;
+unset = **zero notifications, zero behavior change**.
+
+**What's sent.** A single HTTP `POST` to that URL per terminal job, carrying a
+JSON body — `{event, job_id, state, intent, duration_sec, exit_code, worker_id,
+message}` — *and* ntfy's display headers (`Title`, `Priority`, `Tags`). That dual
+shape is deliberate: the JSON parses cleanly for a generic UnifiedPush/webhook
+receiver, while the headers make the **same** request render as a clean push in
+the ntfy app (failures arrive at high priority). No APNs/FCM plumbing and **no
+new dependencies** — it reuses the `httpx` the CP already ships.
+
+**Failure isolation (by design).** The POST is **fire-and-forget**: it runs as a
+detached task with a short timeout and is never awaited on the request path. A
+500, a timeout, a refused connection, or DNS failure is **logged and dropped** —
+it can never affect job state, the worker's report, or the request that triggered
+it. There is **no retry** (a missed terminal push is recoverable by pulling
+`/derived`); unbounded retries would be a worse failure mode than a dropped ping.
+
+**Security note.** The URL is a capability — anyone who knows an ntfy topic can
+read its messages. Use a long, random topic (as above), or self-host ntfy behind
+your tunnel/LAN. Payloads contain the job's intent one-liner and state, not
+credentials or logs.
+
+> Subscribing the iOS/Android clients to the topic (UnifiedPush distributor on
+> Android; an APNs bridge or ntfy's own app on iOS) is **client/device work
+> tracked separately** — it isn't exercisable on the Linux test harness, so it
+> is out of scope for this server-side change. The CP side (config + the POST on
+> terminal states) is complete and tested here.

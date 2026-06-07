@@ -409,8 +409,16 @@ def cli(ctx: click.Context, url: Optional[str], token: Optional[str]) -> None:
                    "<slug>.<domain> serve that site ONLY (the fleet API is unreachable "
                    "under it), and `roost publish` prints https://<slug>.<domain>/. "
                    "Default: env ROOST_PUBLISH_DOMAIN.")
+@click.option("--notify-url", default=None,
+              help="Opt-in push notifications: on every terminal job (succeeded/"
+                   "failed/cancelled) POST a notification to this URL — an ntfy.sh "
+                   "topic (e.g. https://ntfy.sh/your-topic) or any UnifiedPush/"
+                   "webhook receiver. Fire-and-forget; a slow or failing endpoint "
+                   "never affects job state. Unset = no notifications. "
+                   "Default: env ROOST_NOTIFY_URL.")
 def serve(host: str, port: int, db_path: Optional[str], serve_token: Optional[str],
-          provision_auth: bool, publish_domain: Optional[str]) -> None:
+          provision_auth: bool, publish_domain: Optional[str],
+          notify_url: Optional[str]) -> None:
     """Run the control plane."""
     from . import server as _server
 
@@ -420,7 +428,8 @@ def serve(host: str, port: int, db_path: Optional[str], serve_token: Optional[st
         click.echo("[roost] WARNING: starting with no auth token; "
                    "anyone who can reach this port can submit jobs.", err=True)
     _server.run(host=host, port=port, db_path=db, token=token,
-                provision_claude_auth=provision_auth, publish_domain=publish_domain)
+                provision_claude_auth=provision_auth, publish_domain=publish_domain,
+                notify_url=notify_url)
 
 
 # ---------- one-command on-ramp ----------

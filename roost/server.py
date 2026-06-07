@@ -93,6 +93,17 @@ MOBILE_TOKEN_PREFIX = "rst-mob-"
 TERMINAL_STATES = ("succeeded", "failed", "cancelled")
 ACTIVE_STATES = ("queued", "assigned", "running")
 
+# Mobile push notifications (R37 / mobile DESIGN.md v1.1). When ROOST_NOTIFY_URL
+# is set, the CP fires a single fire-and-forget POST to it as each job reaches a
+# terminal state. Deliberately dependency-light: the URL is an ntfy.sh topic
+# (self-hosted or ntfy.sh) or any UnifiedPush-style webhook — no APNs/FCM. The
+# POST carries a JSON body (for webhook receivers) plus ntfy-recognized headers
+# (Title/Priority/Tags) so the same call renders as a readable ntfy push AND
+# parses as structured JSON. Notify is opt-in: zero behavior change when unset,
+# and a failed/slow/refused endpoint can NEVER affect job state (see
+# _post_notification — it only logs, never raises, never retries).
+NOTIFY_TIMEOUT_SEC = 5.0  # whole-request budget; a hung endpoint must not pile up
+
 
 # ---------- DB helpers ----------
 
@@ -517,6 +528,87 @@ def _job_cost(job: dict) -> dict:
     if tb:
         out["budget_pct"] = round(100 * (job.get("tree_budget_spent") or 0) / tb, 1)
     return out
+
+
+# ---------- Terminal-state push notifications (R37) ----------
+
+
+def _notify_duration_sec(job: dict) -> Optional[float]:
+    """Wall-clock seconds the job ran, rounded. Prefer started→finished; fall
+    back to created→finished for jobs that never reached a worker (e.g. a queued
+    job cancelled before it ran). None when we can't tell."""
+    finished = job.get("finished_at")
+    start = job.get("started_at") or job.get("created_at")
+    if finished is None or start is None:
+        return None
+    return round(max(0.0, float(finished) - float(start)), 1)
+
+
+def _build_notification(job: dict) -> tuple[dict[str, Any], dict[str, str]]:
+    """Build a (json_body, http_headers) pair for a terminal job.
+
+    The body is structured JSON for generic UnifiedPush/webhook receivers; the
+    headers are ntfy.sh's well-known display headers (Title/Priority/Tags) so the
+    same POST also renders as a clean push when the endpoint is an ntfy topic.
+    ntfy treats the JSON body as the message text, which is acceptable — the
+    human-readable summary leads, and the structured fields follow."""
+    state = job.get("state") or "?"
+    job_id = job.get("id") or "?"
+    intent = _goal_text(job) or "(no intent)"
+    duration = _notify_duration_sec(job)
+    emoji = {"succeeded": "white_check_mark", "failed": "x", "cancelled": "no_entry"}.get(
+        state, "bell"
+    )
+    # ntfy priority: failures are urgent (5), cancels low (2), success default (3).
+    priority = {"failed": "5", "cancelled": "2"}.get(state, "3")
+    body: dict[str, Any] = {
+        "event": "job_terminal",
+        "job_id": job_id,
+        "state": state,
+        "intent": intent,
+        "duration_sec": duration,
+        "exit_code": job.get("exit_code"),
+        "worker_id": job.get("worker_id"),
+    }
+    # A compact human line as the ntfy message, mirroring the dashboard rows.
+    dur_txt = f" · {duration:g}s" if duration is not None else ""
+    body["message"] = f"{state}: {intent}{dur_txt}"
+    headers = {
+        "Content-Type": "application/json",
+        "Title": f"Roost job {job_id} {state}"[:120],
+        "Priority": priority,
+        "Tags": emoji,
+    }
+    return body, headers
+
+
+async def _post_notification(
+    notify_url: str, body: dict[str, Any], headers: dict[str, str]
+) -> None:
+    """Fire-and-forget POST of a terminal-state notification.
+
+    Failure isolation is the whole point: this NEVER raises and NEVER retries.
+    A 5xx, a timeout, a refused connection, a DNS failure — all are caught and
+    logged, so the notify path can never touch job state or the request that
+    triggered it. Import is local so an unset notify_url adds zero import cost
+    and the module has no hard runtime coupling to the HTTP client here."""
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=NOTIFY_TIMEOUT_SEC) as client:
+            resp = await client.post(notify_url, json=body, headers=headers)
+            if resp.status_code >= 400:
+                print(
+                    f"[roost] notify: endpoint returned {resp.status_code} "
+                    f"for job {body.get('job_id')}",
+                    flush=True,
+                )
+    except Exception as e:  # noqa: BLE001 — intentional: notify must never escape
+        print(
+            f"[roost] notify: post to endpoint failed for job "
+            f"{body.get('job_id')}: {type(e).__name__}: {e}",
+            flush=True,
+        )
 
 
 def _derive_run(job: dict) -> dict:
@@ -1986,6 +2078,7 @@ def create_app(
     run_sweeper: bool = True,
     provision_claude_auth: bool = True,
     publish_domain: Optional[str] = None,
+    notify_url: Optional[str] = None,
 ) -> FastAPI:
     db = Path(db_path or os.environ.get("ROOST_DB", DEFAULT_DB))
     shared_token = token if token is not None else os.environ.get("ROOST_TOKEN", "")
@@ -1996,6 +2089,14 @@ def create_app(
         publish_domain
         if publish_domain is not None
         else os.environ.get("ROOST_PUBLISH_DOMAIN") or None
+    )
+    # Opt-in terminal-state push notifications (R37). When set, the CP POSTs a
+    # notification to this URL (an ntfy topic or UnifiedPush webhook) on every
+    # job that reaches a terminal state. Unset → zero posts, zero behavior change.
+    notify_url = (
+        notify_url
+        if notify_url is not None
+        else os.environ.get("ROOST_NOTIFY_URL") or None
     )
     _init_db(db)
 
@@ -2016,6 +2117,40 @@ def create_app(
     app.state.db_path = db
     app.state.shared_token = shared_token
     app.state.publish_domain = publish_domain
+    app.state.notify_url = notify_url
+    # Hold strong refs to in-flight notify tasks so they aren't GC'd mid-flight
+    # (asyncio only keeps weak refs to tasks). Discarded on completion.
+    app.state.notify_tasks = set()
+    # Seam for tests: the coroutine factory that performs the POST. Production
+    # uses the real httpx poster; a test swaps in a stub to capture payloads or
+    # simulate 500/timeout/refused without a live endpoint.
+    app.state.notify_poster = _post_notification
+
+    def _fire_notify(job: Optional[dict]) -> None:
+        """Fire-and-forget a terminal-state notification for ``job``.
+
+        Schedules the POST as a detached task and returns immediately — it is
+        never awaited on the request path, so notify latency/failure cannot
+        affect job completion. No-op when notify is unconfigured or the job is
+        missing/non-terminal. Wrapped defensively: even building the task must
+        never raise into the caller's terminal-state handler."""
+        if not app.state.notify_url or not job:
+            return
+        if job.get("state") not in TERMINAL_STATES:
+            return
+        try:
+            body, headers = _build_notification(job)
+            task = asyncio.create_task(
+                app.state.notify_poster(app.state.notify_url, body, headers)
+            )
+            app.state.notify_tasks.add(task)
+            task.add_done_callback(app.state.notify_tasks.discard)
+        except Exception as e:  # noqa: BLE001 — notify must never break job flow
+            print(
+                f"[roost] notify: failed to schedule for job "
+                f"{job.get('id')}: {type(e).__name__}: {e}",
+                flush=True,
+            )
 
     if publish_domain:
         # PUBLIC-EDGE GUARD + host routing. The tunnel (cloudflared) forwards
@@ -2293,7 +2428,9 @@ def create_app(
             raise HTTPException(404, "job not found")
         if ok is False:
             raise HTTPException(409, "job is worker-owned or already terminal")
-        return await asyncio.to_thread(_get_job, db, job_id)
+        final = await asyncio.to_thread(_get_job, db, job_id)
+        _fire_notify(final)
+        return final
 
     @app.get("/jobs", dependencies=[Depends(require_any)])
     async def list_jobs_endpoint(
@@ -2359,6 +2496,10 @@ def create_app(
         count = await asyncio.to_thread(_cancel_job, db, job_id, tree)
         if count == 0:
             raise HTTPException(409, "job not found or already terminal")
+        # Notify for the job the caller acted on (now 'cancelled'). A cascade may
+        # have cancelled children too, but the targeted job is the meaningful
+        # terminal event to surface — children are implementation detail.
+        _fire_notify(await asyncio.to_thread(_get_job, db, job_id))
         return {"cancelled": count}
 
     @app.get("/jobs/{job_id}/logs", dependencies=[Depends(require_any)])
@@ -2969,6 +3110,10 @@ def create_app(
         if len(data.encode("utf-8", "replace")) > LOG_APPEND_MAX_BYTES:
             data = json.dumps({"type": event.type, "truncated": True})
         await asyncio.to_thread(_append_log, db, job_id, "event", data)
+        # Worker-reported terminal state (succeeded/failed, or a decline that
+        # escalated to failed) → fire-and-forget push. _fire_notify no-ops for
+        # non-terminal events (started/progress/requeued-decline).
+        _fire_notify(job)
         return job
 
     return app
@@ -3162,6 +3307,7 @@ def run(
     provision_claude_auth: bool = True,
     insecure: bool = False,
     publish_domain: Optional[str] = None,
+    notify_url: Optional[str] = None,
 ) -> None:
     import uvicorn
 
@@ -3202,5 +3348,5 @@ def run(
         )
     app = create_app(db_path=db_path, token=token,
                      provision_claude_auth=provision_claude_auth,
-                     publish_domain=publish_domain)
+                     publish_domain=publish_domain, notify_url=notify_url)
     uvicorn.run(app, host=host, port=port, log_level="info")
