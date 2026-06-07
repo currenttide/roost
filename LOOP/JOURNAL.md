@@ -999,3 +999,27 @@ Entries are written by the loop; humans read, never need to edit.
   fully consumed (all 5 worker-executor bugs fixed: R24-R26, R30-R31). Iteration #4
   (first pure-feature wave) dispatched: R33 captain plan in tree, R34 mobile one-shot
   publish parity, R35 /metrics endpoint. Hunt rotation next: captain/steward.
+
+## 2026-06-06 ~23:05 UTC — rescue: re-port PR #13 CP fixes (bare 204 + ASGI publish router)
+- Verdict: shipped
+- Branch/PR: loop/rescue-pr13-report / https://github.com/currenttide/roost/pull/43 (merged 9418e13); PR #13 CLOSED superseded
+- What changed: both fixes re-applied fresh onto current master after the original
+  branch went CONFLICTING. (1) idle worker poll returns `Response(status_code=204)`
+  — was `JSONResponse(204, content=None)` which shipped body b"null"/Content-Length 4,
+  the original crash-storm trigger. (2) `@app.middleware("http")` public_host_router
+  replaced with pure-ASGI `_PublicHostRouter` via add_middleware; publish-domain Hosts
+  can never reach API routes; non-publish traffic passes through untouched. Tests:
+  204-no-body assertion added to existing idle-poll test + new
+  test_publish_middleware_passthrough_and_routing.
+- Evidence:
+  - `python -m pytest -q` → 550 passed
+  - live smoke :8786 (publish domain roost.pub): idle poll → 204, zero body bytes, no
+    Content-Length header; /workers with Host: roost.pub → 404; apex / → 200; auth
+    enforced; ZERO Content-Length/RuntimeError lines in the server log (the original
+    incident signature)
+- Judge: approve (round 1) — re-ran full pytest + its own live smoke on :8795
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p, read+exec
+  only; its bypassPermissions attempt was correctly blocked by the safety classifier
+  and it scoped down — noted as correct behavior)
+- Notes: the last pre-auto-merge era debt is cleared; no open PRs remain. Feature wave
+  (R33/R34/R35) still in flight.
