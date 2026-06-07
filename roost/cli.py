@@ -1907,6 +1907,13 @@ def tree(ctx: click.Context, job_id: str, as_json: bool, health: bool) -> None:
                 bits.append(f"queued {job['queued_sec']}s")
             if job.get("capable_workers") is not None:
                 bits.append(f"capable={job['capable_workers']}")
+            # Interactive follow-up (R38/R59): queued/delivered/dropped counts,
+            # shown only when this node has received any input.
+            inputs = job.get("inputs")
+            if isinstance(inputs, dict) and any(inputs.values()):
+                bits.append(
+                    f"inputs {inputs.get('queued', 0)}/"
+                    f"{inputs.get('delivered', 0)}/{inputs.get('dropped', 0)}")
             if job.get("last_activity"):
                 bits.append(f"· {job['last_activity']}")
             if bits:

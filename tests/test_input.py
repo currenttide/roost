@@ -215,6 +215,88 @@ def test_input_oversize_rejected(client: TestClient):
     assert r.status_code == 413
 
 
+# ---------- CP: input counts surface on the aggregate views (R59) ----------
+
+
+def test_derived_surfaces_input_counts(client: TestClient):
+    """A run that has received input carries `inputs: {queued, delivered, dropped}`
+    on GET /derived, mirroring the only-when-nonzero rule of GET /jobs/{id}."""
+    worker_id, cred = _enroll_worker(client, {"tools": ["python3"]})
+    job_id = _running_job(
+        client, worker_id, cred,
+        {"command": "cat", "requires": {"tools": ["python3"]}})
+    client.post(f"/jobs/{job_id}/input", json={"text": "steer left"})
+
+    r = client.get("/derived")
+    assert r.status_code == 200, r.text
+    runs = {run["run_id"]: run for run in r.json()["runs"]}
+    assert runs[job_id]["inputs"] == {"queued": 1, "delivered": 0, "dropped": 0}
+
+
+def test_derived_omits_inputs_for_jobs_without_any(client: TestClient):
+    """The 99% case: a job that never received input has NO `inputs` key on the
+    derived run row — the payload stays lean."""
+    worker_id, cred = _enroll_worker(client, {"tools": ["python3"]})
+    with_input = _running_job(
+        client, worker_id, cred,
+        {"command": "cat", "requires": {"tools": ["python3"]}})
+    client.post(f"/jobs/{with_input}/input", json={"text": "x"})
+    # A second job that never receives input (left queued — it still rides /derived).
+    r = client.post("/jobs", json={"command": "true"})
+    without = r.json()["id"]
+
+    runs = {run["run_id"]: run for run in client.get("/derived").json()["runs"]}
+    assert "inputs" in runs[with_input]
+    assert "inputs" not in runs[without]  # only-when-nonzero
+
+
+def test_job_derived_endpoint_carries_input_counts(client: TestClient):
+    """The single-job /jobs/{id}/derived (the §2 run shape) also carries counts."""
+    worker_id, cred = _enroll_worker(client, {"tools": ["python3"]})
+    job_id = _running_job(
+        client, worker_id, cred,
+        {"command": "cat", "requires": {"tools": ["python3"]}})
+    client.post(f"/jobs/{job_id}/input", json={"text": "hi"})
+    r = client.get(f"/jobs/{job_id}/derived")
+    assert r.json()["inputs"] == {"queued": 1, "delivered": 0, "dropped": 0}
+
+
+def _dispatch_child(client: TestClient, worker_id: str, cred: str,
+                    parent_id: str, spec: dict) -> str:
+    """Dispatch a sub-job under `parent_id` as the owning worker — the real
+    hierarchy path, so the child inherits the parent's root_job_id and lands in
+    the tree. The parent must have been submitted with hierarchy.can_dispatch."""
+    wh = {"Authorization": f"Bearer {cred}"}
+    body = dict(spec, parent_job_id=parent_id)
+    r = client.post("/jobs", json=body, headers=wh)
+    assert r.status_code == 200, r.text
+    return r.json()["id"]
+
+
+def test_tree_endpoint_annotates_input_counts_per_node(client: TestClient):
+    """A tree whose child has received input shows the counts on THAT node only —
+    siblings without input omit the key (same rule as the single-job detail)."""
+    worker_id, cred = _enroll_worker(client, {"tools": ["python3"]})
+    # Root job declares hierarchy.can_dispatch so the worker may dispatch children.
+    root = _running_job(
+        client, worker_id, cred,
+        {"command": "cat", "requires": {"tools": ["python3"]},
+         "hierarchy": {"can_dispatch": True}})
+    child_a = _dispatch_child(
+        client, worker_id, cred, root,
+        {"command": "cat", "requires": {"tools": ["python3"]}})
+    child_b = _dispatch_child(
+        client, worker_id, cred, root,
+        {"command": "cat", "requires": {"tools": ["python3"]}})
+    # Input is accepted on any non-terminal job; child_a is queued, which is fine.
+    client.post(f"/jobs/{child_a}/input", json={"text": "to the child"})
+
+    nodes = {n["id"]: n for n in client.get(f"/jobs/{root}/tree").json()}
+    assert nodes[child_a]["inputs"] == {"queued": 1, "delivered": 0, "dropped": 0}
+    assert "inputs" not in nodes[child_b]  # sibling without input
+    assert "inputs" not in nodes[root]     # root without input
+
+
 # ---------- CP: client (mobile/agent) tokens may send input ----------
 
 
