@@ -5,6 +5,29 @@ Entries are written by the loop; humans read, never need to edit.
 
 ---
 
+## 2026-06-07T04:56:16Z — R25: fix _running/_active leak when run_job is cancelled
+- Verdict: shipped
+- Branch/PR: loop/r25-running-active-leak / https://github.com/currenttide/roost/pull/35
+- What changed: Wrapped the entire body of `run_job` after `self._running += 1` in a
+  `try/finally` block. The `finally` is the single cleanup point: `self._active.pop(job_id, None)`
+  and `self._running = max(0, self._running - 1)`. Removed the three formerly-separate
+  explicit cleanup sites (build_command failure, spawn failure, cancelled/lease_lost, and
+  cancelled-during-verify paths) — none of them touched `_running`/`_active` anymore.
+  The `_active.pop` in the normal completion path (before `_post_event`) is retained and
+  the finally's second pop is a safe no-op. Added `test_bug1_running_and_active_not_leaked_on_cancellation`
+  in `tests/test_worker.py` which creates a job task, cancels it mid-`process.wait()`, and
+  asserts both counters are clean afterward.
+- Evidence:
+  - `pytest tests/test_worker.py::test_bug1_running_and_active_not_leaked_on_cancellation -v` → PASSED
+  - `python -m pytest -q` → 541 passed in 16.46s
+- Judge: claude-sonnet-4-6 — APPROVE. "Fix is correct and minimal. No double-decrement
+  possible — the only decrement is in the finally block. _active.pop double-call is safe
+  (idempotent). The test is a genuine reproducer: _HangingProcess.wait() uses asyncio.sleep(9999)
+  so CancelledError propagates through a real awaitable. Verified no existing tests deleted."
+- Models: implementer claude-opus-4-8, judge claude-sonnet-4-6
+
+---
+
 ## 2026-06-06 — R26: broaden OSError catch in run_job spawn handler
 - Verdict: shipped
 - Branch/PR: loop/r26-oserror-escape / https://github.com/currenttide/roost/pull/33
