@@ -1434,4 +1434,194 @@ def test_bug1_running_and_active_not_leaked_on_cancellation():
                               ["/bin/true"], "/tmp", [])):
             await w.run_job({"id": job_id, "spec": {"intent": "hang forever", "verify": False}})
 
+
+# ---------- [R43] Claude-creds refresh vs. lease/heartbeat auth ----------
+#
+# Hypothesis under test (pre-loop survey, never verified): the worker's periodic
+# CREDENTIAL REFRESH may race the LEASE lifecycle — e.g. a refresh mid-lease
+# invalidating the credential the CP authenticates the worker with, a refresh
+# window where heartbeats 401, or a refresh racing a "rotating token" so the
+# lease expires → spurious requeue / double-execution.
+#
+# These tests drive a REAL Worker (its real httpx client wired to a real
+# in-process control plane via ASGITransport, so the genuine auth dependency and
+# lease-renewal code run) and try to MAKE that race happen. They pass because the
+# two "credentials" are disjoint:
+#   * worker-plane bearer (self.token) — minted once at /enroll, immutable for the
+#     worker's lifetime (worker.py:1145, 1181-1188); authenticates lease/heartbeat
+#     via _worker_by_cred_hash (server.py:2396). NEVER rotated by the worker.
+#   * Claude OAuth creds (credentials_json) — what `claude` subprocesses read;
+#     refresh_creds_forever re-pulls them every 20 min and writes ONLY the local
+#     creds FILE (worker.py:1531-1562). GET /claude-creds is a pure read of the
+#     host file (server.py:2576) and writes nothing to the DB, so it can't touch
+#     workers.cred_hash.
+# The refresh therefore shares no mutable state with the lease auth; it cannot
+# invalidate it. The tests stand as regression guards on that invariant.
+
+
+def _r43_client_for_app(app, cred=None):
+    """An async httpx client bound to the in-process app (so the genuine auth
+    dependency + lease-renewal code run on every call). With `cred`, it carries
+    that worker-plane bearer; otherwise the admin token."""
+    import httpx
+
+    bearer = cred or "adm"
+    return httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://cp",
+        headers={"Authorization": f"Bearer {bearer}"},
+    )
+
+
+async def _r43_enroll(app):
+    """Mint an enroll token + enroll a worker via real HTTP. Returns (wid, cred)."""
+    admin = _r43_client_for_app(app)
+    try:
+        tok = (await admin.post("/enroll-tokens",
+                                json={"label": "r43"})).json()["token"]
+        body = (await admin.post(
+            "/enroll",
+            json={"token": tok, "name": "w-r43",
+                  "capabilities": {"tools": ["claude"]}},
+            headers={"Authorization": ""})).json()
+        return body["worker_id"], body["credential"]
+    finally:
+        await admin.aclose()
+
+
+async def _r43_worker_wired_to_app(app, cred, worker_id):
+    """A real Worker whose httpx client speaks to the in-process app."""
+    import httpx
+
+    w = Worker("http://cp", cred, worker_id, self_test=False, enrolled=True)
+    await w.client.aclose()  # drop the default transport
+    w.client = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://cp",
+        headers={"Authorization": f"Bearer {cred}"},
+    )
+    return w
+
+
+def test_r43_creds_refresh_does_not_break_lease_auth(tmp_path, monkeypatch):
+    """Adversarial: interleave the REAL creds refresh (host OAuth creds rotating
+    every call) with REAL heartbeats while the worker holds a lease. The
+    hypothesis predicts a window where the heartbeat 401s and the lease lapses.
+    It never does: every heartbeat stays 200 and renews the lease, because the
+    refresh touches only the local creds file, never the worker-plane bearer."""
+    import time as _time
+
+    from roost import server
+
+    async def go():
+        db = tmp_path / "roost.db"
+        # The CP serves whatever the operator's host creds currently are; flip
+        # `state["creds"]` to simulate an OAuth rotation on the host.
+        state = {"creds": '{"claudeAiOauth":{"accessToken":"v0"}}'}
+        monkeypatch.setattr(server, "_read_host_claude_creds",
+                            lambda: state["creds"])
+
+        app = server.create_app(db_path=db, token="adm", run_sweeper=False)
+        wid, cred = await _r43_enroll(app)
+        w = await _r43_worker_wired_to_app(app, cred, wid)
+        try:
+            # Point the worker's claude-creds file at a temp path so the real
+            # write path runs without touching ~/.claude.
+            creds_file = tmp_path / "isolated" / ".credentials.json"
+            monkeypatch.setattr(w, "_claude_creds_path", lambda: creds_file)
+
+            # Submit + lease a job so the worker holds a live lease.
+            jid = server._insert_job(db, {"command": "true"})["id"]
+            job = await w.poll_once()
+            assert job is not None and job["id"] == jid
+            assert server._get_job(db, jid)["state"] == "assigned"
+            lease0 = server._get_job(db, jid)["lease_expires_at"]
+            assert lease0 is not None
+
+            # Hammer: rotate the host OAuth creds and run the REAL refresh,
+            # interleaved with REAL heartbeats. If a refresh ever invalidated the
+            # worker-plane credential, the next heartbeat would 404/401 and
+            # _worker_by_cred_hash would stop matching.
+            rotations = [
+                '{"claudeAiOauth":{"accessToken":"v1"}}',
+                '{"claudeAiOauth":{"accessToken":"v2"}}',
+                '{"claudeAiOauth":{"accessToken":"v3"}}',
+            ]
+            last_lease = lease0
+            for i, new_creds in enumerate(rotations):
+                state["creds"] = new_creds
+                await w._refresh_claude_creds()          # the real refresh
+                # The local creds file tracks the rotation (proves refresh ran).
+                assert creds_file.read_text() == new_creds
+                # The worker-plane credential the CP knows is UNCHANGED.
+                assert server._worker_by_cred_hash(
+                    db, server._hash_cred(cred))["id"] == wid
+                # A real heartbeat through the real auth dependency: still 200,
+                # still ours, lease still renewed (monotonic non-decreasing).
+                before = _time.time()
+                r = await w.client.post(f"/workers/{wid}/heartbeat",
+                                        json={"capabilities": w.capabilities})
+                assert r.status_code == 200, (i, r.status_code, r.text)
+                assert jid in (r.json().get("owned") or [])
+                lease = server._get_job(db, jid)["lease_expires_at"]
+                assert lease is not None and lease >= last_lease
+                assert lease >= before  # heartbeat genuinely renewed it
+                last_lease = lease
+
+            # The lease never expired across the whole refresh storm.
+            assert server._get_job(db, jid)["state"] in ("assigned", "running")
+
+            # Strongest form of the hypothesis: a refresh truly CONCURRENT with a
+            # heartbeat on the SAME httpx client. Rule out any client/connection-
+            # level interference ("refresh window"). Both must succeed.
+            state["creds"] = '{"claudeAiOauth":{"accessToken":"v9"}}'
+
+            async def _hb():
+                return await w.client.post(
+                    f"/workers/{wid}/heartbeat",
+                    json={"capabilities": w.capabilities})
+
+            _, hb_resp = await asyncio.gather(w._refresh_claude_creds(), _hb())
+            assert hb_resp.status_code == 200
+            assert jid in (hb_resp.json().get("owned") or [])
+            assert creds_file.read_text() == '{"claudeAiOauth":{"accessToken":"v9"}}'
+            assert server._get_job(db, jid)["state"] in ("assigned", "running")
+        finally:
+            await w.close()
+
+    asyncio.run(go())
+
+
+def test_r43_refresh_disabled_on_cp_leaves_lease_auth_intact(tmp_path):
+    """If the CP has creds provisioning OFF, GET /claude-creds 404s — the refresh
+    is a no-op (worker.py:1539-1540) and must NOT disturb the worker-plane
+    bearer. The hypothesised 'refresh window where heartbeats 401' cannot occur
+    even when the refresh fails outright."""
+    from roost import server
+
+    async def go():
+        db = tmp_path / "roost.db"
+        app = server.create_app(db_path=db, token="adm", run_sweeper=False,
+                                provision_claude_auth=False)
+        wid, cred = await _r43_enroll(app)
+        w = await _r43_worker_wired_to_app(app, cred, wid)
+        try:
+            jid = server._insert_job(db, {"command": "true"})["id"]
+            assert (await w.poll_once())["id"] == jid
+
+            # Provisioning is off → /claude-creds 404 → refresh returns early.
+            r = await w.client.get("/claude-creds")
+            assert r.status_code == 404
+            await w._refresh_claude_creds()  # real no-op refresh
+
+            # Heartbeat still authenticates and renews the lease.
+            r = await w.client.post(f"/workers/{wid}/heartbeat", json={})
+            assert r.status_code == 200
+            assert jid in (r.json().get("owned") or [])
+            assert server._get_job(db, jid)["state"] in ("assigned", "running")
+        finally:
+            await w.close()
+
+    asyncio.run(go())
+
     asyncio.run(go())
