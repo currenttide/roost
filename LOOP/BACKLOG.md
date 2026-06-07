@@ -213,9 +213,14 @@ Done-when: the three verbs reachable from the menu bar following existing sectio
 Surface: docs. A3: eight PRs landed since R42's sweep (Android publish UI, cli coverage, push slice, survey, mcp/schema tests, config reference, input visibility, roost_publish, mobile schedules). Most were doc-disciplined in-PR; sweep for cross-surface misses: README feature claims, INTEGRATIONS verb matrix vs the 17-tool reality, API.md §7 schedules now having UI, DESIGN.md §8a accuracy, skills (oversee/quickstart) vs new capabilities.
 Done-when: every confirmed drift fixed additively with claims truth-checked; docs-drift ratchet stays 0; pytest green.
 
-### R64. A1 hunt #5 — server event/lifecycle paths, concurrency lens — `open` `self-promoted`
+### R64. A1 hunt #5 — server event/lifecycle paths, concurrency lens — `done` *(2026-06-07, PR #75 — 1 confirmed, 6 cleared)* `self-promoted`
 Surface: hunt. Deepening per protocol: all core areas hunted once; re-hunt the server's event-ingestion/lifecycle seams (worker event POST → state transitions, finalize, cancel/tree-cancel, sweeper interactions with the new input queue + notify hook) with a CONCURRENCY lens — interleavings the per-area hunts didn't try (e.g. cancel racing finalize, input-ack racing terminal, two workers' stale events crossing). Reproducing test required per finding; cleared hypotheses are valid output.
 Done-when: repros (LOOP/repro-a1-hunt5.py) for confirmed bugs merged after judge verification, or an honest all-clear report; pytest green.
+
+### R65. Orphaned interactive input on terminal transitions — `open` `self-promoted`
+Surface: backend/correctness. A1 hunt #5 (PR #75). No server-side path reconciles `job_inputs` when a job goes terminal: `_apply_event` succeeded/failed (server.py:1546-1560), `_cancel_job` (:879-941), `_finalize_job` (:944-982), and `_sweep` lease-fail (:1887-1891) all leave `queued` rows untouched, and `_pending_input_job_ids` (:1730) only offers delivery for assigned/running jobs — so a queued input is stranded forever, violating R38's "every input ends delivered or dropped" contract (README:364).
+Repro: `LOOP/repro-a1-hunt5.py` — 4 tests FAIL on master incl. a genuine cancel-race (orphans ~40%/trial, fails 10/10).
+Done-when: each terminal site drops still-queued inputs (`queued`→`dropped` with a reason) inside its existing BEGIN IMMEDIATE; the `_cancel_job` cascade scopes the drop to jobs transitioned in THIS call (not the whole BFS set — children already terminal must be untouched); the lease-expiry REQUEUE path deliberately left alone (job still active); all 4 repros pass, promoted into tests/; repro file deleted; pytest green.
 
 ### R21. Make presigned blob PUT single-use and race-safe — `done` *(2026-06-07, PR #30)* `self-promoted`
 Surface: backend/security. A1 hunt #2 reproduced that a presigned `put_url`

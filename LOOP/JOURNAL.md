@@ -1795,3 +1795,26 @@ Entries are written by the loop; humans read, never need to edit.
 - Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only)
 - Notes: iteration #14 slot 1. Every client surface now carries the full verb
   set appropriate to it. R64 (concurrency hunt) last in flight.
+
+## 2026-06-07 ~14:00 UTC — A1 hunt #5: server lifecycle, concurrency lens (cycle #16 prep)
+- Verdict: shipped (repros merged; 1 confirmed, 6 cleared)
+- Branch/PR: loop/replenish-hunt5 / https://github.com/currenttide/roost/pull/75 (merged 04c0f26; LOOP/repro-a1-hunt5.py only)
+- What changed: deepening re-hunt over event-ingestion/lifecycle seams. CONFIRMED:
+  orphaned interactive input on terminal transitions — no terminal site reconciles
+  job_inputs and the heartbeat delivery filter only offers assigned/running, so a
+  queued input strands forever (violates R38's delivered-or-dropped contract).
+  4 repros incl. a TRUE RACE (cancel vs input-POST: orphans ~40%/trial, 10/10
+  fails). Non-tautology proven; md5-verified revert. CLEARED with empirical probes
+  (judge re-ran 50-trial TTL + 20-thread seq): sweeper-vs-heartbeat at TTL
+  boundary (BEGIN IMMEDIATE serialization verified), stale events crossing
+  (403/attempt/terminal guards), cancel-vs-finalize (loser 409), schedule tick
+  self-concurrency (single sweep loop), job_logs seq collision (all 5 sites in
+  IMMEDIATE), notify-vs-shutdown (by-design fire-and-forget).
+- Evidence:
+  - repro file: 4 deterministic fails ×3+ on master; `python -m pytest -q` → 792
+- Judge: APPROVE + all 6 clears independently confirmed SAFE
+- Models: hunter claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only)
+- Notes: iteration #14 COMPLETE — R62 #74, R63 #73, hunt #75. Hunt produced a
+  confirmed bug → does NOT count toward the two-clear-hunts long-idle trigger.
+  Cycle #16 = R65 alone (one strong item; anti-churn over padding). Hunter's fix
+  guidance recorded in the backlog item incl. the cascade-scoping subtlety.
