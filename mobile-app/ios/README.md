@@ -253,21 +253,27 @@ errors (3× `catch`-binding shadowing of an `error` property, 1× `.tint` in a
 
 ## Linux pure-layer harness
 
-The Models/Net parsing layer is pure Foundation, so the full test suite minus
-UI runs on Linux (verified 2026-06-07, 58/58 green on Swift 6.0.3):
+The Models/Net parsing layer is pure Foundation, so the full pure layer (the
+whole test suite minus the UI) runs on Linux via the recipe below — re-run it for
+the live count:
 
 ```sh
 # one-time: toolchain from swift.org into /tmp/swift-toolchain
 mkdir -p /tmp/ios-linux-check/{Sources/Roost,Tests/RoostTests} && cd /tmp/ios-linux-check
-# Package.swift: target Roost + testTarget RoostTests (see mac-app for the pattern)
-# symlink: Models/*.swift, Net/{SSE,Pairing,Ansi,ApiClient,OfflineCache,Publish,Notifications}.swift → Sources/Roost
-#          RoostTests/*.swift → Tests/RoostTests
+# Package.swift: target Roost + testTarget RoostTests (see ../../mac-app/Package.swift for the pattern)
+# symlink → Sources/Roost: all of Models/*.swift and Net/*.swift EXCEPT the three
+#   Apple-only/Linux-incompatible files (see below). Excluding-by-name keeps this
+#   recipe correct as the pure layer grows — new Foundation-only files are picked up.
+# symlink → Tests/RoostTests: all of RoostTests/*.swift
 ROOST_FIXTURES=$REPO/mobile-app/fixtures /tmp/swift-toolchain/usr/bin/swift test
 ```
 
-(`Net/PushService.swift` is UIKit-only — `#if canImport(UIKit)` — so it is excluded
-from the Linux harness; the routing it calls into is in `Notifications.swift`, which
-is covered.)
+Three `Net/` files are excluded from the Linux harness because they can't compile
+under swift-corelibs-foundation:
+- `PushService.swift` — UIKit-only (`#if canImport(UIKit)`); the routing it calls
+  into lives in `Notifications.swift`, which is pure Foundation and covered.
+- `Keychain.swift` — `import Security` (Apple-only framework).
+- `LogStream.swift` — uses `URLSession.bytes`, unavailable on Linux Foundation.
 
 `ROOST_FIXTURES` points `Fixtures.swift` at the repo copy (no bundle on Linux).
 
