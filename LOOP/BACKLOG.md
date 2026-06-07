@@ -109,7 +109,7 @@ Done-when: unit tests with bootstrap helpers + process-spawning mocked (R10 styl
 Surface: tests. Measured: config.py 48% branch (60 stmts), triage.py 67% (30 stmts); no dedicated test file for either (pre-listed in Proposed).
 Done-when: dedicated tests asserting real behavior (config TOML read/write/perms/resolution order; triage prompt rendering); both modules' branch coverage strictly up, no other module down; pytest green.
 
-### R18. Matcher: non-numeric caps must not satisfy numeric constraints — `open` `self-promoted` *(A1 hunt #1: matcher/placement, 2026-06-07, judge-approved; failing repro test on file)*
+### R18. Matcher: non-numeric caps must not satisfy numeric constraints — `done` *(2026-06-07, PR #26 — incl. nan/inf hardening)* `self-promoted`
 Surface: backend/correctness. matcher.py:~48: a numeric comparator with a non-numeric capability falls through to the string branch — `gpu_vram_gb: "N/A"` PASSES `"!=0"`. Repro: /tmp/a1-repro test_non_numeric_cap_does_not_satisfy_numeric_neq (FAILS on master).
 Done-when: non-numeric cap never satisfies a numeric-rhs constraint (all operators); string-pin fallback (hostname: ==x) preserved; repro + operator-matrix tests pass; existing matcher tests untouched; pytest green.
 
