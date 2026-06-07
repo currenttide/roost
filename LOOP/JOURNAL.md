@@ -1935,3 +1935,30 @@ Entries are written by the loop; humans read, never need to edit.
 - Notes: iteration #19 complete. Long-idle counter RESET (gate found bugs) —
   deepening keeps paying at depth 3. Cycle #21 = R70 (the fix, with the
   non-breaking-typing investigation spelled out).
+
+## 2026-06-07 ~19:30 UTC — R70: dashboard hardening (hunt #7 consumed)
+- Verdict: shipped
+- Branch/PR: loop/r70-derive-run-hardening / https://github.com/currenttide/roost/pull/81 (merged c04c017)
+- What changed: two layers. READ-TIME: _goal_text + new _result_text coerce so
+  /derived never raises on any at-rest payload — lists render space-joined
+  (readable argv), other types degrade via str(). SUBMIT-TIME: JobSubmit.command
+  retyped Optional[Any] → str | list[str] (422 at the door) — non-breaking PROVEN
+  by surveying every producer/consumer (build_command/_build_docker_argv raise on
+  other types; CLI joins to str; MCP sends str; schema says string-or-array;
+  examples all strings) + the full suite. JobEvent.result DELIBERATELY stays Any
+  (a terminal report must never be dropped over a shape nit and strand a finished
+  job — defense is read-time); rationale in code comments.
+- Evidence:
+  - `python -m pytest -q` → 820 passed (+8); both promoted repros pass;
+    "1 2 3" join, dict coercion, ["git","clone","repo"] → "git clone repo",
+    [1,2,3] → 422; LOOP/repro-a1-hunt7.py deleted
+- Judge: approve (round 1) — re-ran suite, greped the same surfaces, exercised
+  pydantic rejection-without-coercion
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only)
+- Notes: iteration #20 complete. INCIDENT (agent self-caught + corrected): an
+  early cd escaped into the main checkout and a git rm landed there — restored
+  before any commit; orchestrator verified the main tree clean. Housekeeping
+  this commit: vestigial LOOP/repro-a1-hunt1.py deleted (its 2 fails are the
+  R19/R20 superseded-by-design assertions, journaled then); repro-a1-hunt2.py
+  KEPT (R22/R23's security-session repros). Cycle #22 = R71, hunt #8 (docker
+  executor — last never-hunted unit).

@@ -239,10 +239,14 @@ Done-when: captain.py branch coverage strictly up ≥10 points with real-behavio
 Surface: hunt. Final queued deepening: the server↔mobile contract under adversarial/degenerate payloads — the decode layers have golden-fixture tests (happy path) but the SERVER side of the contract has never been hunted for responses that would break the documented additive-only guarantees (e.g. fields that can become null where clients assume non-null; SSE event vocabulary under unusual job lifecycles; pagination headers under edge counts). Server-side findings only (client decoders are pure + tested); reproducing test required per finding; an all-clear = deepening-clear #2 → LONG-IDLE.
 Done-when: repros merged after judge verification, or an honest all-clear report triggering long-idle.
 
-### R70. Dashboard 500s on non-string goal/result fields — `open` `self-promoted`
+### R70. Dashboard 500s on non-string goal/result fields — `done` *(2026-06-07, PR #81 — read-time coercion + non-breaking submit typing)* `self-promoted`
 Surface: backend/robustness. A1 hunt #7 (PR #80). One root cause, two surfaces: `_goal_text` (server.py:615) does `" ".join(...)` and `_derive_run` (:800) slices `result.output[:240]` without proving str. (a) `JobSubmit.command` is `Optional[Any]` (:2398) — `POST /jobs` with `command: [1,2,3]` is accepted, then /derived 500s; one poisoned job breaks the dashboard for EVERY job (mobile polls it every 2s). (b) a non-conformant worker's `result: {"output": {...}}` does the same via the event API.
 Repro: `LOOP/repro-a1-hunt7.py` — 2 tests FAIL ×3 on master (assert 500 == 200).
 Done-when: serializers never raise on any accepted payload (defensive str coercion at both spots — proven by the hunter); ADDITIONALLY tighten submit-side typing only as far as is provably non-breaking (investigate what command shapes are legitimately accepted/used today — a plain str-or-list[str] union validated at submit beats Any, but do NOT break a legitimate caller; document the decision); repros promoted into tests/; repro file deleted; pytest green (812 base).
+
+### R71. A1 hunt #8 — docker executor lens — `open` `self-promoted`
+Surface: hunt (deepening). The docker executor has never been hunted as a unit (R1 touched argv hardening only): container lifecycle (create/wait/kill/timeout interplay), GPU flag plumbing, mount/workdir semantics, exit-code propagation, log relay from container stdio, teardown when docker itself is slow/wedged. SKIP security-surface findings (mount escapes, privilege — security session); this lens is correctness/robustness for legitimate specs.
+Done-when: repros (LOOP/repro-a1-hunt8.py) merged after judge verification, or an honest all-clear (= deepening-clear #1 toward long-idle).
 
 ### R21. Make presigned blob PUT single-use and race-safe — `done` *(2026-06-07, PR #30)* `self-promoted`
 Surface: backend/security. A1 hunt #2 reproduced that a presigned `put_url`
