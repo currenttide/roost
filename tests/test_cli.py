@@ -1,6 +1,9 @@
 """Tests for the `roost do` router's verdict parsing (pure part)."""
 from __future__ import annotations
 
+import json
+import time
+
 import click
 import pytest
 from click.testing import CliRunner
@@ -813,4 +816,728 @@ def test_backup_non_admin_token_errors(monkeypatch, tmp_path):
     res = CliRunner().invoke(roost_cli.backup, [str(dest)])
     assert res.exit_code != 0
     assert "admin token" in res.output.lower()
+    assert not dest.exists()
+
+
+# ======================================================================
+# R54 — cli.py coverage lift. Commands that grew since the R16 measure
+# with uneven test reach. Style: click runner + httpx MockTransport, no
+# real process/socket. `_ctx_client` is stubbed (so config files are
+# never read — the R16 isolation lesson) and the recorded requests pin
+# the wire shape, not just the rendered output.
+# ======================================================================
+
+
+class _Recorder:
+    """A captured HTTP exchange: the request + the canned response to send."""
+
+    def __init__(self):
+        self.requests: list[httpx.Request] = []
+
+    def last(self, method: str | None = None) -> httpx.Request:
+        reqs = self.requests if method is None else \
+            [r for r in self.requests if r.method == method]
+        assert reqs, f"no {method or 'any'} request was made"
+        return reqs[-1]
+
+
+def _mock_ctx(monkeypatch, routes: dict, rec: _Recorder | None = None,
+              *, base="http://cp"):
+    """Route `roost_cli._ctx_client(ctx)` at an httpx.MockTransport.
+
+    `routes` maps "<METHOD> <path>" → an httpx.Response OR a callable
+    (request) -> httpx.Response. Every request is recorded. Because we
+    replace `_ctx_client` wholesale, `_resolve`/`config.load()` never run,
+    so no real config file or ROOST_URL/ROOST_TOKEN env is ever read.
+    """
+    rec = rec if rec is not None else _Recorder()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        rec.requests.append(request)
+        key = f"{request.method} {request.url.path}"
+        if key not in routes:
+            raise AssertionError(f"unexpected request: {key}")
+        spec = routes[key]
+        return spec(request) if callable(spec) else spec
+
+    monkeypatch.setattr(
+        roost_cli, "_ctx_client",
+        lambda _ctx: httpx.Client(base_url=base,
+                                  transport=httpx.MockTransport(handler)),
+    )
+    return rec
+
+
+# ---------- `roost prune-workers` (admin ghost-row cleanup) ----------
+
+
+def _worker_row(id_, name, *, last_seen, status="offline"):
+    return {"id": id_, "name": name, "status": status, "last_seen": last_seen,
+            "capabilities": {}}
+
+
+def test_prune_workers_lists_victims_and_posts_after_confirm(monkeypatch):
+    now = time.time()
+    workers = [
+        _worker_row("live1", "alive", last_seen=now, status="idle"),  # recent → spared
+        _worker_row("dead1", "ghost-a", last_seen=now - 30 * 86400),  # stale → victim
+        _worker_row("dead2", "ghost-b", last_seen=now - 10 * 86400),  # stale → victim
+    ]
+    rec = _mock_ctx(monkeypatch, {
+        "GET /workers": httpx.Response(200, json=workers),
+        "POST /workers/prune": httpx.Response(
+            200, json={"pruned": 2, "names": ["ghost-a", "ghost-b"]}),
+    })
+    # confirm "y" → it proceeds and POSTs.
+    res = CliRunner().invoke(roost_cli.prune_workers_cmd, ["--days", "7"],
+                             input="y\n", obj={})
+    assert res.exit_code == 0, res.output
+    assert "will prune 2 worker row(s)" in res.output
+    # The recent node must NOT be listed; both ghosts must be.
+    assert "alive" not in res.output
+    assert "ghost-a" in res.output and "ghost-b" in res.output
+    assert "pruned 2 worker(s): ghost-a, ghost-b" in res.output
+    # The cutoff is passed through as older_than_days (the load-bearing param).
+    prune = rec.last("POST")
+    assert dict(prune.url.params)["older_than_days"] == "7.0"
+
+
+def test_prune_workers_nothing_to_prune_skips_post(monkeypatch):
+    now = time.time()
+    rec = _mock_ctx(monkeypatch, {
+        "GET /workers": httpx.Response(
+            200, json=[_worker_row("live", "fresh", last_seen=now, status="idle")]),
+    })
+    res = CliRunner().invoke(roost_cli.prune_workers_cmd, [], obj={})
+    assert res.exit_code == 0, res.output
+    assert "nothing to prune" in res.output
+    # The POST must never be issued when there are no victims.
+    assert [r for r in rec.requests if r.method == "POST"] == []
+
+
+def test_prune_workers_decline_at_prompt_aborts_without_post(monkeypatch):
+    now = time.time()
+    rec = _mock_ctx(monkeypatch, {
+        "GET /workers": httpx.Response(
+            200, json=[_worker_row("dead", "ghost", last_seen=now - 99 * 86400)]),
+    })
+    res = CliRunner().invoke(roost_cli.prune_workers_cmd, [], input="n\n", obj={})
+    assert res.exit_code != 0  # click.confirm(abort=True)
+    assert [r for r in rec.requests if r.method == "POST"] == []
+
+
+def test_prune_workers_yes_skips_prompt(monkeypatch):
+    now = time.time()
+    rec = _mock_ctx(monkeypatch, {
+        "GET /workers": httpx.Response(
+            200, json=[_worker_row("dead", "ghost", last_seen=now - 99 * 86400)]),
+        "POST /workers/prune": httpx.Response(
+            200, json={"pruned": 1, "names": ["ghost"]}),
+    })
+    # No input supplied: with --yes the prompt must be skipped entirely.
+    res = CliRunner().invoke(roost_cli.prune_workers_cmd, ["--yes"], obj={})
+    assert res.exit_code == 0, res.output
+    assert "pruned 1 worker(s): ghost" in res.output
+    assert rec.last("POST").url.path == "/workers/prune"
+
+
+def test_prune_workers_403_is_actionable(monkeypatch):
+    now = time.time()
+    _mock_ctx(monkeypatch, {
+        "GET /workers": httpx.Response(
+            200, json=[_worker_row("dead", "ghost", last_seen=now - 99 * 86400)]),
+        "POST /workers/prune": httpx.Response(403, json={"detail": "nope"}),
+    })
+    res = CliRunner().invoke(roost_cli.prune_workers_cmd, ["--yes"], obj={})
+    assert res.exit_code != 0
+    assert "admin auth required" in res.output
+
+
+# ---------- `roost capabilities` (plain-language fleet discovery) ----------
+
+
+def _cap_worker(name, caps, status="idle"):
+    return {"id": f"id-{name}", "name": name, "status": status,
+            "capabilities": caps}
+
+
+def test_capabilities_no_online_workers(monkeypatch):
+    _mock_ctx(monkeypatch, {
+        # one offline node → not "live", so the empty-fleet hint shows.
+        "GET /workers": httpx.Response(
+            200, json=[_cap_worker("box", {"cpus": 4}, status="offline")]),
+        "GET /derived": httpx.Response(200, json={"runs": []}),
+    })
+    res = CliRunner().invoke(roost_cli.capabilities, [], obj={})
+    assert res.exit_code == 0, res.output
+    assert "No online workers" in res.output
+
+
+def test_capabilities_summarizes_cpu_gpu_docker_and_examples(monkeypatch):
+    workers = [
+        _cap_worker("cpu-box", {"cpus": 8}),
+        _cap_worker("gpu-box", {"cpus": 16, "gpu_count": 2,
+                                "gpu": ["NVIDIA A100"], "gpu_vram_gb": 80,
+                                "docker": True}),
+    ]
+    runs = [
+        {"run_id": "r1", "goal": "train a tiny model", "state": "succeeded",
+         "health": {"status": "verified"}, "verified": True},
+    ]
+    _mock_ctx(monkeypatch, {
+        "GET /workers": httpx.Response(200, json=workers),
+        "GET /derived": httpx.Response(200, json={"runs": runs}),
+    })
+    res = CliRunner().invoke(roost_cli.capabilities, [], obj={})
+    assert res.exit_code == 0, res.output
+    # cores summed across live nodes; GPU node counted.
+    assert "2 nodes" in res.output and "24 CPU cores" in res.output
+    assert "1 GPU node(s)" in res.output
+    # The "NVIDIA " prefix is stripped; count + VRAM rendered.
+    assert "gpu-box: 2× A100 (80GB)" in res.output
+    # docker present → the container clause is shown (not the bare period one).
+    assert "in isolated containers." in res.output
+    # GPU example line only appears when there's a GPU node.
+    assert 'report the GPU model and free VRAM' in res.output
+    # real recent successes are surfaced.
+    assert "train a tiny model" in res.output
+
+
+def test_capabilities_flags_gpu_detection_failed(monkeypatch):
+    # [R41] nvidia-smi present but probe errored → an operator must see a BROKEN
+    # node, distinct from a genuinely bare one.
+    workers = [
+        _cap_worker("bare", {"cpus": 4}),
+        _cap_worker("broken", {"cpus": 4, "gpu_detection": "failed"}),
+    ]
+    _mock_ctx(monkeypatch, {
+        "GET /workers": httpx.Response(200, json=workers),
+        "GET /derived": httpx.Response(200, json={"runs": []}),
+    })
+    res = CliRunner().invoke(roost_cli.capabilities, [], obj={})
+    assert res.exit_code == 0, res.output
+    assert "GPU detection FAILED on 1 node(s): broken" in res.output
+    assert "check the driver" in res.output
+    # A pure-CPU fleet shows the no-container clause.
+    assert "GPU / training jobs." in res.output
+
+
+def test_capabilities_unreachable_cp_errors(monkeypatch):
+    def boom(_req):
+        raise httpx.ConnectError("refused")
+    _mock_ctx(monkeypatch, {"GET /workers": boom})
+    res = CliRunner().invoke(roost_cli.capabilities, [], obj={})
+    assert res.exit_code != 0
+    assert "cannot reach control plane" in res.output
+
+
+# ---------- `roost history` (what the fleet has run) ----------
+
+
+def _drow(**kw):
+    base = {"run_id": "deadbeefcafef00d", "goal": "lint the repo",
+            "state": "succeeded", "health": {"status": "verified"},
+            "worker": "w-box", "verified": True,
+            "cost": {"cost_est_usd": 0.02, "tokens_used": 500},
+            "created_at": 1000.0, "finished_at": 1000.0}
+    base.update(kw)
+    return base
+
+
+def test_history_renders_table(monkeypatch):
+    runs = [_drow(run_id="aaaaaaaa1111", goal="lint the repo")]
+    rec = _mock_ctx(monkeypatch, {
+        "GET /derived": httpx.Response(200, json={"runs": runs}),
+    })
+    res = CliRunner().invoke(roost_cli.history_cmd, [], obj={})
+    assert res.exit_code == 0, res.output
+    assert "aaaaaaaa" in res.output       # id truncated to 8
+    assert "verified" in res.output
+    assert "w-box" in res.output
+    assert "lint the repo" in res.output
+    # Over-fetch contract: history asks for more than the display limit so
+    # filtering to real/terminal runs still fills the page.
+    assert int(dict(rec.last("GET").url.params)["limit"]) > 20
+
+
+def test_history_failed_filter_passthrough(monkeypatch):
+    runs = [
+        _drow(run_id="ok", goal="that worked", state="succeeded"),
+        _drow(run_id="bad", goal="that broke", state="failed",
+              health={"status": "failed"}, verified=None),
+    ]
+    _mock_ctx(monkeypatch, {
+        "GET /derived": httpx.Response(200, json={"runs": runs}),
+    })
+    res = CliRunner().invoke(roost_cli.history_cmd, ["--failed"], obj={})
+    assert res.exit_code == 0, res.output
+    # --failed keeps only the failed run; the succeeded one is filtered out.
+    assert "that broke" in res.output
+    assert "that worked" not in res.output
+
+
+def test_history_failed_empty_message(monkeypatch):
+    _mock_ctx(monkeypatch, {
+        "GET /derived": httpx.Response(
+            200, json={"runs": [_drow(state="succeeded")]}),
+    })
+    res = CliRunner().invoke(roost_cli.history_cmd, ["--failed"], obj={})
+    assert res.exit_code == 0, res.output
+    assert "(none failed)" in res.output
+
+
+def test_history_limit_caps_rows(monkeypatch):
+    runs = [_drow(run_id=f"r{i}", goal=f"goal number {i}") for i in range(10)]
+    _mock_ctx(monkeypatch, {
+        "GET /derived": httpx.Response(200, json={"runs": runs}),
+    })
+    res = CliRunner().invoke(roost_cli.history_cmd, ["--limit", "3"], obj={})
+    assert res.exit_code == 0, res.output
+    # Exactly 3 run rows are printed despite 10 available.
+    assert sum(1 for ln in res.output.splitlines() if "goal number" in ln) == 3
+
+
+def test_history_json_emits_selected(monkeypatch):
+    runs = [_drow(run_id="aaaaaaaa1111", goal="json me")]
+    _mock_ctx(monkeypatch, {
+        "GET /derived": httpx.Response(200, json={"runs": runs}),
+    })
+    res = CliRunner().invoke(roost_cli.history_cmd, ["--json"], obj={})
+    assert res.exit_code == 0, res.output
+    parsed = json.loads(res.output)
+    assert isinstance(parsed, list) and parsed[0]["run_id"] == "aaaaaaaa1111"
+
+
+def test_history_cp_error_is_actionable(monkeypatch):
+    _mock_ctx(monkeypatch, {
+        "GET /derived": httpx.Response(500, text="boom"),
+    })
+    res = CliRunner().invoke(roost_cli.history_cmd, [], obj={})
+    assert res.exit_code != 0
+    assert "control plane error" in res.output
+
+
+# ---------- `roost workers` (fleet listing, incl. R41 detection-failed) ----------
+
+
+def test_workers_lists_with_summary(monkeypatch):
+    now = time.time()
+    workers = [{
+        "id": "w1", "name": "gpu-box", "status": "busy", "last_seen": now,
+        "capabilities": {"hostname": "host-1", "gpu_vram_gb": 80, "arch": "x86_64",
+                         "load": {"running": 2, "free_vram_gb": 40, "loadavg1": 1.5}},
+    }]
+    _mock_ctx(monkeypatch, {"GET /workers": httpx.Response(200, json=workers)})
+    res = CliRunner().invoke(roost_cli.list_workers_cmd, [], obj={})
+    assert res.exit_code == 0, res.output
+    assert "gpu-box" in res.output and "busy" in res.output
+    assert "host-1" in res.output and "gpu:80GB" in res.output
+    assert "x86_64" in res.output
+    assert "running:2" in res.output and "vramfree:40GB" in res.output
+    assert "load:1.5" in res.output
+
+
+def test_workers_renders_detection_failed_flag(monkeypatch):
+    # [R41] gpu_detection=failed and NO gpu_vram_gb → the DETECTION-FAILED flag
+    # is shown (the elif branch), not a silent bare node.
+    now = time.time()
+    workers = [{
+        "id": "w1", "name": "broken", "status": "idle", "last_seen": now,
+        "capabilities": {"hostname": "h", "gpu_detection": "failed"},
+    }]
+    _mock_ctx(monkeypatch, {"GET /workers": httpx.Response(200, json=workers)})
+    res = CliRunner().invoke(roost_cli.list_workers_cmd, [], obj={})
+    assert res.exit_code == 0, res.output
+    assert "gpu:DETECTION-FAILED" in res.output
+
+
+def test_workers_vram_present_suppresses_detection_failed(monkeypatch):
+    # When VRAM IS known, the working GPU summary wins — the failed flag is the
+    # elif, so it must NOT also appear.
+    now = time.time()
+    workers = [{
+        "id": "w1", "name": "ok-gpu", "status": "idle", "last_seen": now,
+        "capabilities": {"gpu_vram_gb": 24, "gpu_detection": "failed"},
+    }]
+    _mock_ctx(monkeypatch, {"GET /workers": httpx.Response(200, json=workers)})
+    res = CliRunner().invoke(roost_cli.list_workers_cmd, [], obj={})
+    assert res.exit_code == 0, res.output
+    assert "gpu:24GB" in res.output
+    assert "DETECTION-FAILED" not in res.output
+
+
+# ---------- `roost schedule` + _fmt_interval ----------
+
+
+def test_fmt_interval_units():
+    from roost.cli import _fmt_interval
+    assert _fmt_interval(30) == "30s"
+    assert _fmt_interval(300) == "5m"
+    assert _fmt_interval(6 * 3600) == "6h"
+    assert _fmt_interval(86400) == "1d"
+    # Not a whole multiple of a larger unit → falls through to seconds.
+    assert _fmt_interval(90) == "90s"
+    assert _fmt_interval(3601) == "3601s"
+
+
+def _sched_row(**kw):
+    base = {"id": "sch-1", "name": "nightly", "spec": {"task": "check disk"},
+            "interval_sec": 21600, "enabled": True,
+            "next_run_at": time.time() + 3600, "last_run_at": None,
+            "last_job_id": None, "created_at": time.time()}
+    base.update(kw)
+    return base
+
+
+def test_schedule_list_renders_rows(monkeypatch):
+    rows = [
+        _sched_row(id="sch-on", enabled=True, interval_sec=21600,
+                   spec={"task": "check disk space"}),
+        _sched_row(id="sch-off", name="weekly", enabled=False,
+                   interval_sec=86400, spec={"command": "backup.sh"}),
+    ]
+    _mock_ctx(monkeypatch, {"GET /schedules": httpx.Response(200, json=rows)})
+    res = CliRunner().invoke(roost_cli.schedule, ["--list"], obj={})
+    assert res.exit_code == 0, res.output
+    assert "sch-on  [on ] every 6h" in res.output
+    assert "sch-off  [OFF] every 1d" in res.output
+    assert "check disk space" in res.output
+    assert "backup.sh" in res.output  # command spec used when no task/intent
+
+
+def test_schedule_list_empty(monkeypatch):
+    _mock_ctx(monkeypatch, {"GET /schedules": httpx.Response(200, json=[])})
+    res = CliRunner().invoke(roost_cli.schedule, ["--list"], obj={})
+    assert res.exit_code == 0, res.output
+    assert "no schedules" in res.output
+
+
+def test_schedule_create_from_goal_posts_auto_task(monkeypatch):
+    rec = _mock_ctx(monkeypatch, {
+        "POST /schedules": httpx.Response(
+            200, json=_sched_row(id="sch-new", interval_sec=1800)),
+    })
+    res = CliRunner().invoke(
+        roost_cli.schedule, ["check disk space", "--every", "30m"], obj={})
+    assert res.exit_code == 0, res.output
+    assert "scheduled sch-new: every 30m, first run in 30m" in res.output
+    body = json.loads(rec.last("POST").content)
+    # The roost-do shape: a kind:auto task carrying the goal + the interval.
+    assert body["spec"] == {"kind": "auto", "task": "check disk space"}
+    assert body["every"] == "30m"
+
+
+def test_schedule_create_requires_every(monkeypatch):
+    _mock_ctx(monkeypatch, {})  # no request should be made
+    res = CliRunner().invoke(roost_cli.schedule, ["do a thing"], obj={})
+    assert res.exit_code != 0
+    assert "give --every" in res.output
+
+
+def test_schedule_create_requires_goal_or_spec(monkeypatch):
+    _mock_ctx(monkeypatch, {})
+    res = CliRunner().invoke(roost_cli.schedule, ["--every", "30m"], obj={})
+    assert res.exit_code != 0
+    assert "give a goal or --spec" in res.output
+
+
+def test_schedule_rm_deletes(monkeypatch):
+    rec = _mock_ctx(monkeypatch, {
+        "DELETE /schedules/sch-x": httpx.Response(200, json={"ok": True}),
+    })
+    res = CliRunner().invoke(roost_cli.schedule, ["--rm", "sch-x"], obj={})
+    assert res.exit_code == 0, res.output
+    assert "deleted sch-x" in res.output
+    assert rec.last("DELETE").url.path == "/schedules/sch-x"
+
+
+def test_schedule_rm_missing_404(monkeypatch):
+    _mock_ctx(monkeypatch, {
+        "DELETE /schedules/ghost": httpx.Response(404, json={"detail": "no"}),
+    })
+    res = CliRunner().invoke(roost_cli.schedule, ["--rm", "ghost"], obj={})
+    assert res.exit_code != 0
+    assert "schedule not found" in res.output
+
+
+def test_schedule_enable_patches_true(monkeypatch):
+    rec = _mock_ctx(monkeypatch, {
+        "PATCH /schedules/sch-x": httpx.Response(
+            200, json=_sched_row(id="sch-x", enabled=True, interval_sec=3600)),
+    })
+    res = CliRunner().invoke(roost_cli.schedule, ["--enable", "sch-x"], obj={})
+    assert res.exit_code == 0, res.output
+    assert "sch-x enabled — next run in 1h" in res.output
+    assert json.loads(rec.last("PATCH").content) == {"enabled": True}
+
+
+def test_schedule_disable_patches_false(monkeypatch):
+    rec = _mock_ctx(monkeypatch, {
+        "PATCH /schedules/sch-x": httpx.Response(
+            200, json=_sched_row(id="sch-x", enabled=False)),
+    })
+    res = CliRunner().invoke(roost_cli.schedule, ["--disable", "sch-x"], obj={})
+    assert res.exit_code == 0, res.output
+    assert "sch-x disabled" in res.output
+    # disable → enabled:false must be sent (mutation: a swap would send true).
+    assert json.loads(rec.last("PATCH").content) == {"enabled": False}
+
+
+def test_schedule_create_server_error(monkeypatch):
+    _mock_ctx(monkeypatch, {
+        "POST /schedules": httpx.Response(400, text="bad interval"),
+    })
+    res = CliRunner().invoke(
+        roost_cli.schedule, ["a goal", "--every", "1s"], obj={})
+    assert res.exit_code != 0
+    assert "schedule failed: HTTP 400" in res.output
+
+
+# ---------- `roost publish --list` (R-era pagination via X-Total-Count) ----------
+
+
+def _site(slug, files=3, size=2048):
+    return {"slug": slug, "files": files, "size": size,
+            "url": f"http://cp/pub/{slug}/", "created_at": 0, "updated_at": 0}
+
+
+def test_publish_list_renders_sites(monkeypatch):
+    rec = _mock_ctx(monkeypatch, {
+        "GET /publish": httpx.Response(
+            200, json=[_site("demo", files=4, size=4096)]),
+    })
+    res = CliRunner().invoke(roost_cli.publish, ["--list"], obj={})
+    assert res.exit_code == 0, res.output
+    assert "demo" in res.output
+    assert "4 files" in res.output
+    assert "4 KB" in res.output                       # 4096/1024
+    assert "http://cp/pub/demo/" in res.output
+
+
+def test_publish_list_empty(monkeypatch):
+    _mock_ctx(monkeypatch, {"GET /publish": httpx.Response(200, json=[])})
+    res = CliRunner().invoke(roost_cli.publish, ["--list"], obj={})
+    assert res.exit_code == 0, res.output
+    assert "no published sites" in res.output
+
+
+def test_publish_list_limit_offset_passthrough_and_more_hint(monkeypatch):
+    rec = _Recorder()
+
+    def handler(req):
+        # X-Total-Count says there are 100; we returned 2 from offset 5 → the
+        # "more" hint should advise --offset 7.
+        return httpx.Response(200, json=[_site("a"), _site("b")],
+                              headers={"X-Total-Count": "100"})
+    _mock_ctx(monkeypatch, {"GET /publish": handler}, rec)
+    res = CliRunner().invoke(
+        roost_cli.publish, ["--list", "--limit", "2", "--offset", "5"], obj={})
+    assert res.exit_code == 0, res.output
+    params = dict(rec.last("GET").url.params)
+    # Both pagination params reach the server (load-bearing passthrough).
+    assert params["limit"] == "2" and params["offset"] == "5"
+    assert "showing 2 of 100" in res.output
+    assert "--offset 7 for more" in res.output  # 5 offset + 2 shown
+
+
+def test_publish_list_no_more_hint_when_all_shown(monkeypatch):
+    rec = _Recorder()
+
+    def handler(req):
+        return httpx.Response(200, json=[_site("only")],
+                              headers={"X-Total-Count": "1"})
+    _mock_ctx(monkeypatch, {"GET /publish": handler}, rec)
+    res = CliRunner().invoke(roost_cli.publish, ["--list"], obj={})
+    assert res.exit_code == 0, res.output
+    # total == shown → no pagination hint.
+    assert "for more" not in res.output
+    # Default list omits limit/offset params (server applies its own default).
+    params = dict(rec.last("GET").url.params)
+    assert "limit" not in params and "offset" not in params
+
+
+def test_publish_list_403_is_actionable(monkeypatch):
+    _mock_ctx(monkeypatch, {
+        "GET /publish": httpx.Response(403, json={"detail": "no"}),
+    })
+    res = CliRunner().invoke(roost_cli.publish, ["--list"], obj={})
+    assert res.exit_code != 0
+    assert "admin auth required to list sites" in res.output
+
+
+# ---------- `roost tree`: R33 ↳why + --health rendering ----------
+
+
+def test_tree_health_flag_appends_liveness(monkeypatch):
+    jobs = [
+        {"id": "root1", "state": "running", "worker_id": None,
+         "parent_job_id": None, "intent": "plan", "spec": {"intent": "plan"},
+         "tokens_used": 0},
+        {"id": "childA", "state": "running", "worker_id": "w1",
+         "parent_job_id": "root1", "intent": "do it",
+         "spec": {"command": "x"}, "tokens_used": 0,
+         "idle_sec": 12, "queued_sec": 3, "capable_workers": 2,
+         "last_activity": "writing file"},
+    ]
+
+    def handler(request):
+        assert request.url.path.endswith("/tree")
+        return httpx.Response(200, json=jobs)
+    monkeypatch.setattr(
+        roost_cli, "_ctx_client",
+        lambda _ctx: httpx.Client(
+            base_url="http://cp", transport=httpx.MockTransport(handler)),
+    )
+    res = CliRunner().invoke(roost_cli.tree, ["root1", "--health"], obj={})
+    assert res.exit_code == 0, res.output
+    assert "idle 12s" in res.output
+    assert "queued 3s" in res.output
+    assert "capable=2" in res.output
+    assert "writing file" in res.output
+
+
+def test_tree_not_found_404(monkeypatch):
+    def handler(request):
+        return httpx.Response(404, json={"detail": "no"})
+    monkeypatch.setattr(
+        roost_cli, "_ctx_client",
+        lambda _ctx: httpx.Client(
+            base_url="http://cp", transport=httpx.MockTransport(handler)),
+    )
+    res = CliRunner().invoke(roost_cli.tree, ["ghost"], obj={})
+    assert res.exit_code != 0
+    assert "job not found" in res.output
+
+
+def test_tree_json_emits_raw(monkeypatch):
+    jobs = [{"id": "root1", "state": "running", "worker_id": None,
+             "parent_job_id": None, "intent": "x", "spec": {}, "tokens_used": 0}]
+
+    def handler(request):
+        return httpx.Response(200, json=jobs)
+    monkeypatch.setattr(
+        roost_cli, "_ctx_client",
+        lambda _ctx: httpx.Client(
+            base_url="http://cp", transport=httpx.MockTransport(handler)),
+    )
+    res = CliRunner().invoke(roost_cli.tree, ["root1", "--json"], obj={})
+    assert res.exit_code == 0, res.output
+    assert json.loads(res.output)[0]["id"] == "root1"
+    # JSON mode must not also render the human tree (no `↳`/state padding noise).
+    assert "↳" not in res.output
+
+
+def test_tree_empty_result(monkeypatch):
+    def handler(request):
+        return httpx.Response(200, json=[])
+    monkeypatch.setattr(
+        roost_cli, "_ctx_client",
+        lambda _ctx: httpx.Client(
+            base_url="http://cp", transport=httpx.MockTransport(handler)),
+    )
+    res = CliRunner().invoke(roost_cli.tree, ["root1"], obj={})
+    assert res.exit_code == 0, res.output
+    assert "(empty)" in res.output
+
+
+# ---------- `roost send`: error branches + --wait still-queued path ----------
+
+
+def test_send_job_not_found_404(monkeypatch):
+    calls: list = []
+    monkeypatch.setattr(roost_cli, "_resolve",
+                        lambda ctx: ("http://cp", "tok", None))
+
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def post(self, path, json):
+            calls.append(("POST", path))
+            return _ExecResp({"detail": "no"}, status_code=404)
+    monkeypatch.setattr(roost_cli, "_client", lambda url, token: _C())
+    res = CliRunner().invoke(roost_cli.send, ["ghost", "hi"])
+    assert res.exit_code != 0
+    assert "job not found" in res.output
+
+
+def test_send_message_too_large_413(monkeypatch):
+    monkeypatch.setattr(roost_cli, "_resolve",
+                        lambda ctx: ("http://cp", "tok", None))
+
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def post(self, path, json):
+            return _ExecResp({"detail": "too big"}, status_code=413)
+    monkeypatch.setattr(roost_cli, "_client", lambda url, token: _C())
+    res = CliRunner().invoke(roost_cli.send, ["j1", "x" * 10])
+    assert res.exit_code != 0
+    assert "message too large" in res.output
+
+
+def test_send_wait_still_queued_message(monkeypatch):
+    """--wait but the input never leaves the queue before the deadline → a
+    'still queued' note (not delivered, not an error exit)."""
+    monkeypatch.setattr(roost_cli, "_resolve",
+                        lambda ctx: ("http://cp", "tok", None))
+
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def post(self, path, json):
+            return _ExecResp({"input_id": "i-1", "state": "queued"})
+        def get(self, path, **k):
+            # Always reports the input as still queued.
+            return _ExecResp({"inputs": [{"id": "i-1", "state": "queued"}]})
+    monkeypatch.setattr(roost_cli, "_client", lambda url, token: _C())
+    # Make the poll loop fall through immediately: sleep is a no-op and the
+    # deadline is already in the past.
+    monkeypatch.setattr(roost_cli.time, "sleep", lambda *_a: None)
+    times = iter([1000.0, 9999.0, 9999.0])  # start, then past the 30s deadline
+    monkeypatch.setattr(roost_cli.time, "time", lambda: next(times))
+    res = CliRunner().invoke(roost_cli.send, ["j1", "hi", "--wait"])
+    assert res.exit_code == 0, res.output
+    assert "still queued" in res.output
+
+
+# ---------- `roost backup`: directory + transport-error branches ----------
+
+
+def test_backup_missing_dest_dir_errors_before_request(monkeypatch):
+    monkeypatch.setattr(roost_cli, "_resolve",
+                        lambda ctx: ("http://cp", "admin", None))
+    called = {"n": 0}
+
+    def _never(*a, **k):
+        called["n"] += 1
+        raise AssertionError("must not open a client")
+    monkeypatch.setattr(roost_cli.httpx, "Client", _never)
+    res = CliRunner().invoke(
+        roost_cli.backup, ["/no/such/dir/snapshot.db"])
+    assert res.exit_code != 0
+    assert "destination directory does not exist" in res.output
+    assert called["n"] == 0  # bailed before any HTTP
+
+
+def test_backup_transport_error_cleans_up_partfile(monkeypatch, tmp_path):
+    monkeypatch.setattr(roost_cli, "_resolve",
+                        lambda ctx: ("http://cp", "admin", None))
+
+    class _Stream:
+        def __enter__(self):
+            raise httpx.ConnectError("refused")
+        def __exit__(self, *a): pass
+
+    class _C:
+        def __init__(self, *a, **k): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def stream(self, *a, **k): return _Stream()
+    monkeypatch.setattr(roost_cli.httpx, "Client", _C)
+    dest = tmp_path / "snap.db"
+    res = CliRunner().invoke(roost_cli.backup, [str(dest)])
+    assert res.exit_code != 0
+    assert "backup failed" in res.output
+    # No partial file is left behind on a transport error.
+    assert not dest.with_name(dest.name + ".part").exists()
     assert not dest.exists()
