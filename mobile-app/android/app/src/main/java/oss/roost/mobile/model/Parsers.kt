@@ -223,6 +223,37 @@ object Parsers {
     fun parseCancel(json: String): CancelAck =
         CancelAck(cancelled = JSONObject(json).intOrNull("cancelled") ?: 0)
 
+    // ---- follow-up input (R38, API.md §4) ----------------------------------------
+
+    /** Ack for POST /jobs/{id}/input — `{input_id, job_id, state}`. */
+    fun parseJobInputAck(json: String): JobInputAck {
+        val o = JSONObject(json)
+        return JobInputAck(
+            inputId = o.str("input_id") ?: "",
+            jobId = o.str("job_id") ?: "",
+            state = o.str("state") ?: "queued",
+        )
+    }
+
+    private fun parseJobInput(o: JSONObject): JobInput = JobInput(
+        id = o.str("id") ?: "",
+        state = o.str("state") ?: "queued",
+        detail = o.str("detail"),
+        createdAt = o.dbl("created_at") ?: 0.0,
+        deliveredAt = o.dbl("delivered_at"),
+        createdBy = o.str("created_by"),
+    )
+
+    /** GET /jobs/{id}/inputs — `{job_id, state, inputs:[…]}`. */
+    fun parseJobInputs(json: String): JobInputs {
+        val o = JSONObject(json)
+        return JobInputs(
+            jobId = o.str("job_id") ?: "",
+            state = o.str("state") ?: "",
+            inputs = o.optJSONArray("inputs").objs().map(::parseJobInput),
+        )
+    }
+
     // ---- logs --------------------------------------------------------------------
 
     fun parseLogLine(o: JSONObject): LogLine = LogLine(

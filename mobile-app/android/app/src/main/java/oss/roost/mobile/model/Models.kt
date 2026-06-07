@@ -216,3 +216,38 @@ data class Schedule(
             return name ?: specKind?.let { "$it job" } ?: "scheduled job"
         }
 }
+
+/**
+ * Ack for POST /jobs/{id}/input (follow-up steering, R38 / API.md §4). The state
+ * here is always `queued`; the worker's later delivery shows up via [JobInput].
+ */
+data class JobInputAck(
+    val inputId: String,
+    val jobId: String,
+    val state: String,
+)
+
+/**
+ * One queued/delivered/dropped follow-up input — a row of GET /jobs/{id}/inputs
+ * (API.md §4). `detail` carries the drop reason when `state == "dropped"` (e.g.
+ * agent/docker jobs run with stdin closed, so their input is honestly dropped).
+ */
+data class JobInput(
+    val id: String,
+    val state: String,        // "queued" | "delivered" | "dropped"
+    val detail: String?,
+    val createdAt: Double,
+    val deliveredAt: Double?,
+    val createdBy: String?,
+) {
+    val isDelivered: Boolean get() = state == "delivered"
+    val isDropped: Boolean get() = state == "dropped"
+    val isQueued: Boolean get() = state == "queued"
+}
+
+/** GET /jobs/{id}/inputs response (API.md §4): the job's follow-up queue. */
+data class JobInputs(
+    val jobId: String,
+    val state: String,        // the JOB's state
+    val inputs: List<JobInput>,
+)

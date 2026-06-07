@@ -140,6 +140,23 @@ struct ApiClient {
                               as: CancelResponse.self)
     }
 
+    // MARK: Follow-up input (R38, API.md §4)
+
+    /// Queue a follow-up message for a RUNNING job. The CP returns
+    /// `{input_id, job_id, state:"queued"}`; the owning worker delivers it on its
+    /// heartbeat. A terminal job is rejected `.http(409, …)`, empty text 400,
+    /// >64 KiB 413 — all surfaced as typed `ApiError` with the server detail.
+    func sendInput(_ id: String, text: String) async throws -> JobInputAck {
+        let body = try JSONEncoder().encode(JobInputSubmit(text: text))
+        return try await send(request("jobs/\(id)/input", method: "POST", body: body),
+                              as: JobInputAck.self)
+    }
+
+    /// Poll a job's follow-up queue for the delivery outcome (API.md §4).
+    func inputs(_ id: String) async throws -> JobInputs {
+        try await send(request("jobs/\(id)/inputs"), as: JobInputs.self)
+    }
+
     // MARK: Publish (API.md §6)
 
     /// Stage a site bundle (raw tar.gz body) — publish step 1.

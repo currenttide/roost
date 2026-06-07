@@ -70,6 +70,29 @@ final class DecodeTests: XCTestCase {
         XCTAssertEqual(since.logs.first?.seq, 3)
     }
 
+    func testFollowUpInput() throws {
+        // Ack for POST /jobs/{id}/input (R38, API.md §4): queued immediately.
+        let ack = try dec.decode(JobInputAck.self,
+                                 from: Fixtures.data("job_input_response.json"))
+        XCTAssertFalse(ack.inputId.isEmpty)
+        XCTAssertFalse(ack.jobId.isEmpty)
+        XCTAssertEqual(ack.state, "queued")
+
+        // GET /jobs/{id}/inputs: the running job's queue with one queued input.
+        let list = try dec.decode(JobInputs.self,
+                                  from: Fixtures.data("job_inputs_list.json"))
+        XCTAssertEqual(list.state, "running")          // the JOB's state
+        XCTAssertEqual(list.jobId, ack.jobId)
+        XCTAssertEqual(list.inputs.count, 1)
+        let row = try XCTUnwrap(list.inputs.first)
+        XCTAssertEqual(row.id, ack.inputId)
+        XCTAssertEqual(row.state, "queued")
+        XCTAssertTrue(row.isQueued)
+        XCTAssertFalse(row.isDelivered)
+        XCTAssertNil(row.deliveredAt)                  // not delivered yet
+        XCTAssertNil(row.detail)
+    }
+
     func testHeaderAndWorkers() throws {
         let run = try dec.decode(Run.self, from: Fixtures.data("job_derived_running.json"))
         XCTAssertEqual(run.healthStatus, .running)

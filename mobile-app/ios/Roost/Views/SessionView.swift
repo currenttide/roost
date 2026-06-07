@@ -26,6 +26,13 @@ struct SessionView: View {
                 resultCard(done)
             }
             footer
+            // Follow-up composer (DESIGN §3.2 / API.md §4, R38): react fast — type
+            // a steering message and send it to the live job. Hidden once terminal
+            // (the server 409s a terminal job), matching the Cancel button's gate.
+            if !store.isTerminal {
+                Divider()
+                composer
+            }
         }
         .navigationTitle(store.header?.goal ?? "Session")
         .navigationBarTitleDisplayMode(.inline)
@@ -161,6 +168,31 @@ struct SessionView: View {
                 Task { await store.loadTree() }
                 showTree = true
             } label: { Label("Tree", systemImage: "list.bullet.indent") }
+        }
+        .padding(.horizontal).padding(.vertical, 8)
+        .background(.bar)
+    }
+
+    // MARK: - Composer (follow-up input, R38)
+
+    private var composer: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if let outcome = store.sendOutcome {
+                Text(outcome).font(.caption2).foregroundStyle(.secondary)
+            }
+            HStack(spacing: 8) {
+                TextField("Follow up…", text: $store.draft, axis: .vertical)
+                    .textFieldStyle(.roundedBorder)
+                    .lineLimit(1...4)
+                    .disabled(store.sending)
+                    .onSubmit { Task { await store.sendFollowUp() } }
+                Button {
+                    Task { await store.sendFollowUp() }
+                } label: {
+                    Image(systemName: "arrow.up.circle.fill").font(.title2)
+                }
+                .disabled(store.sending || !Composer.canSend(store.draft))
+            }
         }
         .padding(.horizontal).padding(.vertical, 8)
         .background(.bar)

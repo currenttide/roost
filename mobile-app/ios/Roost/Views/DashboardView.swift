@@ -93,6 +93,9 @@ struct DashboardView: View {
             store.start()
             // Screenshot/demo hook: jump straight to the publish sheet.
             if app.autoOpenPublish { showPublish = true }
+            // Screenshot/demo hook: push straight into a job's Session screen so
+            // the composer is reachable without tapping a run row (R84/XCUITest).
+            if let jobId = app.autoOpenSession, path.isEmpty { path.append(jobId) }
         }
         .onChange(of: scenePhase) { _, phase in
             // Pause polling in background (DESIGN §7: no background networking).

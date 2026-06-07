@@ -2,7 +2,7 @@
   "assigned_at": null,
   "attempt": 0,
   "capable_workers": 0,
-  "created_at": 1780813813.4893975,
+  "created_at": 1780853830.3577662,
   "decline_count": 0,
   "declined_by": null,
   "depth": 0,
@@ -11,7 +11,7 @@
   "eta_sec": null,
   "exit_code": null,
   "finished_at": null,
-  "id": "ea595640d003",
+  "id": "c66b2cf578c5",
   "intent": "train on the gpu box",
   "last_activity": null,
   "last_activity_at": null,
@@ -29,7 +29,7 @@
     "gpu_vram_gb": ">=24"
   },
   "result": null,
-  "root_job_id": "ea595640d003",
+  "root_job_id": "c66b2cf578c5",
   "spec": {
     "args": null,
     "budget": {},
