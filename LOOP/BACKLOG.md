@@ -157,7 +157,7 @@ Done-when: liveness annotation honors the target pin (parity with assignment); r
 Surface: backend/feature. Pre-existing Proposed item: the watcher's narration re-render interval is a fixed constant; busy fleets may want it slower (cost) and demo fleets faster (snappiness).
 Done-when: interval configurable via the same config style as ROOST_NARRATE (env var or config sibling — match the existing seam); default preserves today's value exactly; bounds-checked (sane floor); test for default + override; pytest green.
 
-### R50. iOS publish UI wiring (Mac-node verified) — `open` `self-promoted` `feature`
+### R50. iOS publish UI wiring (Mac-node verified) — `done` *(2026-06-07, PR #63 — simulator-verified, screenshot blob c41555f048c8)* `self-promoted` `feature`
 Surface: mobile/iOS/feature. North star #3. The decode layers + contract landed with R6/R34; the iOS app still has no publish screen — pick-bundle → upload (or one-shot) → publish → share-link. Evidence table mac-path applies: build + test + simctl screenshot via a Roost job on the Mac node (mac-mini-m4, proven in I0); if the Mac is unreachable, cap claims at "compiles, needs-mac-verify" and mark blocked honestly.
 Done-when: publish screen wired into the iOS app using the existing RoostKit calls (one-shot preferred); Linux-runnable logic tests for any new view-model; Mac node run: xcodebuild build+test green + simctl screenshot of the publish screen returned as a blob artifact and linked in the PR; pytest green (server untouched or additive only).
 

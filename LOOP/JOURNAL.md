@@ -1478,3 +1478,32 @@ Entries are written by the loop; humans read, never need to edit.
 - Models: investigator claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only)
 - Notes: iteration #10 slot 3. R19's filed question is closed. R50 (iOS UI + Mac
   node) and R51 (verify e2e) in flight.
+
+## 2026-06-07 ~05:50 UTC — R50: iOS publish UI (Mac-node verified end-to-end)
+- Verdict: shipped
+- Branch/PR: loop/r50-ios-publish-ui / https://github.com/currenttide/roost/pull/63 (merged d9a2684)
+- What changed: "Publish a site" sheet (dashboard overflow menu): .fileImporter
+  tar.gz picker (security-scoped read bracketed), live slug preview mirroring
+  publish.py::normalize_slug grammar, ONE-SHOT publishBundle (no staged blob),
+  result URL with ShareLink + open-in-Safari. 8 files under mobile-app/ios only,
+  mirroring NewSessionView/Store patterns; sibling error handling (401→pairing,
+  403/413/400 surfaced).
+- Evidence (full evidence-table mac path — first since I0):
+  - Linux swift test → 46/46 (was 34; +12 PublishTests)
+  - mac-mini-m4 (Xcode 26.2, iOS 26.3 sim): xcodebuild build → SUCCEEDED;
+    xcodebuild test → 46/46
+  - live-fleet screenshot: app paired via ROOST_PAIR_URI, sheet auto-opened,
+    simctl screenshot → blob c41555f048c8, sha256 6070a3621a1d…, PNG 1206×2622,
+    byte-identical Mac→server→download; renders the publish screen
+  - `python -m pytest -q` → 652 (python untouched)
+- Judge: approve (round 1) — re-ran the Linux suite, INDEPENDENTLY re-downloaded
+  the blob + recomputed sha256 (match), corroborated Mac jobs via roost jobs
+  (incl. the PUT job 831f4aab81c6), reviewed against all criteria
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p,
+  read-only + roost CLI)
+- Notes: iteration #10 slot 1. DEVIATION (logged): direct LAN-CP probe blocked by
+  the auto-mode classifier (unverified destination) — agent worked within
+  sanctioned paths (pair token via configured CP; Mac node used its own CP
+  address). Pre-PR rebase verified byte-identical mobile-app/ios subtree, so the
+  Mac evidence applies to the merged commit. The fleet built and verified its own
+  client app — the most production-real evidence loop to date. R51 last in flight.
