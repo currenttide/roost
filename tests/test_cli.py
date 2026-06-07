@@ -1950,3 +1950,323 @@ def test_backup_transport_error_cleans_up_partfile(monkeypatch, tmp_path):
     # No partial file is left behind on a transport error.
     assert not dest.with_name(dest.name + ".part").exists()
     assert not dest.exists()
+
+
+# ======================================================================
+# R95 — client-token surface coverage (cli.py:941-1052). `pair`/`token`/
+# `revoke` + helpers `_list_client_tokens`/`_revoke_client_token`/
+# `_mint_client_token`. Style: CliRunner + stubbed `_ctx_client`/`_resolve`
+# + httpx.MockTransport (R16/R54 idiom, _mock_ctx above) — no real
+# process/socket/config. Each test pins ONE branch to observable output,
+# an exit code, or a raised exception type.
+# ======================================================================
+
+
+def _ptok(id_, *, revoked=False, scope="mobile", last_used_at=None, label=None):
+    """A `/pair-tokens` row as the server returns it (the shape cli.py reads)."""
+    return {"id": id_, "revoked": revoked, "scope": scope,
+            "last_used_at": last_used_at, "label": label}
+
+
+# ---------- _list_client_tokens (via `roost token --list`) ----------
+
+
+def test_list_client_tokens_empty_says_none(monkeypatch):
+    _mock_ctx(monkeypatch, {"GET /pair-tokens": httpx.Response(200, json=[])})
+    res = CliRunner().invoke(roost_cli.token, ["--list"], obj={})
+    assert res.exit_code == 0, res.output
+    assert res.output.strip() == "no client tokens"
+
+
+def test_list_client_tokens_formats_active_revoked_and_lastused(monkeypatch):
+    now = time.time()
+    rows = [
+        # active, used recently → relative time + label shown
+        _ptok("tok-a", revoked=False, scope="mobile",
+              last_used_at=now - 120, label="yang-iphone"),
+        # revoked, never used → "revoked" state + "never" + blank label
+        _ptok("tok-b", revoked=True, scope="agent",
+              last_used_at=None, label=None),
+    ]
+    _mock_ctx(monkeypatch, {"GET /pair-tokens": httpx.Response(200, json=rows)})
+    res = CliRunner().invoke(roost_cli.token, ["--list"], obj={})
+    assert res.exit_code == 0, res.output
+    lines = res.output.strip().splitlines()
+    assert len(lines) == 2
+    # Active row: state word, scope, a relative "last used" (2m), and the label.
+    assert "tok-a" in lines[0]
+    assert "active" in lines[0] and "revoked" not in lines[0]
+    assert "scope=mobile" in lines[0]
+    assert "last used 2m" in lines[0]
+    assert "yang-iphone" in lines[0]
+    # Revoked + never-used row: "revoked" state, "never", no stray label text.
+    assert "tok-b" in lines[1]
+    assert "revoked" in lines[1] and "active" not in lines[1]
+    assert "scope=agent" in lines[1]
+    assert "last used never" in lines[1]
+    assert lines[1].rstrip().endswith("never")  # blank label → trailing nothing
+
+
+def test_list_client_tokens_403_is_admin_message(monkeypatch):
+    _mock_ctx(monkeypatch, {"GET /pair-tokens": httpx.Response(403, json={})})
+    res = CliRunner().invoke(roost_cli.token, ["--list"], obj={})
+    assert res.exit_code != 0
+    # _admin_403("list tokens") wording is the load-bearing, actionable hint.
+    assert "admin auth required to list tokens" in res.output
+
+
+def test_list_client_tokens_server_error_raises(monkeypatch):
+    # A non-403 >=400 must hit raise_for_status, not be swallowed.
+    _mock_ctx(monkeypatch, {"GET /pair-tokens": httpx.Response(500, json={})})
+    res = CliRunner().invoke(roost_cli.token, ["--list"], obj={})
+    assert res.exit_code != 0
+    assert isinstance(res.exception, httpx.HTTPStatusError)
+    assert res.exception.response.status_code == 500
+
+
+# ---------- _revoke_client_token (via `roost token --revoke`) ----------
+
+
+def test_revoke_client_token_success_echoes_id(monkeypatch):
+    rec = _mock_ctx(monkeypatch, {
+        "DELETE /pair-tokens/tok-x": httpx.Response(200, json={})})
+    res = CliRunner().invoke(roost_cli.token, ["--revoke", "tok-x"], obj={})
+    assert res.exit_code == 0, res.output
+    assert "revoked tok-x" in res.output
+    # It issues a DELETE to the per-id path (no mint POST happens).
+    assert rec.last("DELETE").url.path == "/pair-tokens/tok-x"
+    assert [r for r in rec.requests if r.method == "POST"] == []
+
+
+def test_revoke_client_token_404_says_not_found(monkeypatch):
+    _mock_ctx(monkeypatch, {
+        "DELETE /pair-tokens/ghost": httpx.Response(404, json={})})
+    res = CliRunner().invoke(roost_cli.token, ["--revoke", "ghost"], obj={})
+    assert res.exit_code != 0
+    assert "token not found (or already revoked)" in res.output
+
+
+def test_revoke_client_token_403_is_admin_message(monkeypatch):
+    _mock_ctx(monkeypatch, {
+        "DELETE /pair-tokens/tok-x": httpx.Response(403, json={})})
+    res = CliRunner().invoke(roost_cli.token, ["--revoke", "tok-x"], obj={})
+    assert res.exit_code != 0
+    assert "admin auth required to revoke a token" in res.output
+
+
+def test_revoke_client_token_server_error_raises(monkeypatch):
+    _mock_ctx(monkeypatch, {
+        "DELETE /pair-tokens/tok-x": httpx.Response(500, json={})})
+    res = CliRunner().invoke(roost_cli.token, ["--revoke", "tok-x"], obj={})
+    assert res.exit_code != 0
+    assert isinstance(res.exception, httpx.HTTPStatusError)
+    assert res.exception.response.status_code == 500
+
+
+# ---------- _mint_client_token (via `roost token` mint path) ----------
+
+
+def test_mint_client_token_403_is_admin_message(monkeypatch):
+    monkeypatch.setattr(roost_cli, "_resolve",
+                        lambda ctx: ("http://192.168.1.5:8787", "tok", None))
+    _mock_ctx(monkeypatch, {"POST /pair-tokens": httpx.Response(403, json={})})
+    res = CliRunner().invoke(roost_cli.token, [], obj={})
+    assert res.exit_code != 0
+    assert "admin auth required to mint a token" in res.output
+
+
+def test_mint_client_token_400_reports_status_and_body(monkeypatch):
+    # A non-403 >=400 surfaces the HTTP code AND the server's body text.
+    monkeypatch.setattr(roost_cli, "_resolve",
+                        lambda ctx: ("http://192.168.1.5:8787", "tok", None))
+    _mock_ctx(monkeypatch, {
+        "POST /pair-tokens": httpx.Response(422, text="bad scope")})
+    res = CliRunner().invoke(roost_cli.token, [], obj={})
+    assert res.exit_code != 0
+    assert "mint failed: HTTP 422: bad scope" in res.output
+
+
+# ---------- `roost token` mint success: env snippet + scope passthrough ----------
+
+
+def test_token_mint_prints_env_snippet_non_loopback(monkeypatch):
+    url = "http://192.168.1.5:8787"  # not loopback → no warning
+    monkeypatch.setattr(roost_cli, "_resolve", lambda ctx: (url, "tok", None))
+    rec = _mock_ctx(monkeypatch, {
+        "POST /pair-tokens": httpx.Response(
+            200, json={"id": "ct-1", "scope": "agent", "token": "rst-agt-SECRET"})})
+    res = CliRunner().invoke(roost_cli.token, ["--label", "ci"], obj={})
+    assert res.exit_code == 0, res.output
+    # No loopback warning for a LAN url.
+    assert "loopback" not in res.output
+    # The one-shot secret + ready-to-paste env snippet are printed.
+    assert "token id: ct-1  scope=agent" in res.output
+    assert f"export ROOST_URL={url}" in res.output
+    assert "export ROOST_TOKEN=rst-agt-SECRET" in res.output
+    # The mint request carries the label and default scope (agent).
+    body = json.loads(rec.last("POST").content)
+    assert body == {"label": "ci", "scope": "agent"}
+
+
+def test_token_mint_scope_mobile_passthrough(monkeypatch):
+    monkeypatch.setattr(roost_cli, "_resolve",
+                        lambda ctx: ("http://192.168.1.5:8787", "tok", None))
+    rec = _mock_ctx(monkeypatch, {
+        "POST /pair-tokens": httpx.Response(
+            200, json={"id": "ct-2", "scope": "mobile", "token": "rst-mob-X"})})
+    res = CliRunner().invoke(roost_cli.token, ["--scope", "mobile"], obj={})
+    assert res.exit_code == 0, res.output
+    body = json.loads(rec.last("POST").content)
+    assert body["scope"] == "mobile"
+    assert body["label"] is None  # no --label → null
+
+
+def test_token_mint_loopback_warns_script_wording(monkeypatch):
+    # Loopback url → the SCRIPT-flavored warning ("a remote client can't reach it"),
+    # distinct from `pair`'s phone wording.
+    monkeypatch.setattr(roost_cli, "_resolve",
+                        lambda ctx: ("http://127.0.0.1:8787", "tok", None))
+    _mock_ctx(monkeypatch, {
+        "POST /pair-tokens": httpx.Response(
+            200, json={"id": "ct-3", "scope": "agent", "token": "rst-agt-Y"})})
+    res = CliRunner().invoke(roost_cli.token, [], obj={})
+    assert res.exit_code == 0, res.output
+    assert "control plane URL is loopback — a remote client can't reach it." in res.output
+    assert "the phone can't reach it" not in res.output  # not the pair wording
+
+
+def test_token_list_dispatch_short_circuits_mint(monkeypatch):
+    # --list takes the list branch and returns before minting (no POST issued).
+    rec = _mock_ctx(monkeypatch, {"GET /pair-tokens": httpx.Response(200, json=[])})
+    res = CliRunner().invoke(roost_cli.token, ["--list"], obj={})
+    assert res.exit_code == 0, res.output
+    assert [r for r in rec.requests if r.method == "POST"] == []
+
+
+# ---------- `roost pair`: QR, loopback (phone wording), dispatch ----------
+
+
+def test_pair_mint_prints_uri_and_qr_when_qrcode_present(monkeypatch):
+    url = "http://192.168.1.193:8787"
+    monkeypatch.setattr(roost_cli, "_resolve", lambda ctx: (url, "tok", None))
+    _mock_ctx(monkeypatch, {
+        "POST /pair-tokens": httpx.Response(
+            200, json={"id": "pt-1", "scope": "mobile", "token": "rst-mob-ABC"})})
+    # Force the QR-success branch: _print_qr returns True (renders something).
+    qr_calls: list = []
+    monkeypatch.setattr(roost_cli, "_print_qr",
+                        lambda data: (qr_calls.append(data), True)[1])
+    res = CliRunner().invoke(roost_cli.pair, ["--label", "yang-iphone"], obj={})
+    assert res.exit_code == 0, res.output
+    # QR rendered → the "install qrcode" fallback hint must NOT appear.
+    assert "install `qrcode`" not in res.output
+    # The QR was fed the pairing URI (the load-bearing data).
+    assert qr_calls and qr_calls[0].startswith("roost://pair?d=")
+    assert "pairing uri: roost://pair?d=" in res.output
+    assert "token id:    pt-1" in res.output
+    assert "roost pair --revoke pt-1" in res.output
+    assert "scan the QR with the Roost app" in res.output
+
+
+def test_pair_mint_qr_fallback_hint_when_qrcode_missing(monkeypatch):
+    monkeypatch.setattr(roost_cli, "_resolve",
+                        lambda ctx: ("http://192.168.1.193:8787", "tok", None))
+    _mock_ctx(monkeypatch, {
+        "POST /pair-tokens": httpx.Response(
+            200, json={"id": "pt-2", "scope": "mobile", "token": "rst-mob-D"})})
+    # Force the fallback branch: _print_qr returns False (no qrcode package).
+    monkeypatch.setattr(roost_cli, "_print_qr", lambda data: False)
+    res = CliRunner().invoke(roost_cli.pair, [], obj={})
+    assert res.exit_code == 0, res.output
+    # Fallback hint shown, but the URI is still printed so pairing still works.
+    assert "install `qrcode` for a scannable QR" in res.output
+    assert "pairing uri: roost://pair?d=" in res.output
+
+
+def test_pair_loopback_warns_phone_wording(monkeypatch):
+    monkeypatch.setattr(roost_cli, "_resolve",
+                        lambda ctx: ("http://localhost:8787", "tok", None))
+    _mock_ctx(monkeypatch, {
+        "POST /pair-tokens": httpx.Response(
+            200, json={"id": "pt-3", "scope": "mobile", "token": "rst-mob-E"})})
+    monkeypatch.setattr(roost_cli, "_print_qr", lambda data: True)
+    res = CliRunner().invoke(roost_cli.pair, [], obj={})
+    assert res.exit_code == 0, res.output
+    # Phone-flavored warning (distinct from token's "remote client" wording).
+    assert "control plane URL is loopback — the phone can't reach it." in res.output
+    assert "a remote client can't reach it" not in res.output
+
+
+def test_pair_list_dispatch_uses_shared_helper(monkeypatch):
+    rec = _mock_ctx(monkeypatch, {
+        "GET /pair-tokens": httpx.Response(
+            200, json=[_ptok("pt-9", revoked=False, scope="mobile",
+                             last_used_at=None, label="dev")])})
+    res = CliRunner().invoke(roost_cli.pair, ["--list"], obj={})
+    assert res.exit_code == 0, res.output
+    assert "pt-9" in res.output and "active" in res.output
+    # No mint when --list is given.
+    assert [r for r in rec.requests if r.method == "POST"] == []
+
+
+def test_pair_revoke_dispatch_calls_delete(monkeypatch):
+    rec = _mock_ctx(monkeypatch, {
+        "DELETE /pair-tokens/pt-9": httpx.Response(200, json={})})
+    res = CliRunner().invoke(roost_cli.pair, ["--revoke", "pt-9"], obj={})
+    assert res.exit_code == 0, res.output
+    assert "revoked pt-9" in res.output
+    assert rec.last("DELETE").url.path == "/pair-tokens/pt-9"
+
+
+# ---------- _print_qr: package present vs absent ----------
+
+
+def test_print_qr_returns_false_without_qrcode(monkeypatch):
+    # Simulate the package being absent → graceful False, nothing rendered.
+    import builtins
+    real_import = builtins.__import__
+
+    def fake_import(name, *a, **k):
+        if name == "qrcode":
+            raise ImportError("no qrcode")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    assert roost_cli._print_qr("roost://pair?d=x") is False
+
+
+# ---------- `roost revoke <worker_id>` (worker credential revocation) ----------
+
+
+def test_revoke_worker_success(monkeypatch):
+    rec = _mock_ctx(monkeypatch, {
+        "DELETE /workers/w-1": httpx.Response(200, json={})})
+    res = CliRunner().invoke(roost_cli.revoke, ["w-1"], obj={})
+    assert res.exit_code == 0, res.output
+    assert "revoked w-1" in res.output
+    assert rec.last("DELETE").url.path == "/workers/w-1"
+
+
+def test_revoke_worker_404_says_worker_not_found(monkeypatch):
+    _mock_ctx(monkeypatch, {
+        "DELETE /workers/ghost": httpx.Response(404, json={})})
+    res = CliRunner().invoke(roost_cli.revoke, ["ghost"], obj={})
+    assert res.exit_code != 0
+    assert "worker not found" in res.output
+
+
+def test_revoke_worker_403_is_admin_message(monkeypatch):
+    _mock_ctx(monkeypatch, {
+        "DELETE /workers/w-1": httpx.Response(403, json={})})
+    res = CliRunner().invoke(roost_cli.revoke, ["w-1"], obj={})
+    assert res.exit_code != 0
+    assert "admin auth required" in res.output
+
+
+def test_revoke_worker_server_error_raises(monkeypatch):
+    _mock_ctx(monkeypatch, {
+        "DELETE /workers/w-1": httpx.Response(500, json={})})
+    res = CliRunner().invoke(roost_cli.revoke, ["w-1"], obj={})
+    assert res.exit_code != 0
+    assert isinstance(res.exception, httpx.HTTPStatusError)
+    assert res.exception.response.status_code == 500
