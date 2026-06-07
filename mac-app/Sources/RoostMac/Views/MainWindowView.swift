@@ -23,6 +23,8 @@ struct MainWindowView: View {
             case .workers: WorkersPane()
             case .console: ConsolePane()
             case .transfers: TransfersPane()
+            case .publish: PublishPane()
+            case .schedules: SchedulesPane()
             }
         }
         .sheet(item: $transfers.pendingSend) { pending in

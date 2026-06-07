@@ -134,6 +134,61 @@ public final class RoostClient: @unchecked Sendable {
                        query: ["older_than_days": String(olderThanDays)])
     }
 
+    // MARK: publish (built thing → live URL)
+
+    /// One-shot publish (the menu-bar flow, mirroring mobile §6a): the `tar.gz`
+    /// bundle IS the request body and `name` is REQUIRED (slugified server-side).
+    /// Nothing is staged, so a dropped connection can't leave a dangling blob.
+    public func publishBundle(name: String, data: Data) async throws -> Site {
+        var request = makeRequest("POST", "/publish", query: ["name": name])
+        request.httpBody = data
+        // A non-JSON Content-Type selects the server's one-shot path.
+        request.setValue("application/gzip", forHTTPHeaderField: "Content-Type")
+        return try await perform(request)
+    }
+
+    /// Sites published on this control plane (`GET /publish`).
+    public func sites() async throws -> [Site] {
+        let rows: [Tolerant<Site>] = try await get("/publish")
+        return rows.compactMap(\.value)
+    }
+
+    // MARK: schedules (interval jobs)
+
+    /// Interval schedules, newest first (`GET /schedules`). Admin/scheduler-scoped.
+    public func schedules() async throws -> [Schedule] {
+        let rows: [Tolerant<Schedule>] = try await get("/schedules")
+        return rows.compactMap(\.value)
+    }
+
+    /// Enable/disable a schedule (`PATCH /schedules/{id}`). Re-enabling restarts the
+    /// clock server-side. Returns the updated schedule.
+    @discardableResult
+    public func setScheduleEnabled(id: String, enabled: Bool) async throws -> Schedule {
+        try await send("PATCH", "/schedules/\(id)", body: SchedulePatchBody(enabled: enabled))
+    }
+
+    /// Delete a schedule (`DELETE /schedules/{id}`).
+    @discardableResult
+    public func deleteSchedule(id: String) async throws -> ScheduleDeleteResponse {
+        try await send("DELETE", "/schedules/\(id)")
+    }
+
+    // MARK: steer a running job (R38)
+
+    /// Queue a follow-up message for a RUNNING job (`POST /jobs/{id}/input`). The
+    /// ack is always `queued`; the live delivered/dropped outcome — which depends on
+    /// the job kind — arrives via `jobInputs(id:)`. A terminal job is rejected 409.
+    @discardableResult
+    public func sendInput(id: String, text: String) async throws -> JobInputAck {
+        try await send("POST", "/jobs/\(id)/input", body: JobInputSubmit(text: text))
+    }
+
+    /// A job's queued follow-ups and their delivery state (`GET /jobs/{id}/inputs`).
+    public func jobInputs(id: String) async throws -> JobInputsResponse {
+        try await get("/jobs/\(id)/inputs")
+    }
+
     /// Validates a connection for onboarding: reachable → roost → authorized.
     /// Distinguishes the three failure modes so the UI can say which it is.
     public func validate() async throws {

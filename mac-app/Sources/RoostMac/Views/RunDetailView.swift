@@ -27,6 +27,10 @@ final class RunDetailModel {
     private(set) var tree: [Job] = []
     /// Filled when the run isn't in the store snapshot (deep history).
     private(set) var detachedRun: Run?
+    /// This run's own job row, fetched lazily so the Send verb can read its `spec`
+    /// (kind/command) and tell the user honestly whether input will be delivered or
+    /// dropped (R38). Nil until fetched.
+    private(set) var selfJob: Job?
 
     var follow = true
     var showEvents = false
@@ -148,6 +152,12 @@ final class RunDetailModel {
             tree = fetched
         }
     }
+
+    /// Fetch (once) this run's own job so the Send sheet can gate on its spec.
+    func loadSelfJob() async {
+        guard selfJob == nil, let client = store.client else { return }
+        selfJob = try? await client.job(id: runID)
+    }
 }
 
 // MARK: - view
@@ -157,6 +167,7 @@ struct RunDetailView: View {
     @State private var detail: RunDetailModel?
     @State private var confirmCancel = false
     @State private var actionError: String?
+    @State private var showSend = false
 
     let runID: String
     /// true in the popover (tighter spacing), false in the main window.
@@ -174,6 +185,7 @@ struct RunDetailView: View {
             if detail == nil {
                 let d = RunDetailModel(runID: runID, store: model.store)
                 d.start()
+                Task { await d.loadSelfJob() }
                 detail = d
             }
         }
@@ -405,6 +417,12 @@ struct RunDetailView: View {
             .controlSize(.small)
 
             if run.isActive {
+                Button("Send…") { showSend = true }
+                    .controlSize(.small)
+                    .help("Send a follow-up message to this running job (R38)")
+                    .sheet(isPresented: $showSend) {
+                        SendInputSheet(runID: run.id, spec: detail?.selfJob?.spec)
+                    }
                 Button("Cancel Run…", role: .destructive) {
                     confirmCancel = true
                 }
@@ -552,6 +570,143 @@ struct LogView: View {
         case "stderr": .orange
         case "event": .secondary
         default: .primary
+        }
+    }
+}
+
+// MARK: - Send a follow-up to a running job (R38)
+
+/// Steer a running job by writing to its stdin. Delivery is honest about job kind:
+/// a `command` job receives the text live; agent (`claude`/`auto`/`codex`) and
+/// `docker` jobs run with stdin closed, so the control plane queues the message but
+/// the worker drops it. The gate (RoostKit `InputKindGate`, Linux-tested) decides
+/// which, and we say so BEFORE sending — never pretend a dropped message landed.
+struct SendInputSheet: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+
+    let runID: String
+    /// This run's spec; nil while the job is still being fetched. When nil we let
+    /// the user send anyway (the server is authoritative) but can't pre-judge.
+    let spec: JSONValue?
+
+    @State private var text = ""
+    @State private var sending = false
+    @State private var outcome: String?       // delivered/dropped, learned after send
+    @State private var error: String?
+
+    /// Honest pre-send verdict from the spec, if known.
+    private var delivery: InputDelivery? {
+        spec.map { InputKindGate.delivery(for: $0) }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Send to running job").font(.headline)
+
+            deliveryNotice
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Message").font(.caption).foregroundStyle(.secondary)
+                TextEditor(text: $text)
+                    .font(.system(size: 12, design: .monospaced))
+                    .frame(minWidth: 360, minHeight: 90)
+                    .overlay(RoundedRectangle(cornerRadius: 6)
+                        .stroke(.quaternary, lineWidth: 1))
+            }
+
+            if let outcome {
+                Label(outcome, systemImage: "info.circle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if let error {
+                Label(error, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+
+            HStack {
+                Spacer()
+                Button("Close") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button("Send") { send() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || sending)
+                if sending { ProgressView().controlSize(.small) }
+            }
+        }
+        .padding(20)
+        .frame(width: 440)
+    }
+
+    /// The up-front honesty banner: green when this kind delivers live, orange with
+    /// the reason when it'll be dropped.
+    @ViewBuilder
+    private var deliveryNotice: some View {
+        switch delivery {
+        case .delivered:
+            Label("This is a command job — your message is written to its live stdin.",
+                  systemImage: "checkmark.circle")
+                .font(.caption)
+                .foregroundStyle(.green)
+        case .dropped(let reason):
+            Label(reason, systemImage: "exclamationmark.triangle")
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+        case nil:
+            Label("Whether this lands live depends on the job kind — only command jobs receive input.",
+                  systemImage: "questionmark.circle")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func send() {
+        let message = text
+        error = nil
+        outcome = nil
+        sending = true
+        Task { @MainActor in
+            defer { sending = false }
+            do {
+                _ = try await model.store.sendInput(to: runID, text: message)
+                text = ""
+                await reportOutcome()
+            } catch RoostClientError.conflict(let why) {
+                error = why  // terminal job: 409
+            } catch RoostClientError.server(let status, let why) where status == 413 {
+                error = why.isEmpty ? "Message too long (over 64 KiB)." : why
+            } catch {
+                self.error = error.localizedDescription
+            }
+        }
+    }
+
+    /// Poll the inputs list once for the honest delivered/dropped result. The ack is
+    /// always `queued`; the worker resolves it on its next heartbeat, so give it a
+    /// moment, then read the latest input's state.
+    private func reportOutcome() async {
+        guard let client = model.store.client else { return }
+        for _ in 0..<5 {
+            try? await Task.sleep(nanoseconds: 700_000_000)
+            guard let resp = try? await client.jobInputs(id: runID),
+                  let latest = resp.inputs.last else { continue }
+            switch latest.state {
+            case "delivered":
+                outcome = "Delivered to the job's stdin."
+                return
+            case "dropped":
+                outcome = "Dropped: \(latest.detail ?? "this job kind can't receive live input")."
+                return
+            default:
+                continue  // still queued — keep waiting
+            }
+        }
+        if outcome == nil {
+            outcome = "Queued — the worker will deliver or drop it on its next heartbeat."
         }
     }
 }
