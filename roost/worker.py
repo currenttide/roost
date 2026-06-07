@@ -2098,8 +2098,19 @@ class Worker:
                     await proc.wait()
                 except Exception:  # noqa: BLE001
                     pass
+            # Normal/timeout exit: the proc has exited, so the relays hit EOF and
+            # finish on their own — drain them to capture any buffered output.
             await asyncio.gather(t1, t2, return_exceptions=True)
         finally:
+            # [R31] Cancel + await the relay tasks on EVERY exit path. On the
+            # normal/timeout path they are already done (the gather above awaited
+            # them), so cancel is a no-op. On a CancelledError raised out of
+            # asyncio.wait_for(proc.wait(), ...) the gather above is SKIPPED and the
+            # proc is still alive, so the relays would otherwise park in readline()
+            # forever — leaking unowned tasks. Cancelling here terminates them.
+            for t in (t1, t2):
+                t.cancel()
+            await asyncio.gather(t1, t2, return_exceptions=True)
             # Deregister and reap on EVERY path (success, timeout, cancel-kill).
             procs = self._aux_procs.get(job_id)
             if procs is not None:

@@ -1036,6 +1036,92 @@ def test_oneshot_agent_keeps_bwrap_argv_intact_with_system_prompt(monkeypatch):
     )
 
 
+def test_oneshot_agent_cancels_relay_tasks_on_cancellation(monkeypatch):
+    """[R31] When _oneshot_agent is cancelled while parked in
+    `asyncio.wait_for(proc.wait(), ...)`, it must cancel its two stdout/stderr
+    relay tasks in a `finally`. Pre-fix the gather(t1, t2) lived in the `try`, so
+    on CancelledError the relays were left pending forever (unowned tasks →
+    'task was destroyed but it is pending' warnings + cross-test interference)."""
+
+    class _NeverReader:
+        """Relay stand-in: parks in readline() forever (never yields EOF), so the
+        only thing that can finish a relay task is cancellation."""
+
+        async def readline(self) -> bytes:
+            await asyncio.sleep(3600)
+            return b""
+
+    class _HangingProc:
+        """asyncio.subprocess stand-in whose wait() never returns, so the parent
+        can be cancelled precisely while inside `asyncio.wait_for(proc.wait())`.
+        wait() sets `parked` once suspended so the driver can cancel at that point."""
+
+        def __init__(self, parked: asyncio.Event) -> None:
+            self.pid = 424242
+            self.returncode = None
+            self.stdout = _NeverReader()
+            self.stderr = _NeverReader()
+            self._parked = parked
+
+        async def wait(self) -> int:
+            self._parked.set()
+            await asyncio.sleep(3600)
+            return 0
+
+    w = Worker("http://127.0.0.1:9", "tok", "w1", self_test=False)
+    w.policy = {}  # plain (non-bwrap) path — argv building is irrelevant here
+    monkeypatch.setattr("roost.worker.shutil.which", lambda name: f"/usr/bin/{name}")
+
+    # Capture the two relay tasks _oneshot_agent creates (the `rel` coroutines).
+    relays: list[asyncio.Task] = []
+    real_create_task = asyncio.create_task
+
+    def _tracking_create_task(coro, *a, **k):
+        t = real_create_task(coro, *a, **k)
+        if getattr(coro, "__name__", None) == "rel":
+            relays.append(t)
+        return t
+
+    monkeypatch.setattr(asyncio, "create_task", _tracking_create_task)
+
+    async def _drive() -> int:
+        parked = asyncio.Event()
+
+        async def _fake_spawn(*argv, **kwargs):
+            return _HangingProc(parked)
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_spawn)
+
+        task = real_create_task(
+            w._oneshot_agent("job-B", "do the thing", label="verify", timeout_s=3600.0)
+        )
+        # Wait until _oneshot_agent has spawned the proc, created both relay tasks,
+        # and is genuinely suspended inside `asyncio.wait_for(proc.wait(), ...)`.
+        await asyncio.wait_for(parked.wait(), timeout=5.0)
+
+        # Cancel the parent the way a server cancel / job teardown does.
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.sleep(0)  # let the parent's `finally` cleanup run
+
+        # Inspect WHILE the loop is still alive — asyncio.run() cancels leftover
+        # tasks at shutdown, which would mask the leak after the loop closed.
+        leaked = [t for t in relays if not t.done()]
+        for t in leaked:  # tidy up so asyncio.run shutdown stays quiet
+            t.cancel()
+        return len(leaked)
+
+    leaked_count = asyncio.run(_drive())
+    asyncio.run(w.close())
+
+    assert len(relays) == 2, f"expected 2 relay tasks, tracked {len(relays)}"
+    assert leaked_count == 0, (
+        f"{leaked_count} relay task(s) left PENDING after _oneshot_agent was "
+        "cancelled — the relays must be cancelled in a `finally` on CancelledError"
+    )
+
+
 def test_run_job_oversized_line_does_not_kill_relay():
     """[R11] One >64 KiB stdout line must not crash the relay task (pre-fix it
     raised ValueError out of stream.readline() and silently lost every
