@@ -2120,3 +2120,87 @@ Entries are written by the loop; humans read, never need to edit.
   Emulator killed, app uninstalled, test pairing token revoked, worktrees removed.
   Iteration #23 totals: 3/3 shipped (PRs #84 #85 #86), tests 823 → 828, both
   user-test BLOCKERS cleared, all judges approved round 1.
+
+## 2026-06-07 ~18:23 UTC — R78: publish degrades gracefully across CP versions (iteration #24)
+- Verdict: shipped
+- Branch/PR: loop/r78-publish-compat / https://github.com/currenttide/roost/pull/87 (merged bd65a96)
+- What changed: one-shot `POST /publish` fallback broadened from 422-only to any
+  non-2xx EXCEPT auth (401/403 — fallback would fail identically); if the blob
+  flow also fails, both errors surface, LEADING with the one-shot's, so genuine
+  new-CP errors are never masked. Healthz version-preflight REJECTED: the
+  deployed CP advertises `version: 0.2.0` yet still 500s on raw-tar one-shot —
+  the version field is demonstrably unreliable; the response is the honest
+  signal. Contract documented in code comment + docstring (cli.py ~1517).
+- Evidence:
+  - A1 fail-first: 2 fallback tests fail on master with the user-reported
+    `publish failed: HTTP 500: Internal Server Error`
+  - `python -m pytest -q` → 834 passed (828 + 6, incl. a judge-requested
+    blob-ok-then-publish-fails case)
+  - LIVE old-CP proof: master CLI → HTTP 500; fixed CLI → published
+    r78probe.roost.pub, served 200 with exact content via fallback; site
+    deleted after (DELETE → 200), pre-existing `hello` site untouched
+- Judge: approve (round 1) — re-ran fails-on-master + full suite; one minor gap
+  flagged (missing test) and addressed in-PR
+- Models: implementer claude-opus-4-8[1m] / judge claude-sonnet-4-6
+- Notes: for the human/ops — the live CP's healthz says 0.2.0 but its /publish
+  handler is pre-R7-one-shot: the container genuinely needs the rebuild already
+  filed under Fleet ops in Proposed.
+
+## 2026-06-07 ~18:23 UTC — R75: Android staleness pill fires (iteration #24)
+- Verdict: shipped
+- Branch/PR: loop/r75-staleness-pill / https://github.com/currenttide/roost/pull/88 (merged f65dabd)
+- What changed: Android-only, 4 files. DashboardScreen read the wall clock once
+  per recomposition; identical failed polls produced `equals` data-class states
+  → MutableStateFlow deduped → no recomposition → `nowMs` frozen → `ageSec > 10`
+  never true (user-test hypothesis CONFIRMED by code-read, unlike R74's).
+  Fix: 1s ticker (`LaunchedEffect` + `mutableLongStateOf`) so `nowMs` is real
+  Compose state advancing independent of emissions — chosen over a
+  last-success-timestamp-in-state because that would still need a ticker to
+  re-read "now". Pure decision logic extracted to android-free
+  `model/Staleness.kt` (Format.staleness delegates) so the Linux harness pins
+  the contract.
+- Evidence:
+  - Failing test FIRST: kotlinc → `unresolved reference: Staleness` (captured
+    pre-fix); post-fix Linux harness OK (86 = 81 + 5, incl. a simulated 35s
+    outage asserting the pill fires and tracks)
+  - `python -m pytest -q` → 834 passed (server untouched)
+  - Emulator proof (AVD Pixel_8, REAL outage — `Active default network: none`,
+    ping unreachable): r75-01 baseline no pill → r75-02 amber "data 71s old"
+    pill VISIBLE → r75-03 recovered, pill gone; all judge-inspected
+- Judge: approve (round 1) — re-ran harness + pytest, inspected screenshots,
+  assessed the anti-tautology tradeoff (pure-fn tests pin the contract;
+  screenshots are the behavioral gate — Compose-level tests infeasible in JVM)
+- Models: implementer claude-opus-4-8[1m] / judge claude-sonnet-4-6
+- Notes: emulator coordination worked — sibling R76 created its own
+  Pixel_8_r76 AVD on port 5562 and started only after Pixel_8 was freed.
+
+## 2026-06-07 ~18:23 UTC — R76: follow-up composer on BOTH mobile platforms (iteration #24)
+- Verdict: shipped
+- Branch/PR: loop/r76-followup-composer / https://github.com/currenttide/roost/pull/89 (merged cd4c1c8)
+- What changed: iOS audit found the SAME gap as Android (SessionView footer was
+  Cancel+Tree only; SessionStore had no input path) — composer implemented on
+  both platforms: text follow-up per DESIGN §3.2 (voice excluded: not
+  Linux-testable), gated on non-terminal job state to match the server's
+  409-on-terminal rule. Two additive fixtures (job_input_response,
+  job_inputs_list). New `ROOST_OPEN_SESSION` iOS launch hook (mirrors
+  ROOST_OPEN_PUBLISH) for deterministic Session-screen evidence — also seeds
+  R84 (XCUITest). No server changes.
+- Evidence:
+  - `python -m pytest -q` → 836 passed; fixture drift guard 28 passed
+    (additive-only; existing-fixture churn values-only)
+  - iOS (Mac node, iPhone 17 Pro sim): xcodebuild test → 80/80 (5 new
+    ComposerTests + 1 decode); composer RENDERED via ROOST_PAIR_URI +
+    ROOST_OPEN_SESSION against a scratch 0.2.0 CP — screenshot shows
+    "Follow up…" field + send + live input_queued/GOT:/input_delivered dividers
+  - Android (own AVD Pixel_8_r76:5562): gradle test+assemble green (~92 tests);
+    E2E SEND PROVEN — typed "rerun the failing test", Send → server row
+    state=delivered detail="written to process stdin"; process logged
+    `GOT: rerun the failing test`; screenshot shows "Delivered ✓"
+  - Honest CP note: deployed CP lacks the R38 /input route, so e2e ran against
+    a scratch 0.2.0 CP from branch code on the LAN box, torn down after
+- Judge: approve (round 1) — re-ran pytest + drift guard, verified the iOS
+  audit at merge base, confirmed scope/Done-when/honesty
+- Models: implementer claude-opus-4-8[1m] / judge claude-sonnet-4-6
+- Notes: iteration #24 totals: 3/3 shipped (PRs #87 #88 #89), tests 828 → 836,
+  all judges approved round 1. User-testing majors now ALL cleared
+  (R75/R76/R77/R78); remaining Ranked: R79-R87 (minors + XCUITest + docs).

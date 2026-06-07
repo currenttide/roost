@@ -292,7 +292,7 @@ gradle 9.4.1 + `gradle wrapper` (JAR not committed) `assembleDebug`, `adb instal
 `adb shell input` drive + `adb exec-out screencap` artifact in the PR; pytest green
 (server untouched).
 
-### R75. Android offline staleness pill never fires (StateFlow dedupe freezes the clock) — `open`
+### R75. Android offline staleness pill never fires (StateFlow dedupe freezes the clock) — `done` *(2026-06-07, PR #88 — hypothesis confirmed; real-outage screenshot proof)*
 Surface: mobile/Android/correctness. User-test major (android/11 — 35s confirmed outage,
 no pill). `DashboardViewModel.refreshOnce()` sets `_state.copy(error=…)` keeping the same
 `derived` ref → consecutive failures produce `equals` states → `MutableStateFlow` dedupes
@@ -304,7 +304,7 @@ Done-when: staleness driven by a 1s ticker or an explicit last-success timestamp
 asserted), fix makes it pass; emulator screenshot of the pill during an induced outage
 per the R74 evidence path; pytest green.
 
-### R76. Session follow-up composer missing on mobile (DESIGN §3.2 / API §4) — `open`
+### R76. Session follow-up composer missing on mobile (DESIGN §3.2 / API §4) — `done` *(2026-06-07, PR #89 — both platforms; iOS had the same gap; e2e delivered-to-stdin proven)*
 Surface: mobile/feature. User-test major. Server + CLI landed with R38
 (`POST /jobs/{id}/input`, `roost send`); Android SessionScreen.kt's bottom bar is
 Cancel + Tree only — the headline "react fast: follow up" capability is absent. iOS's
@@ -324,7 +324,7 @@ Done-when: failing test first (stubbed 404 + 500 → friendly one-line error, pa
 the create path); fix; audit the other schedule subverbs for the same bare pattern;
 pytest green.
 
-### R78. `roost publish` fails opaquely against older control planes — `open`
+### R78. `roost publish` fails opaquely against older control planes — `done` *(2026-06-07, PR #87 — non-2xx fallback exc. auth, both-errors surfacing; live old-CP proven)*
 Surface: CLI/robustness. User-test major. Against the deployed 0.1.0 CP the one-shot
 raw-tar POST gets HTTP 500 (old server requires JSON `{blob_id}`) and the CLI's blob-flow
 fallback (`cli.py:1524`) only triggers on 422 → user sees `publish failed: HTTP 500:
