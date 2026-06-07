@@ -341,7 +341,9 @@ def _history_row(run: dict, now: Optional[float] = None) -> tuple[str, str, str,
     usd = cost.get("cost_est_usd")
     cost_str = f"${usd:.2f}" if isinstance(usd, (int, float)) and usd else ""
     age = _rel_time(run.get("finished_at") or run.get("created_at"), now)
-    goal = (run.get("goal") or "").replace("\n", " ").strip()
+    # R86 goal_display: glanceable summary for command jobs; fall back to the
+    # raw goal for older control planes that omit it (R94).
+    goal = (run.get("goal_display") or run.get("goal") or "").replace("\n", " ").strip()
     if len(goal) > 52:
         goal = goal[:49] + "..."
     return (short_id, label, color, worker, cost_str, age, goal)
@@ -372,7 +374,8 @@ def _recent_successes(runs: list[dict], limit: int = 5) -> list[str]:
     for r in runs:
         if r.get("state") != "succeeded":
             continue
-        goal = (r.get("goal") or "").replace("\n", " ").strip()
+        # R94: prefer the glanceable summary; fall back to raw goal (old CP).
+        goal = (r.get("goal_display") or r.get("goal") or "").replace("\n", " ").strip()
         if not goal:
             continue
         goals.append(goal if len(goal) <= 70 else goal[:67] + "...")

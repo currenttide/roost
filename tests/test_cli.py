@@ -384,6 +384,23 @@ def test_history_row_no_cost_and_truncation():
     assert goal.endswith("...") and len(goal) == 52
 
 
+def test_history_row_prefers_goal_display():
+    # R94: a command job carries a glanceable goal_display summary; the row
+    # renders it instead of the raw shell text in `goal`.
+    run = _run(goal="ROOST_FOO=1 python -m train --epochs 100 --lr 0.001",
+               goal_display="train")
+    *_, goal = _history_row(run)
+    assert goal == "train"
+
+
+def test_history_row_falls_back_to_goal_when_no_display():
+    # Old-CP safe: a run without goal_display falls back to the raw goal.
+    run = _run(goal="report the OS")
+    run.pop("goal_display", None)
+    *_, goal = _history_row(run)
+    assert goal == "report the OS"
+
+
 def test_history_row_missing_fields_never_crashes():
     row = _history_row({})  # everything absent
     short_id, label, color, worker, cost_str, age, goal = row
@@ -425,6 +442,17 @@ def test_recent_successes_examples_and_empty():
     # truncation of long goals
     long = _recent_successes([_run(goal="y" * 90)])[0]
     assert long.endswith("...") and len(long) == 70
+
+
+def test_recent_successes_prefers_goal_display():
+    # R94: capabilities examples read the glanceable summary for command jobs,
+    # falling back to the raw goal when goal_display is absent (old CP).
+    with_display = _run(state="succeeded",
+                        goal="ROOST_X=1 python -m foo --bar baz",
+                        goal_display="foo")
+    without = _run(state="succeeded", goal="lint the repo")
+    without.pop("goal_display", None)
+    assert _recent_successes([with_display, without]) == ["foo", "lint the repo"]
 
 
 # ---------- `roost exec`: run a command on one pinned worker ----------
