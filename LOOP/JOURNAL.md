@@ -369,3 +369,39 @@ Entries are written by the loop; humans read, never need to edit.
   first-line model-ID block present)
 - Notes: with R9+R10 the two zero-test modules from the survey are closed.
   Remaining Ranked: R11 (log-append bounds), R13 (fixture drift guard).
+
+## 2026-06-07 02:20 UTC — R11: Bound the log-append path mid-window
+- Verdict: shipped
+- Branch/PR: loop/r11-log-append-bounds / https://github.com/currenttide/roost/pull/19
+- What changed: write-time bounds on job_logs (the sweep prunes only every
+  ~30min). Per-append cap LOG_APPEND_MAX_BYTES=64KiB (bytes, not chars) →
+  413 with a clear client-side instruction; per-job row ceiling (reuses
+  LOG_MAX_ROWS_PER_JOB=5000) inside the append transaction → 429, stdout/
+  stderr only — lifecycle `event` rows exempt so the terminal divider
+  survives stdout spam. A rejected append still bumps last_activity_at
+  (capped ≠ stuck) and still heartbeats the worker. Oversize EVENT payloads
+  slimmed to parseable {"type","truncated":true}, never rejected (the state
+  change already happened). Worker _send_log now surfaces 4xx with detail.
+  BONUS BUG (found BY the live smoke): one line > asyncio's 64KiB stream
+  limit raised ValueError out of readline() and KILLED the relay task,
+  silently losing all later output — both relay sites now drop the line
+  with a loud marker and keep relaying.
+- Evidence:
+  - `python -m pytest -q` → 459 passed in 15.31s (was 454; +5, none removed)
+  - live smoke (scratch CP :8791 + real worker): 70000-char line job →
+    "oversized output line dropped" event + "after-line" stdout row +
+    succeeded (pre-fix run on old code: line vanished, NO marker — the bug);
+    direct posts: 413 oversize, 429 at exactly append #5000 (real 5000-row
+    spam, 51.5s), terminal event 200 at the ceiling
+- Judge: approve (round 1) — re-ran pytest (459), ran its OWN live smoke
+  (:8790: marker + after-line + succeeded; 413 at 65537 bytes; 200 at exactly
+  65536; 413 on multibyte overrun), probed the COMMIT-then-raise transaction
+  state (no 'no transaction active' path), COUNT(*) cost (indexed, bounded by
+  the ceiling), the event-exemption tradeoff (documented, proportionate to
+  the fleet-worker threat model), CPython readline ValueError semantics, and
+  the mobile contract (read path unchanged).
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (fenced
+  first-line model-ID block present)
+- Notes: the relay crash was only discoverable live — the unit suite never
+  pushes a 64KiB line through a real pipe. Evidence-table discipline
+  (live smoke for behavior changes) is earning its keep.

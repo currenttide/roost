@@ -1762,7 +1762,18 @@ class Worker:
             nonlocal tokens_used, declined, decline_reason, result_text
             assert stream is not None
             while True:
-                line = await stream.readline()
+                try:
+                    line = await stream.readline()
+                except ValueError:
+                    # A single output line overran the 64 KiB stream buffer
+                    # (which matches the server's per-append cap). Pre-R11 this
+                    # exception KILLED the relay task, silently losing all
+                    # subsequent output. Drop the line with a loud marker and
+                    # keep relaying; the line's remainder drains as fragments.
+                    await self._send_log(
+                        job_id, "event",
+                        "oversized output line dropped (> 64 KiB stream limit)")
+                    continue
                 if not line:
                     return
                 text = line.decode("utf-8", errors="replace").rstrip("\n")
@@ -2034,7 +2045,13 @@ class Worker:
         async def rel(stream: asyncio.StreamReader) -> None:
             nonlocal tokens, result
             while True:
-                line = await stream.readline()
+                try:
+                    line = await stream.readline()
+                except ValueError:
+                    # Same oversized-line guard as the job relay: never let one
+                    # huge line kill the reader (the rest drains as fragments).
+                    chunks.append("[oversized line dropped]")
+                    continue
                 if not line:
                     return
                 t = line.decode("utf-8", errors="replace").rstrip("\n")
@@ -2113,10 +2130,20 @@ class Worker:
 
     async def _send_log(self, job_id: str, stream: str, data: str) -> None:
         try:
-            await self.client.post(
+            r = await self.client.post(
                 f"/workers/{self.worker_id}/jobs/{job_id}/logs",
                 json={"stream": stream, "data": data},
             )
+            if r.status_code >= 400:
+                # Write-time log bounds (413 oversize / 429 row ceiling): the
+                # job keeps running — logs are observability, not the work —
+                # but say clearly WHY lines are being dropped.
+                try:
+                    detail = r.json().get("detail", r.text)
+                except Exception:  # noqa: BLE001 — non-JSON error body
+                    detail = r.text
+                print(f"[roost] log line dropped by server "
+                      f"({r.status_code}): {str(detail)[:200]}", flush=True)
         except httpx.HTTPError as e:
             print(f"[roost] log POST failed: {e}", flush=True)
 

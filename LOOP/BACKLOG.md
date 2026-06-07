@@ -86,7 +86,7 @@ Done-when: unit tests for `build_url`, `wait_for_health`, `wait_for_worker` et a
 Surface: tests. 232 lines of systemd/launchd install logic, zero tests.
 Done-when: subprocess boundaries mocked; unit/file-generation logic asserted for both systemd and launchd paths; pytest green.
 
-### R11. Bound the log-append path mid-window — `open`
+### R11. Bound the log-append path mid-window — `done` *(2026-06-07, PR #19 — 64KiB/append 413 + 5000-row 429 at write time; relay crash-on-oversize fixed)*
 Surface: backend/robustness. *(Re-scoped 2026-06-05: `_prune_logs` already caps rows per job on a sweep cadence, roost/server.py:1416.)* Residual: between sweeps, unbounded POSTs can still bloat `job_logs` — no append-side size/rate cap.
 Done-when: per-append size cap + per-job rate or row ceiling enforced at write time with a clear worker-side error; oversized-append test; pytest green.
 

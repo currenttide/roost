@@ -983,3 +983,30 @@ def test_native_sandbox_flag_preferred_over_bwrap(monkeypatch):
     assert argv[0] == "claude"
     assert "--sandbox" in argv
     assert "bwrap" not in argv
+
+
+def test_run_job_oversized_line_does_not_kill_relay():
+    """[R11] One >64 KiB stdout line must not crash the relay task (pre-fix it
+    raised ValueError out of stream.readline() and silently lost every
+    subsequent line). The line is dropped with a loud event marker; later
+    output still relays; the job still succeeds."""
+    async def go():
+        w, events, logs = _mk_runjob_worker({})
+        await asyncio.wait_for(
+            w.run_job({"id": "jt-big", "spec": {
+                "kind": "command",
+                "command": "python3 -c \"print('x'*70000); print('after-line')\"",
+            }}),
+            timeout=30.0)
+        await w.close()
+        terminal = [e for e in events if e.get("type") in ("succeeded", "failed")]
+        assert terminal and terminal[-1]["type"] == "succeeded"
+        # The oversized line was dropped with a clear marker...
+        assert any("oversized output line dropped" in d
+                   for s, d in logs if s == "event")
+        # ...and the relay SURVIVED: the next line still arrived.
+        assert any(d == "after-line" for s, d in logs if s == "stdout")
+        # The 70k payload itself never made it through as one line.
+        assert not any(len(d) >= 70000 for _, d in logs)
+
+    asyncio.run(go())
