@@ -659,3 +659,30 @@ Entries are written by the loop; humans read, never need to edit.
 - Notes: lease-expiry requeue deliberately does NOT restart the grace
   window (real failures ≠ declines) — the analog question filed to
   Proposed. Next: R20 (prefer-by-name, last Ranked item).
+
+## 2026-06-07 08:05 UTC — R20: prefer-by-name parity with target
+- Verdict: shipped
+- Branch/PR: loop/r20-prefer-by-name / https://github.com/currenttide/roost/pull/28
+- What changed: two-layer fix. (1) placement_score: `preferred` (dict or
+  bare-string form) matches worker id OR name — parity with target.
+  (2) The deeper half the e2e test caught: the server's row lifts
+  (_score_worker_row + the other_rows SELECT) never carried `name` at all,
+  so the bonus couldn't fire server-side even with (1) — the routing test
+  failed on the unit fix alone. README prefer line now documents <id|name>.
+- Evidence:
+  - `python -m pytest -q` → 535 passed in 16.93s (was 533; +2, none removed)
+  - unit: by-name == by-id == bare-string == base+1000 exactly; non-match=0
+  - e2e (real wire via TestClient): non-preferred poll inside the grace
+    window → 204; the worker preferred BY NAME takes the job
+- Judge: approve (round 1) — re-ran both gates; confirmed the /tmp repro
+  still TypeErrors (wrong signature, as the slate judge flagged) and the
+  re-anchored in-suite unit test pins the same property; probed NULL-name
+  workers (no false bonus), prefer=None guard, name/ID ambiguity (explicit
+  parity with target's same ambiguity, soft hint anyway), and confirmed
+  exactly two _score_worker_row call sites both updated.
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (fenced
+  first-line model-ID block present)
+- Notes: A1 hunt #1 fully consumed — all 4 reproduced bugs fixed (R18-R20).
+  RANKED DRY → replenishment cycle #3 next wake; A2 coverage items
+  (worker.py 55%, mcp.py 59%, schema.py 60%) are first in line per the
+  cycle-#2 deferral; A1 rotation continues at blobs/publish serving.

@@ -266,7 +266,7 @@ budget: { max_wallclock_min: 240 }
 ```
 
 **Placement** = hard `requires:` (`gpu_vram_gb`, `tools`, `docker_gpu`, `hostname: "==<name>"`)
-plus optional soft `prefer: { worker: "<id>" }`, or a hard `target: "<worker id|name>"` that
+plus optional soft `prefer: { worker: "<id|name>" }`, or a hard `target: "<worker id|name>"` that
 pins a job to exactly one worker (it stays queued until that worker is free). Runnable specs
 live in [`examples/`](examples/).
 

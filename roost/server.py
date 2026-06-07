@@ -917,6 +917,7 @@ def _score_worker_row(row: sqlite3.Row) -> dict[str, Any]:
     """Lift a worker row into the dict shape placement_score expects."""
     return {
         "id": row["id"],
+        "name": row["name"],  # prefer resolves id OR name (R20)
         "status": row["status"],
         "capacity": row["capacity"],
         "capabilities": json.loads(row["capabilities"]),
@@ -997,8 +998,8 @@ def _try_assign_one(db_path: Path, worker_id: str) -> Optional[dict]:
             # us (idle, or busy-but-not-saturated). Saturated workers carry
             # status='busy' and are excluded.
             other_rows = conn.execute(
-                "SELECT id, status, capacity, capabilities, last_assigned_at FROM workers "
-                "WHERE id != ? AND status='idle' AND last_seen >= ?",
+                "SELECT id, name, status, capacity, capabilities, last_assigned_at "
+                "FROM workers WHERE id != ? AND status='idle' AND last_seen >= ?",
                 (worker_id, now - STALE_AFTER),
             ).fetchall()
             others = []

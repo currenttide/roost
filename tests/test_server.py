@@ -1544,3 +1544,30 @@ def test_decline_escalation_and_skip_still_hold(client: TestClient):
     row = client.get(f"/jobs/{job['id']}").json()
     assert row["state"] == "failed"
     assert "declined by all 2" in row["error"]
+
+
+def test_prefer_by_name_routes_inside_grace_window(client: TestClient):
+    # [R20] end-to-end: with the job inside the placement-grace window, a
+    # non-preferred poller defers to the worker preferred BY NAME.
+    wa, creda = _enroll_worker(client, {"tools": ["python3"]})
+    ha = {"Authorization": f"Bearer {creda}"}
+    # Second worker named distinctly; prefer it by NAME.
+    r = client.post("/enroll-tokens", json={"label": "t2"})
+    tok = r.json()["token"]
+    r = client.post("/enroll", json={"token": tok, "name": "the-chosen-one",
+                                     "capabilities": {"tools": ["python3"]}},
+                    headers={"Authorization": ""})
+    wb, credb = r.json()["worker_id"], r.json()["credential"]
+    hb = {"Authorization": f"Bearer {credb}"}
+
+    job = client.post("/jobs", json={
+        "command": "echo hi", "requires": {"tools": ["python3"]},
+        "prefer": {"worker": "the-chosen-one"}}).json()
+
+    # Non-preferred worker polls first, inside the grace window → defers.
+    r = client.get(f"/workers/{wa}/poll", params={"timeout": 0}, headers=ha)
+    assert r.status_code == 204
+    # The preferred worker (by NAME) takes it.
+    got = client.get(f"/workers/{wb}/poll", params={"timeout": 0},
+                     headers=hb).json()
+    assert got["id"] == job["id"]

@@ -117,7 +117,7 @@ Done-when: non-numeric cap never satisfies a numeric-rhs constraint (all operato
 Surface: backend/robustness. Two bugs, one code region (server.py declined branch): (a) requeue keeps the old created_at, so one decline permanently arms the anti-starvation override — competitive placement/prefer abandoned; (b) declines consume the attempt counter — two declines + default max_attempts=2 means the first REAL execution dies on lease expiry with zero retries. Repro: test_decline_requeue_restarts_placement_grace + test_declines_do_not_consume_the_attempt_budget (both FAIL on master).
 Done-when: decline+requeue restarts the grace window and does not consume the attempt budget (semantics documented in code); both repro tests pass; no regression in MAX_DECLINES/declined_by/escalation tests; pytest green + live smoke (placement behavior change).
 
-### R20. prefer-by-name parity with target — `open` `self-promoted` *(A1 hunt #1, 2026-06-07, judge-approved; failing repro test — re-anchor it to the real placement_score signature when implementing)*
+### R20. prefer-by-name parity with target — `done` *(2026-06-07, PR #28 — two-layer fix: matcher + the server row lifts that never carried `name`)* `self-promoted`
 Surface: backend/correctness. placement_score honors prefer.worker only as an ID; `target` resolves id OR name — prefer by name silently no-ops (+0 instead of +1000). README documents prefer with an id only, so also note the name form once supported.
 Done-when: prefer matches id or name; repro (against the real signature) + a grace-window routing test pass; README prefer line updated; pytest green.
 
