@@ -178,7 +178,7 @@ struct PublishPane: View {
                          ? "URL slug: \(slug)"
                          : "Slug must be lowercase letters, numbers, or hyphens (≤40).")
                         .font(.caption2)
-                        .foregroundStyle(PublishSlug.isValid(pub.name) ? .secondary : .red)
+                        .foregroundStyle(PublishSlug.isValid(pub.name) ? Color.secondary : Color.red)
                 }
             }
 
