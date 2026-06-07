@@ -1465,6 +1465,175 @@ def test_publish_list_403_is_actionable(monkeypatch):
     assert "admin auth required to list sites" in res.output
 
 
+# ---------- `roost publish <dir>`: R78 cross-version compatibility ----------
+# The one-shot raw-tar POST /publish is new (R7). Against an OLDER control
+# plane (the deployed 0.1.0) the raw body is parsed as JSON and the server
+# 500s; the CLI must degrade to the two-step blob flow on ANY non-2xx from
+# the one-shot — not only on 422 — and must NOT silently mask a genuine
+# new-CP error (if the fallback also fails, the original error is surfaced).
+
+
+def _site_full(slug="hello", files=1, size=512):
+    return {"slug": slug, "files": files, "size": size,
+            "url": f"http://cp/pub/{slug}/", "created_at": 0, "updated_at": 0}
+
+
+def _publish_dir(tmp_path):
+    """A minimal built site directory to publish."""
+    d = tmp_path / "site"
+    d.mkdir()
+    (d / "index.html").write_text("<h1>hi</h1>")
+    return d
+
+
+def _mock_publish(monkeypatch, routes, rec=None):
+    """Like `_mock_ctx` but also stubs `_resolve` so the publish command's
+    loopback-note lookup doesn't read real config/env."""
+    monkeypatch.setattr(roost_cli, "_resolve",
+                        lambda _ctx: ("http://cp", "tok", None))
+    return _mock_ctx(monkeypatch, routes, rec)
+
+
+def test_publish_oneshot_500_falls_back_to_blob_flow(tmp_path, monkeypatch):
+    # Old CP (0.1.0): the raw-tar one-shot POST 500s (it tries to parse the
+    # gzip body as JSON). The CLI must fall back to staging a blob then
+    # publishing by blob_id, and succeed.
+    rec = _Recorder()
+    state = {"oneshot_seen": False}
+
+    def publish_handler(req):
+        # JSON body → two-step path (success); raw body → old-CP 500.
+        ctype = req.headers.get("content-type", "")
+        if "application/json" in ctype:
+            return httpx.Response(200, json=_site_full())
+        state["oneshot_seen"] = True
+        return httpx.Response(500, text="Internal Server Error")
+
+    _mock_publish(monkeypatch, {
+        "POST /publish": publish_handler,
+        "POST /blobs": httpx.Response(200, json={"id": "blob-1"}),
+    }, rec)
+    res = CliRunner().invoke(
+        roost_cli.publish, [str(_publish_dir(tmp_path)), "--name", "hello"],
+        obj={})
+    assert res.exit_code == 0, res.output
+    assert state["oneshot_seen"]                       # one-shot was tried first
+    assert "live:" in res.output
+    # The blob flow ran: a /blobs upload then a JSON /publish.
+    assert any(r.method == "POST" and r.url.path == "/blobs"
+               for r in rec.requests)
+
+
+def test_publish_oneshot_404_falls_back_to_blob_flow(tmp_path, monkeypatch):
+    # Endpoint shape differs on an old CP / missing route → still recover.
+    rec = _Recorder()
+
+    def publish_handler(req):
+        if "application/json" in req.headers.get("content-type", ""):
+            return httpx.Response(200, json=_site_full())
+        return httpx.Response(404, text="Not Found")
+
+    _mock_publish(monkeypatch, {
+        "POST /publish": publish_handler,
+        "POST /blobs": httpx.Response(200, json={"id": "blob-2"}),
+    }, rec)
+    res = CliRunner().invoke(
+        roost_cli.publish, [str(_publish_dir(tmp_path)), "--name", "hello"],
+        obj={})
+    assert res.exit_code == 0, res.output
+    assert "live:" in res.output
+
+
+def test_publish_oneshot_500_then_fallback_also_fails_surfaces_both(
+        tmp_path, monkeypatch):
+    # A GENUINE new-CP failure: the one-shot 500s AND the blob flow also
+    # fails. The CLI must not pretend it worked — it surfaces the original
+    # one-shot error, not just the fallback's, so a real server bug isn't
+    # masked behind a confusing blob-flow message.
+    def publish_handler(req):
+        # Both paths fail (same broken server).
+        return httpx.Response(500, text="boom-oneshot")
+
+    _mock_publish(monkeypatch, {
+        "POST /publish": publish_handler,
+        "POST /blobs": httpx.Response(500, text="boom-blob"),
+    })
+    res = CliRunner().invoke(
+        roost_cli.publish, [str(_publish_dir(tmp_path)), "--name", "hello"],
+        obj={})
+    assert res.exit_code != 0
+    # The original one-shot failure is reported (not silently swallowed).
+    assert "500" in res.output
+    assert "boom-oneshot" in res.output
+    # And it's clear no path worked.
+    assert "publish failed" in res.output.lower()
+
+
+def test_publish_oneshot_500_blob_ok_but_publish_json_fails_surfaces_both(
+        tmp_path, monkeypatch):
+    # Fallback gets further — the blob upload succeeds — but the second,
+    # JSON /publish step still fails. The original one-shot error must still
+    # lead, with the fallback's failure appended (no masking, no success claim).
+    def publish_handler(req):
+        # Both the raw one-shot and the JSON two-step return non-2xx here.
+        return httpx.Response(500, text="boom-oneshot")
+
+    _mock_publish(monkeypatch, {
+        "POST /publish": publish_handler,
+        "POST /blobs": httpx.Response(200, json={"id": "blob-3"}),
+    })
+    res = CliRunner().invoke(
+        roost_cli.publish, [str(_publish_dir(tmp_path)), "--name", "hello"],
+        obj={})
+    assert res.exit_code != 0
+    assert "boom-oneshot" in res.output            # original one-shot error leads
+    assert "publish failed" in res.output.lower()
+    assert "blob flow" in res.output.lower()       # fallback failure noted
+
+
+def test_publish_oneshot_403_is_actionable_no_fallback(tmp_path, monkeypatch):
+    # A 403 is an auth problem, not a version mismatch — surface the admin
+    # hint directly; the blob flow would just 403 again.
+    called = {"blobs": False}
+
+    def blobs_handler(req):
+        called["blobs"] = True
+        return httpx.Response(403, json={"detail": "no"})
+
+    _mock_publish(monkeypatch, {
+        "POST /publish": httpx.Response(403, json={"detail": "no"}),
+        "POST /blobs": blobs_handler,
+    })
+    res = CliRunner().invoke(
+        roost_cli.publish, [str(_publish_dir(tmp_path)), "--name", "hello"],
+        obj={})
+    assert res.exit_code != 0
+    assert "admin" in res.output.lower() or "token" in res.output.lower()
+    # No blob-flow attempt for an auth failure.
+    assert not called["blobs"]
+
+
+def test_publish_oneshot_success_no_fallback(tmp_path, monkeypatch):
+    # New CP, happy path: the one-shot 2xx is used as-is; the blob flow is
+    # never touched.
+    called = {"blobs": False}
+
+    def blobs_handler(req):
+        called["blobs"] = True
+        return httpx.Response(200, json={"id": "blob-x"})
+
+    _mock_publish(monkeypatch, {
+        "POST /publish": httpx.Response(200, json=_site_full()),
+        "POST /blobs": blobs_handler,
+    })
+    res = CliRunner().invoke(
+        roost_cli.publish, [str(_publish_dir(tmp_path)), "--name", "hello"],
+        obj={})
+    assert res.exit_code == 0, res.output
+    assert "live:" in res.output
+    assert not called["blobs"]
+
+
 # ---------- `roost tree`: R33 ↳why + --health rendering ----------
 
 
