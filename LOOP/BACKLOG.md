@@ -119,7 +119,7 @@ Done-when: `roost backup <dest.db>` (admin) performs an online backup via the sq
 Surface: mobile/feature. North star #3 (complete surfaces). The schedule verb landed server-side with R8 (PR #16); mobile API.md has no schedule surface and neither client can list/create/toggle schedules. Mirror the proven R34 pattern.
 Done-when: API.md documents the schedule endpoints (list/create/enable/disable/delete per server.py's /schedules routes); record_fixtures.py records them (values-only additive regen; drift guard green); iOS + Android decode layers + Linux-runnable tests; pytest + both mobile harnesses green.
 
-### R41. Capability detection: distinguish "no GPU" from "GPU detection failed" — `open` `self-promoted` `feature`
+### R41. Capability detection: distinguish "no GPU" from "GPU detection failed" — `done` *(2026-06-07, PR #50)* `self-promoted` `feature`
 Surface: worker/operability. North star #2. Pre-existing Proposed item: when GPU probing errors (driver hiccup, nvidia-smi missing vs failing), the worker silently advertises no GPU — placement then quietly routes GPU jobs elsewhere and operators can't tell a bare node from a broken one.
 Done-when: detection failure is distinguishable from absence in the worker's advertised capabilities and/or logs (additive — e.g. `gpu_detection: "failed"` capability or a loud structured log + worker event); matcher behavior for GPU constraints unchanged for both cases (failed ≠ schedulable); tests for probe-success/absence/failure paths; pytest green.
 

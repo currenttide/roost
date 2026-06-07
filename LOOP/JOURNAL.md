@@ -1197,3 +1197,27 @@ Entries are written by the loop; humans read, never need to edit.
   min_interval, MCP docstring examples, verify.py e2e coverage, publish UI wiring
   (device-heavy), R37 client push wiring (device work), CLI --version (tiny, A6
   fodder for cycle #8), mac follow-ups, lease-expiry grace analog question.
+
+## 2026-06-07 ~00:50 UTC — R41: GPU detection failed vs absent
+- Verdict: shipped
+- Branch/PR: loop/r41-gpu-detection-failed / https://github.com/currenttide/roost/pull/50 (merged 7ae3531)
+- What changed: additive `gpu_detection: "failed"` capability, set ONLY when
+  nvidia-smi exists but the probe errors (nonzero exit / timeout / OSError);
+  absent entirely on genuinely-bare nodes. New _gpu_probe_failed() classifier keeps
+  _detect_gpus()'s list[dict] contract (existing monkeypatch tests untouched); loud
+  structured log GPU_DETECTION_FAILED host=… reason=…. DESIGN WIN: rides R18's
+  matcher rule for free — numeric GPU constraints fail for both absent and failed,
+  matcher.py UNMODIFIED, broken nodes can never schedule as GPU nodes. Operator
+  visibility: `roost workers` renders gpu:DETECTION-FAILED (red); `roost
+  capabilities` lists failed nodes with a check-the-driver hint. Tegra/Jetson
+  classified by the existing fallback before this branch — never mislabeled.
+- Evidence:
+  - `python -m pytest -q` → 625 passed (+10: all four probe paths non-vacuous,
+    matcher pin, CLI rendering)
+- Judge: both phases approve — phase 1 confirmed the conflation real
+  (worker.py:108-109 returned [] identically to no-nvidia-smi); phase 2 re-ran
+  pytest, traced the failed-cap-vs-numeric-constraint path, confirmed matcher
+  untouched
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p
+  read-only, fenced MODEL line present)
+- Notes: iteration #6 slot 3. R39 (backup) + R40 (mobile schedules) in flight.
