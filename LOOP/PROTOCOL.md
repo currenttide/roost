@@ -6,42 +6,54 @@ exactly — deviations get logged in the journal, not silently taken.
 
 ## Iteration shape
 
+Each iteration dispatches **up to 3 items in parallel**, each running in its own
+isolated subagent. The judge gate and evidence rules are unchanged — parallelism
+speeds throughput, not quality bar.
+
 1. **Read** `LOOP/BACKLOG.md` and the tail of `LOOP/JOURNAL.md` (resume any item
    left `in-progress`).
-2. **Pick** the top unblocked item from the Ranked section. One item per iteration.
-   Never pick from Proposed — items reach Ranked only via the human or the
-   Replenishment protocol (below). If Ranked has no unblocked items, run
-   Replenishment instead of an implementation iteration.
-3. **Branch** from `master`: `loop/<item-slug>`.
-4. **Implement** the item, scoped to its Done-when. No drive-by refactors outside
-   the item's scope.
-5. **Verify** per the evidence table below. Run the full gate, not a subset.
-6. **Judge (autoreview)**: spawn an independent judge subagent on a model that
-   **differs from the implementer's** — pass it explicitly on the Agent call
-   (`model: sonnet` while the loop runs on Opus; `model: opus` if the session is
-   ever on Sonnet; never rely on inheritance, which silently yields the same
-   model). The judge gets the backlog item (including its Done-when), the diff,
-   and the draft journal entry, and **must state its exact model ID** (as its
-   system prompt reports it) at the top of every verdict — the journal and PR
-   record both model IDs, so a same-model judging is visible in the audit trail,
-   not silent. The judge:
-   - **re-runs the evidence gate itself** (at minimum `python -m pytest -q`,
-     plus the surface's gate from the table below) — it never trusts pasted output;
-   - checks scope: the diff serves the item, no drive-by changes;
-   - checks honesty: no tests weakened/skipped/deleted, claims stay within the
-     evidence-table caps, Done-when actually met;
-   - returns a structured verdict: `approve` | `revise: <findings>` | `reject: <why>`.
-   Address `revise` findings and re-judge. Three rounds without `approve` →
-   mark the item `blocked: judge` and journal the disagreement honestly
-   (optionally pull in the Codex rescue reviewer as a tiebreak). The implementer
-   never overrules the judge silently.
-7. **Land**: commit, push, open a PR to `master` titled with the backlog item ID.
-   PR body includes the evidence (commands + output tails, artifacts) and the
-   judge's verdict.
-8. **Journal**: append an entry (format below) with verdict
-   `shipped` / `failed` / `blocked` / `in-progress`.
-9. **Update backlog**: mark the item's status. New ideas discovered while working
-   go to Proposed — never self-promote them.
+2. **Pick** the top **3** unblocked items from the Ranked section (or fewer if
+   Ranked has fewer available). Never pick from Proposed — items reach Ranked only
+   via the human or the Replenishment protocol (below). If Ranked has no unblocked
+   items at all, run Replenishment instead of an implementation iteration. Prefer
+   items that touch different files/areas to minimise merge-conflict risk.
+3. **Dispatch** one isolated subagent per item, all in parallel:
+   - Each subagent branches from `master` in its own git worktree:
+     `loop/<item-slug>`.
+   - **Implement** the item, scoped to its Done-when. No drive-by refactors.
+   - **Verify** per the evidence table below. Run the full gate, not a subset.
+   - **Judge (autoreview)**: the subagent spawns its own independent judge on a
+     model that **differs from the implementer's** — pass it explicitly
+     (`model: sonnet` while the loop runs on Opus; `model: opus` if the session
+     is ever on Sonnet; never rely on inheritance). The judge gets the backlog
+     item (including its Done-when), the diff, and the draft journal entry, and
+     **must state its exact model ID** in a fenced block at the top of every
+     verdict. The judge:
+     - **re-runs the evidence gate itself** — never trusts pasted output;
+     - checks scope, honesty, and Done-when satisfaction;
+     - returns `approve` | `revise: <findings>` | `reject: <why>`.
+     Address `revise` findings and re-judge within the same subagent. Three rounds
+     without `approve` → mark `blocked: judge` and report honestly. The subagent
+     never overrules its judge silently.
+   - **Land**: commit, push, open a PR to `master` titled with the backlog item ID.
+     PR body includes evidence and judge verdict. Then **merge the PR immediately**
+     (`gh pr merge --squash --auto` or `gh pr merge --squash` once CI passes) —
+     do not leave approved PRs open for the human to merge manually.
+   - Return a structured result: item ID, verdict, PR URL, merge status, evidence
+     summary, judge verdict and model IDs.
+4. **Journal**: after all subagents complete, append one entry per item (format
+   below) with verdict `shipped` / `failed` / `blocked`.
+5. **Update backlog**: mark each item's status. New ideas discovered while working
+   go to Proposed — never self-promote.
+
+**Merge order for parallel items**: merge in priority order (highest Ranked item
+first) to keep `master` linear. If a lower-priority PR needs a rebase after the
+first merges, the subagent should rebase and re-verify before merging.
+
+**Conflict policy**: if two parallel PRs edit the same lines, merge the higher-
+priority one first, then rebase the second onto the updated `master` and re-run
+the evidence gate before merging. If the rebase is non-trivial, mark the item
+`blocked: merge-conflict` and note it in the journal for the human.
 
 ## Evidence table — claims are capped at what was actually run
 
@@ -66,7 +78,7 @@ exactly — deviations get logged in the journal, not silently taken.
 
 ## Anti-churn rules
 
-- One backlog item per iteration; small diffs.
+- Up to 3 backlog items per iteration; each item's diff stays small and scoped.
 - No refactoring for its own sake — refactors must be a ranked backlog item.
 - When the Ranked section has no unblocked items: run the Replenishment
   protocol below — never invent work outside it.
@@ -169,14 +181,22 @@ that's the right direction" — it's Tier B.
     area in the rotation, or the next uncovered module. Two consecutive
     deepening cycles with zero confirmed findings → long-idle (max wake
     interval) until the repo changes. That is honest patience, not failure.
-- Hard limits regardless of source: one item per iteration, small diffs, every
-  PR through the judge, never weaken a metric to improve another (coverage must
-  not drop to make lint pass; a ratchet gain that regresses another ratchet is
-  a rejection).
+- Hard limits regardless of source: up to 3 items per iteration, each diff stays
+  small and scoped, every PR through the judge, never weaken a metric to improve
+  another (coverage must not drop to make lint pass; a ratchet gain that regresses
+  another ratchet is a rejection).
 - Anti-gaming: deleting code to raise coverage %, trivial tests to inflate
   counts, or reclassifying debts to mint A4 work are all judge-rejectable on
   sight — the judge's standing instruction is to ask "is the codebase actually
   better?"
+
+## Merge authorization
+
+Judge-approved loop PRs are merged automatically (squash) immediately after the
+judge approves — the human's standing authorization covers all judge-approved
+backlog items. Merge order: highest-priority item first. If a PR's CI is
+required and hasn't finished, use `gh pr merge --squash --auto` to queue the
+merge; otherwise `gh pr merge --squash`. Never force-push to master.
 
 ## Security rules (from CLAUDE.md — restated because the loop runs unattended)
 
