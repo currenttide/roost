@@ -1560,3 +1560,27 @@ Entries are written by the loop; humans read, never need to edit.
 - Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only)
 - Notes: iteration #11 slot 1. Publish now reachable from every client surface
   (CLI, MCP, iOS, Android — north star #3 closed for this verb). R54 + R55 in flight.
+
+## 2026-06-07 ~08:00 UTC — R54: coverage ratchet re-measure + cli.py lift
+- Verdict: shipped
+- Branch/PR: loop/r54-cli-coverage / https://github.com/currenttide/roost/pull/66 (merged 0f55867)
+- What changed: tests-only (+52 in test_cli.py; cli.py byte-identical). MEASURE:
+  fresh TOTAL 71% (stale baseline 63% @ 482 tests) — ratchet table updated by the
+  orchestrator this commit. LIFT: cli.py branch 30.0% → 50.4% (+20.4, vs ≥5
+  required); combined 40% → 57%; no module down (both sides re-measured via git
+  stash). Covered: prune-workers, capabilities, history (--failed/--limit/--json),
+  workers (R41 DETECTION-FAILED), schedule + _fmt_interval (all subcommands +
+  error branches), publish --list (passthrough + X-Total-Count hint + 403), tree
+  (R33 ↳why + --health + 404/json/empty), send (404/413 + --wait), backup
+  (missing-dir + transport-error part-file cleanup). R16 style throughout: click
+  CliRunner + httpx MockTransport, zero processes/sockets.
+- Evidence:
+  - `python -m pytest -q` → 707 passed (was 664; +43 net)
+  - judge mutation probes 3/3 caught (history --failed inverted; prune-workers
+    early-return removed; schedule enable/disable boolean swap)
+  - config-isolation: 102 cli tests green under poisoned HOME/XDG/ROOST_URL/TOKEN
+- Judge: approve (round 1) — re-measured both sides itself, ran the probes,
+  verified cli.py untouched after probing
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only)
+- Notes: iteration #11 slot 2. Weakest modules now mcp.py 61% / schema.py 62% —
+  A2 fodder for future cycles. R55 (push client slice) last in flight.

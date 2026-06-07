@@ -173,7 +173,7 @@ Done-when: either repro+fix+tests+pytest green, or a judge-verified refutation d
 Surface: mobile/Android/feature. North star #3. R50 landed the iOS publish screen (PR #63); Android has the decode layers (R34) but no screen. Mirror the iOS UX in the Compose app: pick tar.gz (SAF document picker) → name with slug preview → one-shot publish → show site URL with share intent.
 Done-when: Compose screen wired following the app's existing screen/viewmodel patterns; ALL slug/intent/state logic in a Linux-testable layer (kotlinc+JUnitCore harness) with tests mirroring iOS PublishTests; UI-render claims capped honestly per the evidence table (no Android emulator in the fleet — say so in the PR); pytest green (server untouched).
 
-### R54. Coverage ratchet re-measure + cli.py lift — `open` `self-promoted`
+### R54. Coverage ratchet re-measure + cli.py lift — `done` *(2026-06-07, PR #66 — TOTAL 63→71%, cli.py branch 30→50.4%)* `self-promoted`
 Surface: tests/ratchet. A5+A2: the branch-coverage ratchet baseline is stale (63% TOTAL at 482 tests, 2026-06-07 early; suite now 664). First re-measure and record the new TOTAL; then lift the weakest module — cli.py was 36% branch at last measure (process-spawning paths were excused, but command surfaces like send/backup/schedule/history/prune-workers have grown since R16 with uneven test reach).
 Done-when: fresh `coverage run --branch -m pytest` TOTAL recorded (judge re-measures); targeted tests raise cli.py branch coverage measurably (≥5 points) with real assertions (R16 style: runner + stubbed HTTP, no processes); no module down; pytest green.
 
@@ -294,7 +294,7 @@ first iteration on that ratchet measures and records it here (no code changes).
 | Ratchet | Measure | Baseline | Direction |
 |---|---|---|---|
 | Test pass | `python -m pytest -q` | 347 passed (2026-06-05) | count may grow; failures never tolerated |
-| Branch coverage of `roost/` | `coverage run --branch -m pytest && coverage report` (dev-only dep, never shipped) | **63% TOTAL** (2026-06-07, 482 tests; judge-verified) | up only |
+| Branch coverage of `roost/` | `coverage run --branch -m pytest && coverage report` (dev-only dep, never shipped) | **71% TOTAL** (2026-06-07, 664→707 tests, R54; judge re-measured) | up only |
 | Docs drift | confirmed findings per full drift sweep | 0 (2026-06-07 — sweep found 1+2, R15 fixed all three, judge truth-checked) | stays 0 |
 | Runnable examples | every `examples/*.yaml` accepted by a scratch CP submit | **3/3** (2026-06-07, scratch CP :8789) | stays 100% |
 
