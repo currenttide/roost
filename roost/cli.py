@@ -1489,7 +1489,9 @@ def publish(ctx: click.Context, directory: Optional[str], name: Optional[str],
     to the CP in one transactional call (nothing staged, nothing to dangle),
     which extracts it — live at <cp-url>/pub/<slug>/ immediately. Rebuild and
     re-run to republish (same name replaces the site). Older control planes
-    without one-shot publish get the two-step blob-store flow automatically.
+    that don't accept the one-shot bundle (the deployed 0.1.0 500s on it) fall
+    back to the two-step blob-store flow automatically; if both paths fail you
+    see the original error, not just the fallback's.
     """
     url, _, _ = _resolve(ctx)
     with _ctx_client(ctx) as c:
@@ -1520,20 +1522,43 @@ def publish(ctx: click.Context, directory: Optional[str], name: Optional[str],
         # is staged — a flap mid-publish can't leave a dangling blob behind.
         r = c.post("/publish", params={"name": slug_name}, content=bundle,
                    headers={"Content-Type": "application/octet-stream"})
-        if r.status_code == 422:
-            # Older control plane (pre one-shot /publish rejects a raw body
-            # with a validation 422): fall back to the two-step blob flow.
-            up = c.post(f"/blobs?name={slug_name}.tar.gz", content=bundle)
-            if up.status_code >= 400:
-                raise click.ClickException(
-                    f"upload failed: HTTP {up.status_code}: {up.text}")
-            r = c.post("/publish",
-                       json={"name": slug_name, "blob_id": up.json()["id"]})
-        if r.status_code == 403:
+
+        # --- cross-version compatibility (R78) ---
+        # The one-shot raw-tar POST is new (R7). Older control planes only
+        # know the two-step blob flow and react to a raw body in different,
+        # version-specific ways: the deployed 0.1.0 CP json.loads()es the gzip
+        # bytes and 500s; others 422 (validation) or 404 (no such shape). We
+        # CANNOT enumerate every old failure mode, so the contract is: on ANY
+        # non-2xx from the one-shot — EXCEPT auth (401/403), which a fallback
+        # would only hit again — try the two-step blob flow. To avoid masking
+        # a genuine *new*-CP error (a real 500 shouldn't silently re-route and
+        # confuse the user), if the fallback ALSO fails we report it WITH the
+        # original one-shot error, leading with the one-shot so a real server
+        # bug stays visible. Preflighting /healthz for a version was rejected:
+        # 0.1.0 advertises no version field, so it can't be distinguished
+        # reliably, and an extra round-trip on every publish is wasteful — the
+        # response itself is the most honest signal of what the server supports.
+        if r.status_code in (401, 403):
             raise _admin_403("publish")
         if r.status_code >= 400:
-            raise click.ClickException(
-                f"publish failed: HTTP {r.status_code}: {r.text}")
+            oneshot_err = f"HTTP {r.status_code}: {r.text}"
+            up = c.post(f"/blobs?name={slug_name}.tar.gz", content=bundle)
+            if up.status_code in (401, 403):
+                raise _admin_403("publish")
+            if up.status_code >= 400:
+                raise click.ClickException(
+                    f"publish failed: {oneshot_err}\n"
+                    f"  (also tried the two-step blob flow for older control "
+                    f"planes; that failed too: HTTP {up.status_code}: {up.text})")
+            r = c.post("/publish",
+                       json={"name": slug_name, "blob_id": up.json()["id"]})
+            if r.status_code in (401, 403):
+                raise _admin_403("publish")
+            if r.status_code >= 400:
+                raise click.ClickException(
+                    f"publish failed: {oneshot_err}\n"
+                    f"  (also tried the two-step blob flow for older control "
+                    f"planes; that failed too: HTTP {r.status_code}: {r.text})")
         site = r.json()
 
     if site.get("public_url"):
