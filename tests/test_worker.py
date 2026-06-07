@@ -10,13 +10,16 @@ import pytest
 
 import roost.worker as wmod_R72  # [R72] for DOCKER_TEARDOWN_TIMEOUT + seam patching
 from roost.worker import (
+    AUTO_DEFAULT_MODEL,
     DEFAULT_WALLCLOCK_FALLBACK_MIN,
     DEFAULT_WALLCLOCK_MIN,
     VERIFY_HEAL_TIMEOUT,
     Worker,
     _auto_prefilter,
     _budget_remaining,
+    _build_auto_argv,
     _build_claude_argv,
+    _build_codex_argv,
     _build_docker_argv,
     _resolve_timeout,
     _sanitize_env,
@@ -2491,3 +2494,224 @@ def test_r72_run_job_docker_timeout_teardown_completes_when_daemon_wedged(
         assert w._running == 0, "capacity slot leaked (R25 cleanup did not run)"
 
     asyncio.run(go())
+
+
+# ---------------------------------------------------------------------------
+# [R96] Pure argv-builder coverage: _build_auto_argv + _build_codex_argv.
+# These exercise the bare-worker triage builder and the codex builder directly,
+# asserting EXACT argv shape (positions matter — a fixed-index splice is the R30
+# bug class) and the raised errors on bad/missing input. No subprocess is spawned.
+# ---------------------------------------------------------------------------
+
+
+def _claude_only(name):
+    """shutil.which stub: claude present, everything else (bwrap/codex) absent."""
+    return "/usr/bin/claude" if name == "claude" else None
+
+
+def test_build_auto_argv_missing_task_and_intent_raises(monkeypatch):
+    """No `task` and no `intent` → ValueError before any CLI lookup (line 1085)."""
+    import roost.worker as wm
+
+    monkeypatch.setattr(wm.shutil, "which", _claude_only)
+    with pytest.raises(ValueError, match="auto job requires `task`"):
+        _build_auto_argv(
+            {"kind": "auto"}, "jobX",
+            worker_policy={}, base_url=None, token=None,
+            can_dispatch=False, triage_prompt="TRIAGE", tempfiles=[], cwd="/work")
+
+
+def test_build_auto_argv_falls_back_to_intent_when_no_task(monkeypatch):
+    """`task` is absent but `intent` is present → intent is used as the -p prompt
+    (line 1083: `spec.get("task") or spec.get("intent")`)."""
+    import roost.worker as wm
+
+    monkeypatch.setattr(wm.shutil, "which", _claude_only)
+    monkeypatch.setattr(wm, "_claude_supports_sandbox", lambda: True)
+    argv = _build_auto_argv(
+        {"kind": "auto", "intent": "use the intent text"}, "jobI",
+        worker_policy={}, base_url=None, token=None,
+        can_dispatch=False, triage_prompt="", tempfiles=[], cwd="/work")
+    ci = argv.index("claude")
+    assert argv[ci:ci + 3] == ["claude", "-p", "use the intent text"]
+
+
+def test_build_auto_argv_task_wins_over_intent(monkeypatch):
+    """When both are present, `task` takes precedence over `intent`."""
+    import roost.worker as wm
+
+    monkeypatch.setattr(wm.shutil, "which", _claude_only)
+    monkeypatch.setattr(wm, "_claude_supports_sandbox", lambda: True)
+    argv = _build_auto_argv(
+        {"kind": "auto", "task": "the task", "intent": "the intent"}, "jobT",
+        worker_policy={}, base_url=None, token=None,
+        can_dispatch=False, triage_prompt="", tempfiles=[], cwd="/work")
+    ci = argv.index("claude")
+    assert argv[ci:ci + 3] == ["claude", "-p", "the task"]
+
+
+def test_build_auto_argv_defaults_sandbox_and_model(monkeypatch):
+    """Bare spec (no permissions, no model) → auto defaults to sandboxed execution
+    and AUTO_DEFAULT_MODEL (lines 1090-1093). With native --sandbox support the
+    sandbox default surfaces as the `--sandbox` flag; the model surfaces as
+    `--model <AUTO_DEFAULT_MODEL>`."""
+    import roost.worker as wm
+
+    monkeypatch.setattr(wm.shutil, "which", _claude_only)
+    monkeypatch.setattr(wm, "_claude_supports_sandbox", lambda: True)
+    argv = _build_auto_argv(
+        {"kind": "auto", "task": "do it"}, "jobD",
+        worker_policy={}, base_url=None, token=None,
+        can_dispatch=False, triage_prompt="", tempfiles=[], cwd="/work")
+    assert "--sandbox" in argv, f"default sandbox not applied: {argv!r}"
+    mi = argv.index("--model")
+    assert argv[mi + 1] == AUTO_DEFAULT_MODEL
+
+
+def test_build_auto_argv_respects_explicit_permissions_and_model(monkeypatch):
+    """Spec that pins permissions + model must NOT be overwritten by the auto
+    defaults (the `if not sub.get(...)` guards at 1090/1092 skip)."""
+    import roost.worker as wm
+
+    monkeypatch.setattr(wm.shutil, "which", _claude_only)
+    monkeypatch.setattr(wm, "_claude_supports_sandbox", lambda: True)
+    argv = _build_auto_argv(
+        {
+            "kind": "auto", "task": "do it",
+            "permissions": {"sandbox": False, "mode": "plan"},
+            "model": "claude-haiku-4-9",
+        },
+        "jobP",
+        worker_policy={}, base_url=None, token=None,
+        can_dispatch=False, triage_prompt="", tempfiles=[], cwd="/work")
+    # Explicit model preserved, AUTO_DEFAULT_MODEL not forced.
+    mi = argv.index("--model")
+    assert argv[mi + 1] == "claude-haiku-4-9"
+    assert AUTO_DEFAULT_MODEL not in argv
+    # Explicit sandbox:False + mode:plan → permission-mode plan, no --sandbox.
+    assert "--sandbox" not in argv
+    assert argv[argv.index("--permission-mode") + 1] == "plan"
+
+
+def test_build_auto_argv_splices_triage_prompt_after_claude_p_task(monkeypatch):
+    """The triage system prompt is spliced as `--append-system-prompt <prompt>`
+    immediately after `claude -p <task>` (lines 1106-1112). Exact positions."""
+    import roost.worker as wm
+
+    monkeypatch.setattr(wm.shutil, "which", _claude_only)
+    monkeypatch.setattr(wm, "_claude_supports_sandbox", lambda: True)
+    argv = _build_auto_argv(
+        {"kind": "auto", "task": "build the thing"}, "jobS",
+        worker_policy={}, base_url=None, token=None,
+        can_dispatch=False, triage_prompt="TRIAGE SYS", tempfiles=[], cwd="/work")
+    ci = argv.index("claude")
+    assert argv[ci:ci + 3] == ["claude", "-p", "build the thing"]
+    assert argv[ci + 3:ci + 5] == ["--append-system-prompt", "TRIAGE SYS"], (
+        "triage prompt must be spliced right after `claude -p <task>`, "
+        f"not elsewhere: {argv[ci:ci + 6]!r}"
+    )
+
+
+def test_build_auto_argv_no_triage_prompt_no_splice(monkeypatch):
+    """Empty triage_prompt → the `if triage_prompt:` guard (1106) is false, so NO
+    --append-system-prompt is inserted at all (the 1106->1113 branch)."""
+    import roost.worker as wm
+
+    monkeypatch.setattr(wm.shutil, "which", _claude_only)
+    monkeypatch.setattr(wm, "_claude_supports_sandbox", lambda: True)
+    argv = _build_auto_argv(
+        {"kind": "auto", "task": "x"}, "jobN",
+        worker_policy={}, base_url=None, token=None,
+        can_dispatch=False, triage_prompt="", tempfiles=[], cwd="/work")
+    assert "--append-system-prompt" not in argv
+
+
+def test_build_auto_argv_splices_inside_bwrap_jail_not_into_bwrap_flags(monkeypatch):
+    """[R30 bug class] When the underlying argv is bwrap-wrapped
+    (`bwrap <opts...> -- claude -p <task> ...`), the triage prompt must land
+    AFTER `claude -p <task>` inside the jail — NOT spliced into bwrap's own flags
+    via a fixed argv[:3]. This is the security-relevant anchoring: `argv.index("claude")`
+    (lines 1107-1112) must locate claude past bwrap's `--` separator."""
+    import roost.worker as wm
+
+    # claude AND bwrap present; claude lacks --sandbox → bwrap fallback branch.
+    monkeypatch.setattr(
+        wm.shutil, "which",
+        lambda n: "/usr/bin/" + n if n in ("claude", "bwrap") else None)
+    monkeypatch.setattr(wm, "_claude_supports_sandbox", lambda: False)
+    argv = _build_auto_argv(
+        {"kind": "auto", "task": "do the thing"}, "jobB",
+        worker_policy={"sandbox": "bwrap"},  # NOT trusted; opt-in bwrap policy
+        base_url=None, token=None, can_dispatch=False,
+        triage_prompt="SYS PROMPT", tempfiles=[], cwd="/work")
+    assert argv[0] == "bwrap", f"expected bwrap-wrapped argv, got {argv!r}"
+    # bwrap's leading options must be untouched: `--ro-bind / /` intact.
+    assert argv[1:4] == ["--ro-bind", "/", "/"], (
+        "bwrap options corrupted — splice landed inside bwrap's flags: "
+        f"{argv[1:6]!r}"
+    )
+    sep = argv.index("--")
+    ci = argv.index("claude")
+    assert ci > sep, "claude must appear after bwrap's `--` separator"
+    assert argv[ci:ci + 3] == ["claude", "-p", "do the thing"]
+    assert argv[ci + 3:ci + 5] == ["--append-system-prompt", "SYS PROMPT"], (
+        "triage prompt must sit inside the jail after `claude -p <task>`, "
+        f"not in bwrap's flags: {argv[ci:ci + 6]!r}"
+    )
+
+
+def test_build_auto_argv_passes_args_through(monkeypatch):
+    """spec `args` flow through _build_claude_argv into the final argv, and the
+    triage splice does not disturb them (they remain after the claude flags)."""
+    import roost.worker as wm
+
+    monkeypatch.setattr(wm.shutil, "which", _claude_only)
+    monkeypatch.setattr(wm, "_claude_supports_sandbox", lambda: True)
+    argv = _build_auto_argv(
+        {"kind": "auto", "task": "t", "args": ["--max-turns", "7"]}, "jobA",
+        worker_policy={}, base_url=None, token=None,
+        can_dispatch=False, triage_prompt="SYS", tempfiles=[], cwd="/work")
+    assert "--max-turns" in argv
+    assert argv[argv.index("--max-turns") + 1] == "7"
+    # passthrough args come AFTER the spliced triage prompt
+    assert argv.index("--max-turns") > argv.index("--append-system-prompt")
+
+
+# ---- _build_codex_argv ----
+
+
+def test_build_codex_argv_missing_intent_raises(monkeypatch):
+    """No `intent` → ValueError, before the CLI lookup (lines 1117-1119)."""
+    import roost.worker as wm
+
+    monkeypatch.setattr(wm.shutil, "which", lambda n: "/usr/bin/codex")
+    with pytest.raises(ValueError, match="codex job requires `intent`"):
+        _build_codex_argv({"kind": "codex"})
+
+
+def test_build_codex_argv_missing_cli_raises(monkeypatch):
+    """codex not on PATH → FileNotFoundError (lines 1120-1121)."""
+    import roost.worker as wm
+
+    monkeypatch.setattr(wm.shutil, "which", lambda n: None)
+    with pytest.raises(FileNotFoundError, match="`codex` CLI not on PATH"):
+        _build_codex_argv({"kind": "codex", "intent": "do it"})
+
+
+def test_build_codex_argv_basic_shape(monkeypatch):
+    """Happy path: `codex exec <intent>` with no args (lines 1122, and 1123 false)."""
+    import roost.worker as wm
+
+    monkeypatch.setattr(wm.shutil, "which", lambda n: "/usr/local/bin/codex")
+    argv = _build_codex_argv({"kind": "codex", "intent": "fix the bug"})
+    assert argv == ["codex", "exec", "fix the bug"]
+
+
+def test_build_codex_argv_appends_args(monkeypatch):
+    """`args` are appended verbatim after `codex exec <intent>` (lines 1123-1124)."""
+    import roost.worker as wm
+
+    monkeypatch.setattr(wm.shutil, "which", lambda n: "/usr/local/bin/codex")
+    argv = _build_codex_argv(
+        {"kind": "codex", "intent": "fix it", "args": ["--model", "o3", "--full-auto"]})
+    assert argv == ["codex", "exec", "fix it", "--model", "o3", "--full-auto"]
