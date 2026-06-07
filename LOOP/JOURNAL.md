@@ -439,3 +439,39 @@ Entries are written by the loop; humans read, never need to edit.
   only intermittently (R2 note); `roost up` orchestration in cli.py untested
   (R9 note). A5: branch-coverage ratchet has baseline unset (measure-only
   iteration available).
+
+## 2026-06-07 03:30 UTC — Replenishment cycle #1
+- Verdict: shipped (slate promoted; no implementation this iteration)
+- Branch/PR: loop/replenish-1 (bookkeeping) / (PR on land)
+- What changed: Ranked refilled with 3 judge-approved Tier A items, tagged
+  self-promoted: R15 (A3 — confirmed drift: cli.py publish docstring still
+  says blob-store; omissions: README default caps, API.md log bounds),
+  R16 (A4 — R9's journaled debt: `roost up` orchestration untested, cli.py
+  28% branch), R17 (A2 — config.py 48% / triage.py 67%, no dedicated test
+  files). Ratchet baselines RECORDED (A5 first-measure): branch coverage of
+  roost/ = 63% TOTAL (482 tests); runnable examples = 3/3.
+- Evidence (survey):
+  - A3: two Explore agents swept everything merged since the 2026-06-05
+    sweep (PRs #10–#20 surfaces) → 1 confirmed drift + 2 omissions; schedule
+    + publish contract + log read-path docs otherwise clean. One claimed
+    finding REJECTED in triage: "API.md §6 should present one-shot publish"
+    is the deliberate human-gated Proposed item, not drift.
+  - A2/A5: `coverage run --branch -m pytest` → 482 passed, TOTAL 63%
+    (cli.py 28%, config.py 48%, worker.py 55%, mcp.py 59%)
+  - A5: scratch CP :8789, `roost submit --detach` per examples/*.yaml →
+    3/3 accepted (job ids returned)
+  - A1: not surveyed — slate filled from cheaper sources per protocol.
+- Judge: slate approved (round 1) — re-verified the cli.py docstring drift
+  against the code, the README/API.md omissions against worker.py/server.py
+  constants, `up`'s zero test reach + the 28% figure, config/triage coverage
+  + missing test files, and re-ran the full coverage measurement itself
+  (TOTAL 63%, exact match). Confirmed the §6 exclusion correct (contract
+  change → stays Proposed/human) and S1's API.md note additive, not a
+  contract change. Slate = exactly 3, within the cap.
+- Models: surveyor claude-opus-4-8 / judge claude-sonnet-4-6 (fenced
+  first-line model-ID block present)
+- Notes: baselines recorded in the same cycle (the A5 "first iteration
+  measures and records" compressed into replenishment since the judge had
+  already re-verified the numbers — logged here, not silent). A1 bug-hunt
+  rotation untouched; first hunt area when needed: matcher/placement (never
+  hunted). Human notification in the session summary.
