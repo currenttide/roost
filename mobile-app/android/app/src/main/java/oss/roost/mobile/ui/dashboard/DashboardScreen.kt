@@ -20,14 +20,21 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Public
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -48,6 +55,7 @@ import oss.roost.mobile.ui.Semantic
 import oss.roost.mobile.ui.common.Format
 import oss.roost.mobile.ui.common.LifecycleResume
 import oss.roost.mobile.ui.newsession.NewSessionSheet
+import oss.roost.mobile.ui.publish.PublishSheet   // R53: publish-a-site entry point
 
 @Composable
 fun DashboardScreen(
@@ -61,10 +69,12 @@ fun DashboardScreen(
     LifecycleResume(onResume = vm::start, onPause = vm::stop)
 
     var showSheet by remember { mutableStateOf(false) }
+    var showPublish by remember { mutableStateOf(false) }   // R53: publish-a-site sheet
     var confirmCancel by remember { mutableStateOf<Run?>(null) }
     val nowMs = System.currentTimeMillis()
 
     Scaffold(
+        topBar = { DashboardTopBar(onPublish = { showPublish = true }) },   // R53
         floatingActionButton = {
             ExtendedFloatingActionButton(
                 onClick = { showSheet = true },
@@ -118,6 +128,14 @@ fun DashboardScreen(
                 showSheet = false
                 onOpenSession(id)
             },
+        )
+    }
+
+    // R53: publish-a-site sheet (mirrors the iOS overflow-menu → PublishView flow).
+    if (showPublish) {
+        PublishSheet(
+            container = container,
+            onDismiss = { showPublish = false },
         )
     }
 
@@ -268,4 +286,31 @@ private fun subtitle(run: Run): String {
         "failed" -> run.exitCode?.let { parts.add("exit $it") }
     }
     return parts.joinToString(" · ")
+}
+
+/**
+ * The dashboard top bar (R53). Title + an overflow menu whose first item is
+ * "Publish a site", mirroring the iOS DashboardView's `ellipsis.circle` menu.
+ * Kept self-contained so other menu entries (e.g. settings) can be added without
+ * disturbing the publish wiring.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun DashboardTopBar(onPublish: () -> Unit) {
+    var menu by remember { mutableStateOf(false) }
+    TopAppBar(
+        title = { Text("Roost") },
+        actions = {
+            IconButton(onClick = { menu = true }) {
+                Icon(Icons.Filled.MoreVert, contentDescription = "More")
+            }
+            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                DropdownMenuItem(
+                    text = { Text("Publish a site") },
+                    leadingIcon = { Icon(Icons.Filled.Public, contentDescription = null) },
+                    onClick = { menu = false; onPublish() },
+                )
+            }
+        },
+    )
 }
