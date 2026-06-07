@@ -240,7 +240,15 @@ function nameOf(workers, id) {
 async function tick() {
   try {
     const r = await fetch("/derived?limit=40", { headers: H });
-    if (!r.ok) throw new Error("HTTP " + r.status);
+    if (!r.ok) {
+      // The CP answered — this is an HTTP-status error, not a transport
+      // failure. Carry the status so the catch can distinguish an auth/
+      // permission problem (401/403) from a server-side error, and from a
+      // genuine fetch reject (CP unreachable).
+      const err = new Error("HTTP " + r.status);
+      err.status = r.status;
+      throw err;
+    }
     const d = await r.json();
     const workers = Array.isArray(d.workers) ? d.workers : [];
     const runs = Array.isArray(d.runs) ? d.runs : [];
@@ -409,7 +417,20 @@ async function tick() {
     fails++;
     const vb = $("verdict");
     vb.className = "alert";
-    $("vtext").textContent = "control plane unreachable — " + esc(e.message || e);
+    // Distinguish HTTP-status errors (the CP answered) from transport
+    // failures (the CP never answered). A 401/403 is an auth/permission
+    // problem, not an "unreachable" one.
+    let msg;
+    if (e && e.status === 401) {
+      msg = "authentication failed — check your token (HTTP 401)";
+    } else if (e && e.status === 403) {
+      msg = "access denied — token lacks permission (HTTP 403)";
+    } else if (e && e.status) {
+      msg = "control plane error — HTTP " + e.status;
+    } else {
+      msg = "control plane unreachable — " + esc(e.message || e);
+    }
+    $("vtext").textContent = msg;
     $("attn").classList.remove("show");
     $("foot").textContent = "retrying…";
   }
