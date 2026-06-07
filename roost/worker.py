@@ -56,6 +56,15 @@ CAPACITY_AGENT_TIMEOUT = 30.0    # cap the steward capacity call (fail-safe to 1
 # still delays this job's terminal event (and its lease renews via the heartbeat, not
 # here), so keep it tight; fall back to the mechanical one-liner on timeout.
 DIAGNOSIS_AGENT_TIMEOUT = 20.0   # cap the failure-diagnosis call (fail-safe to mechanical)
+# [R72] Cap EACH container-teardown CLI (`docker kill` then `docker rm -f`) on a
+# job we're already killing. Much shorter than the 20s docker-info detection probe:
+# by teardown time the job is over and a wedged daemon won't recover within the
+# window, so a long wait only prolongs shutdown — and the wallclock-timeout path, a
+# server cancel, and graceful SIGTERM all funnel through here. Two CLIs run in
+# sequence, so the worst-case teardown is ~2x this; 4s keeps that (~8s) tight while
+# still tolerating a briefly-busy-but-alive daemon. On expiry we kill the stuck CLI
+# (its wait() then returns) and move on, loudly warning the container may still run.
+DOCKER_TEARDOWN_TIMEOUT = 4.0
 TOOL_PROBES: dict[str, list[str]] = {
     "claude":   ["claude", "--version"],
     "codex":    ["codex", "--version"],
@@ -1223,15 +1232,54 @@ class Worker:
             # Killing the `docker run` client may leave the sibling container
             # running (or mid-create); stop AND remove it by its deterministic
             # name so a retry can reuse the name.
-            for argv in (["docker", "kill", docker_container_name(job_id)],
-                         ["docker", "rm", "-f", docker_container_name(job_id)]):
+            cname = docker_container_name(job_id)
+            for argv in (["docker", "kill", cname],
+                         ["docker", "rm", "-f", cname]):
+                k = None
                 try:
                     k = await asyncio.create_subprocess_exec(
                         *argv, stdout=asyncio.subprocess.DEVNULL,
                         stderr=asyncio.subprocess.DEVNULL)
-                    await k.wait()
+                    # [R72] BOUND the wait: a wedged dockerd makes `docker kill` /
+                    # `docker rm -f` hang forever, and this teardown is on the only
+                    # path the wallclock-timeout, server-cancel, and graceful-shutdown
+                    # flows all funnel through (inside run_job's try, before the R25
+                    # finally) — an unbounded wait here leaks the slot, posts no
+                    # terminal event, and pins the worker on SIGTERM. On expiry we
+                    # kill the stuck CLI process itself (its wait() then returns) and
+                    # carry on to the next command rather than wedging here.
+                    try:
+                        await asyncio.wait_for(
+                            k.wait(), timeout=DOCKER_TEARDOWN_TIMEOUT)
+                    except asyncio.TimeoutError:
+                        try:
+                            k.kill()
+                        except (ProcessLookupError, OSError):
+                            pass
+                        # Reap the killed CLI so we don't strand a transport/zombie.
+                        try:
+                            await k.wait()
+                        except Exception:  # noqa: BLE001
+                            pass
+                        # LOUD: the daemon is unresponsive and the container may
+                        # still be running (burning CPU/GPU). Name it so an operator
+                        # can `docker kill <name>` by hand once the daemon recovers.
+                        msg = (
+                            f"docker daemon unresponsive: `{' '.join(argv)}` "
+                            f"exceeded {DOCKER_TEARDOWN_TIMEOUT:.0f}s and was killed; "
+                            f"container {cname!r} may still be RUNNING — operator must "
+                            f"`docker kill {cname}` once dockerd recovers"
+                        )
+                        print(f"[roost] {msg}", flush=True)
+                        await self._send_log(job_id, "event", msg)
                 except Exception:  # noqa: BLE001
-                    pass
+                    # Spawn failed (docker CLI missing, fork limit, …): nothing to
+                    # reap. Best-effort kill of any half-started proc, then move on.
+                    if k is not None:
+                        try:
+                            k.kill()
+                        except (ProcessLookupError, OSError):
+                            pass
 
     def _kill_aux_procs(self, job_id: str, reason: str) -> None:
         """[H5] SIGKILL any in-flight verify/self-heal subprocesses for this job

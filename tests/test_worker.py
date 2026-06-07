@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+import roost.worker as wmod_R72  # [R72] for DOCKER_TEARDOWN_TIMEOUT + seam patching
 from roost.worker import (
     DEFAULT_WALLCLOCK_FALLBACK_MIN,
     DEFAULT_WALLCLOCK_MIN,
@@ -2272,3 +2273,221 @@ def test_r51_no_verify_when_disabled_is_plain_success():
     assert calls["verify_spawns"] == 0
     assert term.get("result") == {"output": "done"}
     assert "verified" not in (term.get("result") or {})
+
+
+# ---------- [R72] bounded docker-container teardown on a WEDGED daemon ----------
+# Promoted from LOOP/repro-a1-hunt8.py (A1 hunt #8, PR #82). `_kill_active_job`'s
+# container teardown (`docker kill` / `docker rm -f`) once waited with a bare
+# `await k.wait()` — the only subprocess wait in worker.py without a timeout. A
+# wedged dockerd made it hang forever, and this teardown sits inside run_job's try
+# BEFORE the R25 finally, so the wallclock-timeout path, a server cancel, and
+# graceful `_shutdown_jobs` all hung: no terminal event, a permanent `_running`
+# leak, and a worker that won't exit on SIGTERM. The fix bounds each wait with
+# asyncio.wait_for(timeout=DOCKER_TEARDOWN_TIMEOUT), kills the stuck CLI on expiry,
+# and emits a LOUD message naming the container so an operator can kill it by hand.
+
+# A generous-but-finite cap derived from the teardown bound. Two CLIs run in
+# sequence, so a sane bounded teardown finishes in ~2x the bound; +2s of headroom
+# for overhead. Master's hang was *infinite*, so any cap above the real bound trips
+# on it while a bounded fix returns comfortably under this.
+_R72_HANG_CAP = 2 * wmod_R72.DOCKER_TEARDOWN_TIMEOUT + 2.0
+
+
+class _R72DeadClient:
+    """The `docker run` client process, already exited (returncode set) — i.e. the
+    SIGKILL of its process group has happened. Teardown of the sibling CONTAINER
+    (docker kill / docker rm -f) is what remains."""
+
+    def __init__(self, rc: int = 137):
+        self.returncode = rc
+        self.pid = -1
+
+
+class _R72WedgedProc:
+    """A `docker kill` / `docker rm -f` subprocess against a WEDGED daemon: spawned,
+    but wait() never returns on its own (the CLI is blocked talking to the hung
+    daemon). Faithful to a real asyncio subprocess: wait() unblocks only once the
+    process is killed — so a fix that bounds the wait and then kills the stuck CLI
+    sees wait() return, while an unbounded `await k.wait()` hangs forever."""
+
+    def __init__(self):
+        self.returncode = None
+        self.pid = 999999
+        self._killed = asyncio.Event()
+        self.kill_calls = 0
+
+    def kill(self):
+        self.kill_calls += 1
+        self.returncode = -9
+        self._killed.set()
+
+    def terminate(self):
+        self.kill()
+
+    async def wait(self):
+        await self._killed.wait()  # blocks until kill()/terminate() — never on its own
+        return self.returncode
+
+
+@pytest.fixture()
+def _r72_wedge_docker(monkeypatch):
+    """Stub the subprocess seam so any `docker kill`/`docker rm -f` spawns a wedged
+    process. Records the argv attempted. No docker daemon required."""
+    attempted: list[list[str]] = []
+    spawned: list[_R72WedgedProc] = []
+
+    async def fake_exec(*argv, **kw):
+        attempted.append(list(argv))
+        p = _R72WedgedProc()
+        spawned.append(p)
+        return p
+
+    monkeypatch.setattr(wmod_R72.asyncio, "create_subprocess_exec", fake_exec)
+    return attempted, spawned
+
+
+def test_r72_kill_active_job_does_not_hang_when_docker_kill_wedges(_r72_wedge_docker):
+    """A docker job's teardown must not block forever on a wedged daemon.
+
+    Hung on master: `await k.wait()` in _kill_active_job was unbounded. A bounded
+    teardown kills the stuck CLI and returns fast (well under _R72_HANG_CAP)."""
+    attempted, spawned = _r72_wedge_docker
+
+    async def go():
+        w = Worker("http://127.0.0.1:9", "tok", "w1", self_test=False)
+        w._active = {
+            "jD": {"process": _R72DeadClient(), "is_docker": True, "cancelled": None}
+        }
+        try:
+            await asyncio.wait_for(
+                w._kill_active_job("jD", "timeout"), timeout=_R72_HANG_CAP)
+        except asyncio.TimeoutError:
+            pytest.fail(
+                "_kill_active_job hung > %.1fs on a wedged `docker kill` "
+                "(unbounded `await k.wait()`); attempted=%r"
+                % (_R72_HANG_CAP, attempted))
+        finally:
+            await w.close()
+        # BOTH the kill and the rm -f must have been attempted and bounded: an
+        # expiry on the first must not skip the second.
+        cmds = [a[:3] for a in attempted]
+        assert ["docker", "kill", "roost-job-jD"] in cmds, attempted
+        assert ["docker", "rm", "-f"] in [a[:3] for a in attempted], attempted
+        # Each wedged CLI was killed (that is how wait() was made to return).
+        assert spawned and all(p.kill_calls >= 1 for p in spawned), spawned
+
+    asyncio.run(go())
+
+
+def test_r72_kill_active_job_loud_message_and_completes_despite_wedged_daemon(
+    _r72_wedge_docker,
+):
+    """The expiry path must be LOUD (name the container so an operator can kill it
+    by hand) AND let teardown COMPLETE — both CLIs bounded, the active entry marked
+    cancelled — even when both `docker kill` and `docker rm -f` wedge."""
+    attempted, _spawned = _r72_wedge_docker
+
+    async def go():
+        w = Worker("http://127.0.0.1:9", "tok", "w1", self_test=False)
+        logs: list[tuple[str, str, str]] = []
+
+        async def fake_send_log(job_id, stream, data):
+            logs.append((job_id, stream, data))
+
+        w._send_log = fake_send_log  # type: ignore[assignment]
+        w._active = {
+            "jD": {"process": _R72DeadClient(), "is_docker": True, "cancelled": None}
+        }
+        try:
+            await asyncio.wait_for(
+                w._kill_active_job("jD", "timeout"), timeout=_R72_HANG_CAP)
+        finally:
+            await w.close()
+
+        # Teardown completed: the entry is marked cancelled with our reason, and
+        # both teardown commands were attempted (the first expiry did not skip the
+        # second).
+        assert w._active["jD"]["cancelled"] == "timeout"
+        cmds = [a[:2] for a in attempted]
+        assert ["docker", "kill"] in cmds and ["docker", "rm"] in cmds, attempted
+
+        # LOUD: an operator-facing event line per wedged CLI, naming the container
+        # (so they can `docker kill roost-job-jD` later) and saying it may still run.
+        events = [d for (_jid, stream, d) in logs if stream == "event"]
+        assert events, logs
+        assert any("roost-job-jD" in d for d in events), events
+        assert any(
+            "unresponsive" in d and "docker kill roost-job-jD" in d for d in events
+        ), events
+
+    asyncio.run(go())
+
+
+def test_r72_run_job_docker_timeout_teardown_completes_when_daemon_wedged(
+    _r72_wedge_docker, monkeypatch
+):
+    """The wallclock-timeout path for a docker job must still post a terminal event
+    and unwind accounting (R25 finally) even if container teardown wedges.
+
+    Hung on master: run_job's timeout branch awaited _kill_active_job (which hung on
+    the wedged `docker kill`) BEFORE the R25 finally — no terminal event, _running
+    leaked. With the bound, teardown returns and the finally runs."""
+    async def go():
+        w = Worker("http://127.0.0.1:9", "tok", "w1", self_test=False)
+        w.policy = {}
+        events: list[dict] = []
+
+        async def fake_post_event(job_id, event):
+            events.append(event)
+
+        async def fake_send_log(job_id, stream, data):
+            pass
+
+        async def fake_diagnose(spec, **kw):
+            return {"summary": "stub"}
+
+        w._post_event = fake_post_event       # type: ignore[assignment]
+        w._send_log = fake_send_log           # type: ignore[assignment]
+        w._diagnose_failure = fake_diagnose   # type: ignore[assignment]
+
+        # Real `docker run` stand-in: a long sleeper we own, so the wallclock cap
+        # fires and the SIGKILL-of-client path runs; the wedged seam is hit only by
+        # the subsequent `docker kill`/`docker rm -f` (CONTAINER teardown).
+        real_exec = asyncio.subprocess.create_subprocess_exec
+
+        async def routing_exec(*argv, **kw):
+            if tuple(argv[:2]) == ("docker", "run"):
+                return await real_exec("sleep", "30", **kw)
+            return _R72WedgedProc()  # docker kill / docker rm -f -> wedged
+
+        monkeypatch.setattr(wmod_R72.asyncio, "create_subprocess_exec", routing_exec)
+
+        spec = {
+            "kind": "docker",
+            "image": "alpine",
+            "command": "sleep 30",
+            "budget": {"max_wallclock_sec": 0.5},  # fires fast
+        }
+        # run_job increments _running (after "started"); the R25 finally decrements.
+        # Start at 0: a clean unwind returns to 0; a hung teardown that skips the
+        # finally leaves it at 1.
+        w._running = 0
+        try:
+            await asyncio.wait_for(
+                w.run_job({"id": "jD", "spec": spec}), timeout=_R72_HANG_CAP)
+        except asyncio.TimeoutError:
+            pytest.fail(
+                "run_job hung > %.1fs in the docker wallclock-timeout teardown "
+                "(unbounded `docker kill`); terminal events=%r, _running=%d "
+                "(R25 finally never ran)"
+                % (_R72_HANG_CAP, [e.get("type") for e in events], w._running))
+        finally:
+            await w.close()
+
+        terminal = [e for e in events if e.get("type") in ("succeeded", "failed")]
+        assert terminal, (
+            "docker timeout produced no terminal event; events=%r"
+            % [e.get("type") for e in events])
+        assert w._running == 0, "capacity slot leaked (R25 cleanup did not run)"
+
+    asyncio.run(go())
