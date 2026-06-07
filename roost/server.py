@@ -3225,6 +3225,10 @@ def create_app(
         principal: dict = Depends(require_any),
     ):
         """Stage a file (raw body). Returns the blob with a presigned get_url."""
+        try:
+            name = blobstore.validate_name(name)
+        except ValueError as e:
+            raise HTTPException(422, str(e))
         def _insert() -> dict:
             with _connect(db) as conn:
                 return blobstore.insert_blob(
@@ -3247,10 +3251,14 @@ def create_app(
         """Mint a pending blob + presigned put_url for a worker-side upload
         (the fetch flow: a job PUTs the file here, the operator downloads)."""
         payload = payload or {}
+        try:
+            name = blobstore.validate_name(payload.get("name"))
+        except ValueError as e:
+            raise HTTPException(422, str(e))
         def _insert() -> dict:
             with _connect(db) as conn:
                 return blobstore.insert_blob(
-                    conn, payload.get("name") or "blob",
+                    conn, name,
                     payload.get("ttl_sec"), "pending", principal["kind"])
         row = await asyncio.to_thread(_insert)
         return blobstore.public_dict(row, str(request.base_url), blob_secret)

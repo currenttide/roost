@@ -219,3 +219,62 @@ def test_secret_is_persistent_and_private(db: Path, client: TestClient):
     secret_file = db.parent / "blob_secret"
     assert secret_file.is_file()
     assert (secret_file.stat().st_mode & 0o777) == 0o600
+
+
+# ---- blob name length cap (R80) ----
+# Fuzzing accepted a 32,000-char `name` (HTTP 200, stored verbatim); every other
+# fuzz case returned a clean 4xx. The cap (blobstore.BLOB_NAME_MAX_CHARS) closes
+# that hole at the single validation seam for every entry point.
+
+
+def test_blobs_upload_rejects_overlong_name(client: TestClient, db: Path):
+    """The reported hole: a 32k name on POST /blobs?name= must now 422, not 200."""
+    name = "A" * 32000
+    r = client.post(f"/blobs?name={name}", content=b"x")
+    assert r.status_code == 422, r.text
+    # nothing was stored
+    assert client.get("/blobs").json() == []
+
+
+def test_blobs_presign_rejects_overlong_name(client: TestClient):
+    """The other entry point: presign takes the name in JSON — same cap, 422."""
+    name = "B" * 32000
+    r = client.post("/blobs/presign", json={"name": name})
+    assert r.status_code == 422, r.text
+
+
+def test_blob_name_at_cap_is_accepted(client: TestClient):
+    """Boundary: exactly BLOB_NAME_MAX_CHARS is the last accepted length."""
+    name = "n" * blobstore.BLOB_NAME_MAX_CHARS
+    r = client.post(f"/blobs?name={name}", content=b"x")
+    assert r.status_code == 200, r.text
+    assert r.json()["name"] == name
+    # presign honors the same boundary
+    r2 = client.post("/blobs/presign", json={"name": name})
+    assert r2.status_code == 200, r2.text
+    assert r2.json()["name"] == name
+
+
+def test_blob_name_over_cap_is_rejected(client: TestClient):
+    """Boundary: cap + 1 is the first rejected length (422)."""
+    name = "n" * (blobstore.BLOB_NAME_MAX_CHARS + 1)
+    assert client.post(f"/blobs?name={name}", content=b"x").status_code == 422
+    assert client.post("/blobs/presign", json={"name": name}).status_code == 422
+
+
+def test_legitimate_long_filename_still_accepted(client: TestClient):
+    """A realistic worst case — a 255-char unicode filename plus .tar.gz, the
+    shape every client sends (basename / lastPathComponent) — stays well under
+    the cap and is accepted unchanged."""
+    name = ("ä" * 255) + ".tar.gz"
+    assert len(name) <= blobstore.BLOB_NAME_MAX_CHARS
+    r = client.post(f"/blobs?name={name}", content=b"x")
+    assert r.status_code == 200, r.text
+    assert r.json()["name"] == name
+
+
+def test_validate_name_defaults_empty_to_blob():
+    """Empty/None names still default to "blob" (existing client contract)."""
+    assert blobstore.validate_name("") == "blob"
+    assert blobstore.validate_name(None) == "blob"
+    assert blobstore.validate_name("report.txt") == "report.txt"
