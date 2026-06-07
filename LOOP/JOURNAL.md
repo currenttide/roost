@@ -1048,3 +1048,25 @@ Entries are written by the loop; humans read, never need to edit.
   removed" — diff is zero-deletion; count delta fully explained) — honesty works
   both directions. R33 merged concurrently (#45, journal entry on its notification);
   R34 (mobile parity) still in flight.
+
+## 2026-06-06 ~23:20 UTC — R33: captain plan + reasoning visible in `roost tree`
+- Verdict: shipped
+- Branch/PR: loop/r33-captain-plan-tree / https://github.com/currenttide/roost/pull/45 (merged 8f66e06)
+- What changed: optional `reason` field on JobSubmit → persisted inside the child's
+  existing spec JSON (no schema migration; one-line normalized, clamped to 280 chars,
+  dropped when blank). Captain sets it on every roost_submit (new MCP arg + system-
+  prompt instruction); `roost tree` renders `↳ why: <reason>` per child. DESIGN CHOICE
+  (loop authority, documented): per-child spec storage over a parent-level plan event —
+  parallel sub-job submission means the captain doesn't know all child ids when
+  planning, so a parent map would be awkward; per-child is additive, durable, and
+  non-bloating. Notable pre-implementation finding: JobSubmit is strict pydantic and
+  silently DROPS unknown keys — `reason` had to be a declared field; a free-form extra
+  would have vanished without error.
+- Evidence:
+  - `python -m pytest -q` → 562 on branch (+11 new); 565 on merged master
+  - graceful absence pinned: test_tree_without_plan_renders_exactly_as_before
+    (older/non-captain jobs render byte-for-byte as today)
+- Judge: approve (round 1) — re-ran diff + pytest, reviewed additivity/absence/coverage
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only)
+- Notes: iteration #4 slot 1. Operators can finally see captain INTENT, not just
+  child states. R34 (mobile one-shot publish) still in flight — last of the wave.

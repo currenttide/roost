@@ -87,7 +87,7 @@ Done-when: finally cancels/awaits both relay tasks on every exit path; repro pas
 ### R32. Single-source the version (pyproject 0.1.0 vs server 0.2.0) — `done` *(2026-06-06, PR #41)* `self-promoted`
 Surface: backend/correctness. A6 promotion from Proposed. `__version__` in roost/__init__.py (adjacent-pyproject first → importlib.metadata → documented fallback); pyproject bumped to 0.2.0; healthz/readyz/FastAPI/MCP all import it; equality test parses pyproject independently. Both judge phases passed (gates, then diff).
 
-### R33. Captain observability: sub-job plan + reasoning in `roost tree` — `open` `self-promoted` `feature`
+### R33. Captain observability: sub-job plan + reasoning in `roost tree` — `done` *(2026-06-06, PR #45)* `self-promoted` `feature`
 Surface: backend/CLI/feature. Production north star #2 (operability). When the captain splits a goal into sub-jobs, the plan (which sub-jobs, why, what order) is invisible — `roost tree` shows children but not the reasoning. An operator debugging a fleet cannot tell what the captain intended.
 Done-when: captain dispatch records a structured plan on the parent job (additive field); `roost tree <root>` renders per-child one-line reasoning; older plan-less jobs render gracefully; tests for plan recording + rendering; pytest green.
 
