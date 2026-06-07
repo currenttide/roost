@@ -231,6 +231,41 @@ optional Whisper-on-fleet transcription job behind a setting; the UI doesn't cha
 - **v1.1** — terminal-state notifications (ntfy/webhook). **v2** — interactive mid-job
   steering (CP feature), optional Whisper-on-fleet STT, widgets/watch complications.
 
+### 8a. v1.1 push notifications — client wiring
+
+The CP side shipped first (R37): on every terminal job the control plane fires a
+fire-and-forget `POST` to a configured `--notify-url` carrying JSON
+`{event, job_id, state, intent, duration_sec, exit_code, worker_id, message}` plus
+ntfy display headers (`Title`/`Priority`/`Tags`). The canonical payload is pinned by
+`tests/test_notify.py`.
+
+The **client slice** (R55) implements the parts that are honest to build and verify
+without a device, on both platforms, and keeps them as pure, Linux-tested logic:
+
+- **Topic as a setting.** The CP does not advertise its `notify_url` over the API, so
+  the app takes the ntfy topic as a manual setting (a Notifications screen reachable
+  from the dashboard overflow). The user enters a bare topic (→ `https://ntfy.sh/<topic>`)
+  or a full self-hosted URL; the app stores the canonical subscribe URL. Normalize +
+  validate is pure logic (`NtfyTopic` — iOS `Net/Notifications.swift`, Android
+  `model/Notify.kt`). The non-secret topic lives in `UserDefaults` / plain prefs (not the
+  Keychain/Keystore — it's a channel name, not a bearer token).
+- **Payload → deep-link route.** Given the R37 payload, the client produces the
+  destination: a non-blank `job_id` opens that job's **Session** view; a malformed,
+  non-JSON, or job-id-less payload falls back to the **Dashboard** (never crash, never
+  guess). This routing is pure (`NotifyRouter`) and is the core covered on both Linux
+  harnesses, including a **cross-contract** test that parses payload literals copied
+  verbatim from `tests/test_notify.py` so server/client drift is caught.
+
+**Capped — device-only, NOT verified here (no devices in the build env):** the actual
+push transport. iOS has no UnifiedPush distributor concept, so the honest v1.1 iOS path
+is the user subscribing to the same topic in the ntfy app; a `PushService`
+(`#if canImport(UIKit)`) holds the seam (local-notification + tap→route) but real
+remote/background delivery (APNs) is deferred. On Android the dependency-light path is
+**UnifiedPush** (the ntfy app as distributor); `push/PushReceiver.kt` builds the tappable
+notification and routes the tap through the same pure `NotifyRouter`, but registering with
+a distributor, the foreground subscription, and consuming the tap intent in `MainActivity`
+need a real device + the `unifiedpush` connector and are left for on-device work.
+
 ## 9. Cut from v1 (explicitly)
 
 Diff viewer with syntax highlighting (the agent's `result` summary suffices; full diffs

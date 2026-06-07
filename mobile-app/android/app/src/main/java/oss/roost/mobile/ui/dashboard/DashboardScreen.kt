@@ -21,6 +21,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -57,10 +58,12 @@ import oss.roost.mobile.ui.common.LifecycleResume
 import oss.roost.mobile.ui.newsession.NewSessionSheet
 import oss.roost.mobile.ui.publish.PublishSheet   // R53: publish-a-site entry point
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DashboardScreen(
     container: AppContainer,
     onOpenSession: (String) -> Unit,
+    onOpenSettings: () -> Unit = {},   // R55: notification settings entry point
 ) {
     val vm = remember { DashboardViewModel(container) }
     val state by vm.state.collectAsState()
@@ -74,7 +77,12 @@ fun DashboardScreen(
     val nowMs = System.currentTimeMillis()
 
     Scaffold(
-        topBar = { DashboardTopBar(onPublish = { showPublish = true }) },   // R53
+        topBar = {   // R53 publish + R55 notifications share one overflow menu
+            DashboardTopBar(
+                onPublish = { showPublish = true },
+                onOpenSettings = onOpenSettings,
+            )
+        },
         floatingActionButton = {
             ExtendedFloatingActionButton(
                 onClick = { showSheet = true },
@@ -289,14 +297,13 @@ private fun subtitle(run: Run): String {
 }
 
 /**
- * The dashboard top bar (R53). Title + an overflow menu whose first item is
- * "Publish a site", mirroring the iOS DashboardView's `ellipsis.circle` menu.
- * Kept self-contained so other menu entries (e.g. settings) can be added without
- * disturbing the publish wiring.
+ * The dashboard top bar. Title + an overflow menu mirroring the iOS DashboardView's
+ * `ellipsis.circle` menu: "Publish a site" (R53) and "Notifications" (R55, the
+ * notification-settings entry per DESIGN.md §6 v1.1).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun DashboardTopBar(onPublish: () -> Unit) {
+private fun DashboardTopBar(onPublish: () -> Unit, onOpenSettings: () -> Unit) {
     var menu by remember { mutableStateOf(false) }
     TopAppBar(
         title = { Text("Roost") },
@@ -309,6 +316,11 @@ private fun DashboardTopBar(onPublish: () -> Unit) {
                     text = { Text("Publish a site") },
                     leadingIcon = { Icon(Icons.Filled.Public, contentDescription = null) },
                     onClick = { menu = false; onPublish() },
+                )
+                DropdownMenuItem(
+                    text = { Text("Notifications") },
+                    leadingIcon = { Icon(Icons.Filled.Notifications, contentDescription = null) },
+                    onClick = { menu = false; onOpenSettings() },
                 )
             }
         },

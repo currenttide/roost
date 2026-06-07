@@ -11,12 +11,14 @@ import oss.roost.mobile.AppContainer
 import oss.roost.mobile.ui.dashboard.DashboardScreen
 import oss.roost.mobile.ui.pair.PairScreen
 import oss.roost.mobile.ui.session.SessionScreen
+import oss.roost.mobile.ui.settings.NotificationSettingsScreen
 
 /** Route names. Session takes a job id arg. */
 object Routes {
     const val PAIR = "pair"
     const val DASHBOARD = "dashboard"
     const val SESSION = "session"
+    const val SETTINGS = "settings"   // R55: notification settings
     fun session(jobId: String) = "session/$jobId"
 }
 
@@ -60,6 +62,13 @@ fun RoostNavHost(
             DashboardScreen(
                 container = container,
                 onOpenSession = { id -> nav.navigate(Routes.session(id)) },
+                onOpenSettings = { nav.navigate(Routes.SETTINGS) },   // R55
+            )
+        }
+        composable(Routes.SETTINGS) {   // R55: notification settings
+            NotificationSettingsScreen(
+                container = container,
+                onBack = { nav.popBackStack() },
             )
         }
         composable(

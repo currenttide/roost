@@ -87,6 +87,10 @@ android-free in `model/` + `sse/`):
   rejects `v > 1`.
 - `MapperTest` confirms an unknown `health.status` renders as plain text (no crash) and
   ANSI stripping.
+- `NotifyTest` covers the push-notification client logic (R37 / DESIGN.md §6): ntfy-topic
+  normalize/validate, the R37 payload → deep-link route (job_id → Session; malformed →
+  Dashboard fallback), and a **cross-contract** block parsing payload literals copied from
+  the server's `tests/test_notify.py` so client/server drift is caught.
 
 Fixtures are read from the single canonical copy via a test `resources.srcDir("../../fixtures")`
 (see `app/build.gradle.kts`) — there is exactly one copy in the repo.
@@ -134,7 +138,8 @@ kotlinc app/src/main/java/oss/roost/mobile/{model,sse}/*.kt \
         -classpath json.jar:junit.jar:hamcrest.jar -d out
 java -cp out:json.jar:junit.jar:hamcrest.jar:../fixtures:kotlin-stdlib.jar \
      org.junit.runner.JUnitCore oss.roost.mobile.ParserFixtureTest \
-     oss.roost.mobile.SseTest oss.roost.mobile.PairUriTest oss.roost.mobile.MapperTest
+     oss.roost.mobile.SseTest oss.roost.mobile.PairUriTest oss.roost.mobile.MapperTest \
+     oss.roost.mobile.NotifyTest
 ```
 
 (jars: org.json 20240303, junit 4.13.2, hamcrest-core 1.3 from Maven Central.)

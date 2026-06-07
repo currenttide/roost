@@ -42,8 +42,11 @@ Signing & Capabilities) and re-run `xcodegen generate`.
 
 The unit tests decode **every** golden fixture in `../fixtures/`, parse the SSE
 transcript through the frame parser, exercise the pairing-URI decode (incl.
-base64url padding restoration and `v>1` rejection), and check the
-`health.status → glyph` map (incl. the unknown-status fallback).
+base64url padding restoration and `v>1` rejection), check the
+`health.status → glyph` map (incl. the unknown-status fallback), and cover the
+push-notification client logic (`NotificationsTests`: ntfy-topic derivation +
+R37 payload → deep-link route, with a cross-contract block parsing payload
+literals copied from the server's `tests/test_notify.py`).
 
 ```sh
 cd mobile-app/ios
@@ -129,16 +132,20 @@ errors (3× `catch`-binding shadowing of an `error` property, 1× `.tint` in a
 ## Linux pure-layer harness
 
 The Models/Net parsing layer is pure Foundation, so the full test suite minus
-UI runs on Linux (verified 2026-06-07, 46/46 green on Swift 6.0.3):
+UI runs on Linux (verified 2026-06-07, 58/58 green on Swift 6.0.3):
 
 ```sh
 # one-time: toolchain from swift.org into /tmp/swift-toolchain
 mkdir -p /tmp/ios-linux-check/{Sources/Roost,Tests/RoostTests} && cd /tmp/ios-linux-check
 # Package.swift: target Roost + testTarget RoostTests (see mac-app for the pattern)
-# symlink: Models/*.swift, Net/{SSE,Pairing,Ansi,ApiClient,OfflineCache,Publish}.swift → Sources/Roost
+# symlink: Models/*.swift, Net/{SSE,Pairing,Ansi,ApiClient,OfflineCache,Publish,Notifications}.swift → Sources/Roost
 #          RoostTests/*.swift → Tests/RoostTests
 ROOST_FIXTURES=$REPO/mobile-app/fixtures /tmp/swift-toolchain/usr/bin/swift test
 ```
+
+(`Net/PushService.swift` is UIKit-only — `#if canImport(UIKit)` — so it is excluded
+from the Linux harness; the routing it calls into is in `Notifications.swift`, which
+is covered.)
 
 `ROOST_FIXTURES` points `Fixtures.swift` at the repo copy (no bundle on Linux).
 
