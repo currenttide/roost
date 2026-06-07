@@ -28,7 +28,7 @@ That registers Roost's stdio MCP server. Your agent now has these tools (from
 | `roost_runs` | The inbox: recent + in-flight runs with phase, verified flag, one-line result. |
 | `roost_result` | Wait for a run and return its verified outcome `{state, verified, evidence, output}`. |
 | `roost_capabilities` | What the fleet can do (nodes, cores, GPUs) in plain language. |
-| `roost_submit` | Submit a precise sub-job (`kind` auto/claude/codex/docker, `requires`, `container`, `budget`). Use `kind: auto` for the self-selecting verified path (equivalent to `roost do`). |
+| `roost_submit` | Submit a precise sub-job (`kind` auto/claude/codex/docker, `requires`, `container`, `budget`, and an optional one-line `reason` the captain sets so `roost tree` shows the plan's intent). Use `kind: auto` for the self-selecting verified path (equivalent to `roost do`). |
 | `roost_status` | One job's current state + liveness facts (`last_activity`, `idle_sec`, `queued_sec`, `capable_workers`) for judging health. |
 | `roost_wait` | Block until a job reaches a terminal state (succeeded/failed/cancelled) or timeout; returns the final record. |
 | `roost_logs` | Return a job's captured stdout/stderr log lines (paginated — pass `since` to tail). |
@@ -94,11 +94,18 @@ roost do "summarize today's logs in /var/log and write the digest to /tmp/digest
 roost exec gpu-box -- nvidia-smi          # run a command on one named node, no SSH
 roost submit spec.yaml --detach           # precise spec: exact requires/kind/container/budget
 roost history --failed                     # recent runs that failed or weren't verified
+roost send <job-id> "y" --wait            # nudge a RUNNING command job (writes to its stdin)
+roost backup roost-$(date +%F).db          # consistent online snapshot of the fleet DB (admin)
+roost --version                            # print the roost version and exit
 ```
 
 `roost do` is the front door (classify → route → run → verify); in non-interactive
 contexts pass `--yes` to skip the confirm/clarify prompts. `roost submit` reads a
-YAML/JSON spec (or `-` for stdin).
+YAML/JSON spec (or `-` for stdin). `roost send` delivers to a running `command` job's
+stdin (agent/docker kinds run with stdin closed, so their input is recorded as
+`dropped` with a reason — never silently lost); `roost backup` downloads the DB over
+HTTP, so it works against a remote control plane (restore is in
+[docs/DEPLOY.md](DEPLOY.md)).
 
 ---
 
@@ -127,7 +134,8 @@ The verbs are the product — model-vendor-neutral by construction.
 | **run** | `roost_do` / `roost do` / `POST /jobs` | execution on hardware you own |
 | **verify** | independent verifier on every `kind: auto` run (`verify: true`) | the trust loop — returns evidence, not just exit 0 |
 | **transfer** | blob store: `POST /blobs`, `PUT/GET /blobs/{id}` | move files between front door and fleet |
-| **observe** | `roost_runs` / `roost_status` / `GET /derived` / `/panel` | live state, health, cost, evidence |
+| **observe** | `roost_runs` / `roost_status` / `GET /derived` / `/panel` / `GET /metrics` | live state, health, cost, evidence (`/metrics` = admin-only Prometheus scrape) |
+| **steer** | `roost send <id> "<text>"` / `POST /jobs/{id}/input` | send a follow-up to a **running** job — delivered live to `command` jobs; dropped-with-reason for agent/docker |
 | **schedule** | `roost schedule "<goal>" --every 6h` / `roost_schedule` / `POST /schedules` | the CP enqueues the job every interval |
 | **serve / publish** | `roost publish ./site` / `POST /publish` → `GET /pub/<slug>/` | static site live on your own CP |
 
@@ -140,11 +148,15 @@ Roost makes it one command, end to end:
 
 ```bash
 roost publish ./my-site --name demo    # → live: http://<cp>/pub/demo/
-roost publish --list                   # see published sites + URLs
+roost publish --list                   # see published sites + URLs (paginated)
+roost publish --list --limit 50 --offset 50   # page through a long site list
 roost publish --unpublish demo         # take one down (admin)
 ```
 
-The CLI tars the directory and POSTs the bundle straight to
+`--list` is paginated so a long-lived fleet's listing stays bounded: the server
+defaults to 100 sites and caps `--limit` at 500 (out-of-range → `422`), reporting the
+full count in an `X-Total-Count` header that the CLI uses to print a "showing N of
+TOTAL" hint when more pages remain. The CLI tars the directory and POSTs the bundle straight to
 `POST /publish?name=<site>` — one transactional call (nothing is staged, so a dropped
 connection can't leave a dangling blob) — and the control plane extracts it into
 `<data_dir>/sites/<slug>/`, live immediately at `GET /pub/<slug>/`. Publishing a

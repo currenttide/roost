@@ -96,6 +96,13 @@ the user approves:
 - **Unplaceable** — `roost cancel <id>` it and (if you can infer intent) resubmit
   with corrected placement (`roost submit`), or tell the user exactly what to
   change. Don't silently drop it.
+- **Waiting on stdin (command job)** — if a `kind: command` job is blocked reading
+  stdin (e.g. a `read`/REPL/`y/N` prompt — `last_activity` stalled mid-step), you can
+  unblock it without cancelling: `roost send <id> "<answer>" --wait`. The message is
+  written to the running process's stdin; `--wait` confirms it was delivered (vs
+  `dropped`). This only reaches `command` jobs — agent (`claude`/`auto`/`codex`) and
+  `docker` jobs run with stdin closed, so their input is recorded `dropped` with a
+  reason, never delivered; for those, cancel and resubmit a follow-up job instead.
 - **Stuck/looping** — `roost logs <id>` to confirm, then `roost cancel <id>`;
   Roost's lease + `max_attempts` will requeue once if appropriate.
 - **Failed-transient** — note that the sweeper/`max_attempts` may already retry;

@@ -77,6 +77,17 @@ def test_mcp_server_version_matches_pyproject():
     assert mcp.SERVER_VERSION == _pyproject_version()
 
 
+def test_cli_version_flag_matches_pyproject():
+    """`roost --version` reports the single-sourced version and exits 0."""
+    from click.testing import CliRunner
+
+    from roost.cli import cli
+
+    res = CliRunner().invoke(cli, ["--version"])
+    assert res.exit_code == 0, res.output
+    assert res.output.strip() == f"roost {_pyproject_version()}"
+
+
 @pytest.mark.parametrize("module", ["server.py", "mcp.py"])
 def test_no_hardcoded_version_literal_in_source(module: str):
     """Regression guard: no bare ``X.Y.Z`` string literal should reappear in the
