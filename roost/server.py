@@ -1851,6 +1851,30 @@ def _sweep(db_path: Path) -> dict[str, int]:
                     )
                     counts["failed_attempts"] += 1
                 else:
+                    # Semantics: fast-retry, NOT fresh-grace (R52 — the analog of
+                    # R19's decline fix, deliberately the OPPOSITE choice).
+                    #
+                    # A decline (R19) is a polite, instantaneous "not me" on a job
+                    # that never ran; the decline path sets requeued_at=now to
+                    # RESTART the placement-grace window, giving the remaining
+                    # fleet a fresh competitive round (without it, anti-starvation
+                    # is pre-armed and the first poller grabs it regardless of fit
+                    # — the bug R19 fixed).
+                    #
+                    # A lease expiry is a REAL failure: a leased worker ran (or
+                    # tried) and then went silent for a full LEASE_TTL (>=60s).
+                    # The grace window exists to find a better fit for a job that
+                    # has NOT yet been placed; THIS job already was placed and that
+                    # placement failed, after a long penalty. So we leave
+                    # requeued_at untouched: the grace clock keeps running from the
+                    # original created_at (already well past PLACEMENT_GRACE, since
+                    # a lease can only expire >=60s after creation), so the fastest
+                    # available capable worker re-grabs it immediately rather than
+                    # waiting out a fresh competitive round. Failure recovery
+                    # prioritizes getting the job running again over re-shopping for
+                    # a marginally better fit; the next attempt's own lease +
+                    # heartbeat re-check liveness, and a persistently flapping job
+                    # is bounded by max_attempts (the branch above).
                     conn.execute(
                         "UPDATE jobs SET state='queued', worker_id=NULL, "
                         "assigned_at=NULL, started_at=NULL, lease_expires_at=NULL "
