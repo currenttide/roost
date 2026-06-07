@@ -985,6 +985,159 @@ def test_roost_schedule_remove_missing_is_http_404(cp, monkeypatch):
     assert out["error"] == "http_404"
 
 
+# ---------- roost_publish: ship a static site (one-shot + two-step) ----------
+
+
+def _tar_gz_bytes(tmp_path: Path, files: dict[str, bytes]) -> Path:
+    """Write a .tar.gz bundle (members relative to a dir, arcname='.') and return
+    its path — what roost_publish reads for the one-shot path."""
+    import tarfile
+
+    src = tmp_path / "site"
+    src.mkdir(exist_ok=True)
+    for rel, data in files.items():
+        (src / rel).write_bytes(data)
+    out = tmp_path / "bundle.tar.gz"
+    with tarfile.open(out, "w:gz") as tar:
+        tar.add(str(src), arcname=".")
+    return out
+
+
+def test_roost_publish_listed():
+    resp = mcp.handle({"jsonrpc": "2.0", "id": 40, "method": "tools/list"})
+    names = {t["name"] for t in resp["result"]["tools"]}
+    assert "roost_publish" in names
+    assert "roost_publish" in mcp.TOOL_IMPL
+    # the schema requires a name and exposes both source shapes
+    schema = next(t for t in mcp.TOOLS
+                  if t["name"] == "roost_publish")["inputSchema"]
+    assert schema["required"] == ["name"]
+    assert {"name", "path", "blob_id"} <= set(schema["properties"])
+
+
+def test_roost_publish_oneshot_returns_site_shape(cp, tmp_path, monkeypatch):
+    """The one-shot path (local .tar.gz) POSTs the bundle raw and returns the
+    Site dict; the CP serves it live at /pub/<slug>/."""
+    _bind_client(monkeypatch, cp)
+    bundle = _tar_gz_bytes(tmp_path, {"index.html": b"<h1>hi</h1>",
+                                      "style.css": b"body{}"})
+
+    out = mcp.tool_roost_publish({"name": "demo", "path": str(bundle)})
+    assert "error" not in out, out
+    # Site shape (publishlib.public_dict)
+    assert out["slug"] == "demo"
+    assert out["url"].endswith("/pub/demo/")
+    assert out["files"] == 2
+    assert out["size"] == len(b"<h1>hi</h1>") + len(b"body{}")
+    assert "created_at" in out and "updated_at" in out
+
+    # the site is actually served (unauthenticated) at /pub/<slug>/
+    served = cp.get("/pub/demo/index.html", headers={"Authorization": ""})
+    assert served.status_code == 200
+    assert served.content == b"<h1>hi</h1>"
+
+
+def test_roost_publish_via_tools_call_serializes_site(cp, tmp_path, monkeypatch):
+    """tools/call(roost_publish) on the one-shot path returns a Site shape in the
+    serialized content (the R57 dispatch contract)."""
+    _bind_client(monkeypatch, cp)
+    bundle = _tar_gz_bytes(tmp_path, {"index.html": b"<p>x</p>"})
+    resp = mcp.handle({"jsonrpc": "2.0", "id": 41, "method": "tools/call",
+                       "params": {"name": "roost_publish",
+                                  "arguments": {"name": "shipit",
+                                                "path": str(bundle)}}})
+    assert "isError" not in resp["result"]
+    body = json.loads(resp["result"]["content"][0]["text"])
+    assert body["slug"] == "shipit"
+    assert body["url"].endswith("/pub/shipit/")
+    assert body["files"] == 1
+
+
+def test_roost_publish_blob_id_two_step(cp, tmp_path, monkeypatch):
+    """The two-step path: stage a bundle as a blob, then publish by blob_id —
+    the flow worker-staged content uses."""
+    _bind_client(monkeypatch, cp)
+    bundle = _tar_gz_bytes(tmp_path, {"index.html": b"<h1>two-step</h1>"})
+    staged = mcp.tool_stage_file({"path": str(bundle)})
+
+    out = mcp.tool_roost_publish({"name": "staged-site",
+                                  "blob_id": staged["id"]})
+    assert "error" not in out, out
+    assert out["slug"] == "staged-site"
+    assert out["files"] == 1
+    served = cp.get("/pub/staged-site/index.html", headers={"Authorization": ""})
+    assert served.status_code == 200 and served.content == b"<h1>two-step</h1>"
+
+
+def test_roost_publish_bad_slug_maps_to_400(cp, tmp_path, monkeypatch):
+    """An invalid slug is mapped to a clean http_400 tool error (not raised) —
+    the R57 error matrix, verified against the live server route."""
+    _bind_client(monkeypatch, cp)
+    bundle = _tar_gz_bytes(tmp_path, {"index.html": b"x"})
+    out = mcp.tool_roost_publish({"name": "Bad Slug!", "path": str(bundle)})
+    assert out["error"] == "http_400"
+    assert "slug" in out["detail"]
+
+
+def test_roost_publish_oversized_maps_to_413(monkeypatch, tmp_path):
+    """An oversized bundle (the CP returns 413) is mapped to an http_413 tool
+    error. Driven via a fake client so the test stays deterministic and cheap."""
+    f = tmp_path / "big.tar.gz"
+    f.write_bytes(b"\x1f\x8b" + b"0" * 100)  # contents irrelevant; CP 413s
+
+    def _post(self, path, **kw):
+        return _FakeResp(status_code=413,
+                         text="bundle exceeds 268435456 bytes uncompressed")
+    fc = _FakeClient({("POST", "/publish"): _post})
+    monkeypatch.setattr(mcp, "_client", lambda: fc)
+    out = mcp.tool_roost_publish({"name": "huge", "path": str(f)})
+    assert out["error"] == "http_413"
+    assert "exceeds" in out["detail"]
+
+
+def test_roost_publish_422_falls_back_to_two_step(monkeypatch, tmp_path):
+    """An older CP that 422s the raw one-shot body → fall back to staging the
+    tar.gz and publishing by blob_id (mirrors the CLI's 422 fallback)."""
+    f = tmp_path / "site.tar.gz"
+    f.write_bytes(b"tarbytes")
+    calls = {"publish": []}
+
+    def _publish(self, path, **kw):
+        if "content" in kw:  # the raw one-shot attempt
+            calls["publish"].append("oneshot")
+            return _FakeResp(status_code=422, text="unprocessable")
+        calls["publish"].append(("blob", kw["json"]))  # the JSON fallback
+        return _FakeResp({"slug": "fellback", "url": "http://cp/pub/fellback/",
+                          "files": 1, "size": 8, "created_at": 1.0,
+                          "updated_at": 1.0})
+
+    def _blob_post(self, path, **kw):
+        return _FakeResp({"id": "blob-77", "name": "site.tar.gz", "size": 8,
+                          "sha256": "ab", "get_url": "http://cp/blobs/blob-77?sig=x",
+                          "expires_at": 9.0})
+
+    fc = _FakeClient({("POST", "/publish"): _publish,
+                      ("POST", "/blobs"): _blob_post})
+    monkeypatch.setattr(mcp, "_client", lambda: fc)
+    out = mcp.tool_roost_publish({"name": "fellback", "path": str(f)})
+    assert out["slug"] == "fellback"
+    # it tried one-shot first, then published the staged blob
+    assert calls["publish"][0] == "oneshot"
+    assert calls["publish"][1][0] == "blob"
+    assert calls["publish"][1][1] == {"name": "fellback", "blob_id": "blob-77"}
+
+
+def test_roost_publish_requires_exactly_one_source(monkeypatch):
+    # neither path nor blob_id, and both, are bad_args (and never hit the CP).
+    monkeypatch.setattr(mcp, "_client",
+                        lambda: (_ for _ in ()).throw(AssertionError("called CP")))
+    neither = mcp.tool_roost_publish({"name": "x"})
+    assert neither["error"] == "bad_args"
+    both = mcp.tool_roost_publish({"name": "x", "path": "/a.tgz",
+                                   "blob_id": "b1"})
+    assert both["error"] == "bad_args"
+
+
 # ---------- JSON-RPC plumbing: handle()/main() ----------
 
 

@@ -429,6 +429,45 @@ TOOLS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "name": "roost_publish",
+        "description": (
+            "Ship a static site to the fleet's own control plane — the publish verb, "
+            "so 'build a site and publish it' actually has a front door. Give a `name` "
+            "(the slug) and ONE source: `path` to a local .tar.gz bundle THIS process "
+            "can read (one transactional call — the bundle IS the request body, nothing "
+            "is staged so a flap can't dangle a blob), OR `blob_id` of a bundle a worker "
+            "already staged (the two-step flow — pair with send_file/stage_file). The CP "
+            "extracts it and serves it live, immediately, at <cp-url>/pub/<slug>/; "
+            "re-publishing the same name atomically replaces the site. Returns the Site: "
+            "{slug, url, files, size, created_at, updated_at} (+ public_url if the CP has "
+            "a publish domain). Gotchas: served sites are UNAUTHENTICATED (public is the "
+            "point — no secrets in a bundle); a bad slug (must match "
+            "^[a-z0-9][a-z0-9-]{0,39}$) comes back as a 400 and an oversized bundle "
+            "(>256 MB / 5000 files uncompressed) as a 413. "
+            'Example: {"name": "demo", "path": "/tmp/site.tar.gz"} → '
+            "{slug: demo, url: http://127.0.0.1:8787/pub/demo/, files: 3, size: 4096, "
+            "created_at, updated_at}."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string",
+                         "description": "Site slug (^[a-z0-9][a-z0-9-]{0,39}$). "
+                                        "Re-publishing the same name replaces the site."},
+                "path": {"type": "string",
+                         "description": "Local .tar.gz bundle this process can read "
+                                        "(arcname-relative, e.g. an index.html at the "
+                                        "top). One-shot: the body IS the bundle. Use "
+                                        "this OR blob_id."},
+                "blob_id": {"type": "string",
+                            "description": "Id of a previously-staged bundle blob "
+                                           "(two-step flow — e.g. content a worker "
+                                           "staged). Use this OR path."},
+            },
+            "required": ["name"],
+        },
+    },
 ]
 
 
@@ -902,6 +941,48 @@ def tool_roost_schedule(args: dict) -> dict:
         return {"schedules": body} if isinstance(body, list) else body
 
 
+def tool_roost_publish(args: dict) -> dict:
+    """Publish a static site to the control plane — mirrors `roost publish`.
+
+    Two source shapes (exactly one):
+    - `path`: a local .tar.gz the MCP process can read → the one-shot
+      transactional path (the bundle IS the request body, ?name=<slug>); on an
+      older CP that 422s the raw body, fall back to the two-step blob flow
+      (stage the tar.gz, then POST {blob_id, name}) — exactly the CLI's fallback.
+    - `blob_id`: a previously-staged bundle → the JSON two-step path directly.
+
+    Returns the Site dict ({slug, url, files, size, created_at, updated_at,
+    [public_url]}); a 4xx (bad slug 400, oversized 413, …) is mapped to a clean
+    {error: http_<code>, detail} tool error rather than raised.
+    """
+    name = args["name"]
+    path = args.get("path")
+    blob_id = args.get("blob_id")
+    if bool(path) == bool(blob_id):
+        return {"error": "bad_args",
+                "detail": "give exactly one of `path` (local .tar.gz) or `blob_id`"}
+
+    with _client() as c:
+        if path:
+            with open(path, "rb") as f:
+                bundle = f.read()
+            # One transactional call: the bundle IS the body (no staging, so a
+            # flap can't dangle a blob), pinned to the slug via ?name=.
+            r = c.post("/publish", params={"name": name}, content=bundle,
+                       headers={"Content-Type": "application/octet-stream"})
+            if r.status_code == 422:
+                # Older CP (pre one-shot /publish) rejects a raw body with a 422
+                # → fall back to the two-step blob flow, like the CLI does.
+                blob = _stage_blob(path)
+                r = c.post("/publish", json={"name": name, "blob_id": blob["id"]})
+        else:
+            r = c.post("/publish", json={"name": name, "blob_id": blob_id})
+        if r.status_code >= 400:
+            return {"error": f"http_{r.status_code}", "detail": r.text}
+        r.raise_for_status()
+        return r.json()
+
+
 TOOL_IMPL = {
     "roost_do":           tool_roost_do,
     "roost_runs":         tool_roost_runs,
@@ -919,6 +1000,7 @@ TOOL_IMPL = {
     "fetch_file":    tool_fetch_file,
     "list_staged":   tool_list_staged,
     "roost_schedule": tool_roost_schedule,
+    "roost_publish": tool_roost_publish,
 }
 
 

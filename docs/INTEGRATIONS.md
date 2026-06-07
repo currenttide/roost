@@ -40,6 +40,7 @@ That registers Roost's stdio MCP server. Your agent now has these tools (from
 | `fetch_file` | Pull a file **from** a worker to here (the reverse of `send_file`). |
 | `list_staged` | List files currently staged in the blob store with their presigned `get_url`s. |
 | `roost_schedule` | Run work on an interval — the schedule verb (`create`/`list`/`remove`/`enable`/`disable`). |
+| `roost_publish` | Ship a static site to the fleet's own CP — the publish verb. `name` (slug) + a local `.tar.gz` `path` (one-shot) or a staged `blob_id`. Returns the Site `{slug, url, files, size}`, live at `<cp>/pub/<slug>/`. |
 
 Then just talk: *"run the tests on a GPU box"*, *"what's running?"*, *"why did that
 fail?"*.
@@ -137,7 +138,7 @@ The verbs are the product — model-vendor-neutral by construction.
 | **observe** | `roost_runs` / `roost_status` / `GET /derived` / `/panel` / `GET /metrics` | live state, health, cost, evidence (`/metrics` = admin-only Prometheus scrape) |
 | **steer** | `roost send <id> "<text>"` / `POST /jobs/{id}/input` | send a follow-up to a **running** job — delivered live to `command` jobs; dropped-with-reason for agent/docker |
 | **schedule** | `roost schedule "<goal>" --every 6h` / `roost_schedule` / `POST /schedules` | the CP enqueues the job every interval |
-| **serve / publish** | `roost publish ./site` / `POST /publish` → `GET /pub/<slug>/` | static site live on your own CP |
+| **serve / publish** | `roost publish ./site` / `roost_publish` / `POST /publish` → `GET /pub/<slug>/` | static site live on your own CP |
 
 ---
 
