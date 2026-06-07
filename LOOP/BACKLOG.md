@@ -7,8 +7,12 @@ Direction anchor for the improvement loop (see `PROTOCOL.md` for the rules).
   *append* to Proposed — with one exception: when Ranked runs dry, the Replenishment
   engine (`PROTOCOL.md`) refills it with up to 3 judge-approved **Tier A** items per
   cycle from renewable sources — bug hunts (reproducing test required), coverage gaps,
-  drift sweeps over changed code, journaled debts, and the Ratchets table below — each
-  tagged `self-promoted`. Features and API/contract changes always wait for the human.
+  drift sweeps over changed code, journaled debts, the Ratchets table, and the
+  **Product gap survey (A6)** — each tagged `self-promoted`. A6 may also promote items
+  from Proposed directly to Ranked when the gap is real and code-verifiable, the fix
+  is additive, the Done-when is concrete, and no design decision is required (judge
+  must approve). Features needing a direction call, API/contract changes, or new
+  dependencies always wait for the human.
   This is what makes the loop continuous: it idles only when a full cycle plus two
   deepening passes find nothing real, and resumes when the repo changes.
 - Every iteration is gated by an independent **Sonnet judge** that re-runs the
@@ -47,6 +51,21 @@ feat/mac-app) — verify it after the merge.
 
 ## Ranked
 
+### R24. Auto job crash after decline marker misclassified as `declined` — `open` `self-promoted`
+Surface: backend/correctness. A1 hunt #3 (worker executors). `run_job` checks `declined` before `exit_code != 0`, so a `kind:auto` triage subprocess that emits `ROOST_DECLINE:` then crashes with non-zero exit is reported as `type="declined"` (causing the CP to requeue it) instead of `type="failed"`. Causes an infinite retry loop across the fleet.
+Repro: `tests/test_judge_r4_bugs.py::test_bug5_auto_decline_then_crash_reported_as_declined_not_failed` — FAILS on master.
+Done-when: exit_code check wins over the `declined` flag (non-zero exit is always `failed` regardless of marker); repro test passes; pytest green.
+
+### R25. `_running`/`_active` leaked when `run_job` is cancelled — `open` `self-promoted`
+Surface: backend/robustness. A1 hunt #3. `self._running += 1` and `self._active[job_id] = ...` are set early in `run_job` with no enclosing `try/finally`. On `task.cancel()`, `CancelledError` propagates out leaving both counters permanently wrong — capacity accounting corrupts over time.
+Repro: `tests/test_judge_r4_bugs.py::test_bug1_running_and_active_not_leaked_on_cancellation` — FAILS on master.
+Done-when: `try/finally` wraps the full body after `_running += 1`; decrement and `_active.pop` unconditional on any exit path including `CancelledError`; repro test passes; pytest green.
+
+### R26. `OSError` subclasses escape `run_job` without posting terminal event — `open` `self-promoted`
+Surface: backend/robustness. A1 hunt #3. The `except` clause around `asyncio.create_subprocess_exec` catches only `FileNotFoundError` and `PermissionError`. Broader `OSError` subclasses (e.g. `BlockingIOError` EAGAIN, `OSError` EMFILE) propagate uncaught — `_running` stays incremented, no terminal event posted, job stuck at "started" forever.
+Repro: `tests/test_judge_r4_bugs.py::test_bug4_other_oserror_does_not_escape_run_job` — FAILS on master.
+Done-when: except broadened to `OSError`; spawn failures post `type="failed"` and decrement `_running`; repro test passes; pytest green.
+
 ### R21. Make presigned blob PUT single-use and race-safe — `done` *(2026-06-07, PR #30)* `self-promoted`
 Surface: backend/security. A1 hunt #2 reproduced that a presigned `put_url`
 remains valid after the first upload finalizes the blob: replaying the same URL
@@ -55,7 +74,7 @@ Done-when: only a pending blob can accept a PUT; claiming/finalizing is atomic
 enough that concurrent PUTs cannot both win; finalized content and metadata stay
 immutable; replay + concurrency regression tests; pytest green.
 
-### R22. Roll back failed direct blob uploads — `open` `self-promoted`
+### R22. Roll back failed direct blob uploads — `blocked: security-session` `self-promoted`
 Surface: backend/security/robustness. A1 hunt #2 reproduced that `POST /blobs`
 inserts a durable `state=ready` row before streaming the body; a 413 rejection
 deletes the partial file but leaves a listed ready row with a signed download URL.
@@ -63,7 +82,7 @@ Done-when: incomplete uploads are never exposed as ready; any stream or finalize
 failure removes both file and row; tests cover oversized rejection and an
 injected failure; pytest green.
 
-### R23. Count every publish archive entry against the extraction cap — `open` `self-promoted`
+### R23. Count every publish archive entry against the extraction cap — `blocked: security-session` `self-promoted`
 Surface: publish/security. A1 hunt #2 reproduced that `SITE_MAX_FILES` counts
 only regular tar members, so arbitrarily many directories/links bypass the
 pre-extraction cap and can consume filesystem inodes/CPU.
@@ -166,6 +185,13 @@ first iteration on that ratchet measures and records it here (no code changes).
 
 ## Proposed (loop appends here; only humans promote)
 
+- **A6 (cycle #4, judge-approved — promote without re-judging in cycle #5):** `roost_submit` MCP schema missing `kind: auto` — captains using `roost_submit` always get unverified jobs (roost/mcp.py:129 enum is `["claude","codex","docker"]`; server accepts `auto`)
+- **A6 (cycle #4, judge-approved — promote without re-judging in cycle #5):** INTEGRATIONS.md tool table documents 9 of 16 MCP tools — `stage_file`, `send_file`, `fetch_file`, `list_staged`, `roost_schedule`, `roost_wait` are invisible to new users
+- **A6 (cycle #4, judge-approved — promote without re-judging in cycle #5):** `roost history` and `roost prune-workers` are implemented (cli.py:1916, :1029) but absent from README.md and INTEGRATIONS.md
+- **A6 (cycle #4, unblocked from Proposed):** Mobile one-shot publish parity — server landed with R7 (PR #15); just needs API.md §6 + iOS/Android decode layers (no server changes)
+- **A6 (cycle #4, unblocked from Proposed):** Version drift — `pyproject.toml` says `0.1.0`, server self-reports `0.2.0`; single-source via `importlib.metadata`
+- **A1 (cycle #4 hunt #3, repro in tests/test_judge_r4_bugs.py):** `_oneshot_agent` corrupts bwrap argv when inserting `--append-system-prompt` — inserts at `argv[:3]` (inside bwrap flags) instead of finding the `claude` position
+- **A1 (cycle #4 hunt #3):** Relay tasks `t1`/`t2` in `_oneshot_agent` not cancelled in `finally` block — float as pending tasks on `CancelledError`, causing asyncio warnings and test interference
 - Published-site listing pagination (`/publish` list unbounded, roost/server.py:2150)
 - Drop `cred_hash` on worker revoke — make revocation total
 - Capability detection: distinguish "no GPU" from "GPU detection failed" (worker logs)

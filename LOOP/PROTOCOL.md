@@ -100,19 +100,54 @@ churn.
   regressing any other. First iteration on a new ratchet just measures and
   records the baseline. The loop may *propose* new ratchets (Tier B); only the
   human adds them to the table.
+- **A6 — Product gap survey**: the loop reads the user-facing product surface —
+  README, CLI help, MCP tool list, INTEGRATIONS.md, API.md, mobile clients —
+  and asks, from a user's perspective: *what is incomplete, awkward, or missing
+  that someone using this product day-to-day would notice?* The loop should also
+  scan the **Proposed** list for items that recent merges have made clearly
+  unblocked and ready to implement. A finding self-promotes to Ranked when ALL
+  four gates pass:
+  1. **Additive** — no existing API, contract, or CLI interface is removed,
+     renamed, or made incompatible. The fix adds or completes, never breaks.
+  2. **Gap is real and code-verifiable** — the judge can confirm the gap exists
+     by reading the current codebase (a server capability with no CLI command;
+     a feature half-landed with the UI wiring still missing; a Proposed item
+     whose blocker was resolved by a merged PR). No speculation.
+  3. **Done-when is concrete** — the judge can re-run a specific test, command,
+     or smoke to confirm completion. "Users will find it easier" is Tier B;
+     "`roost schedule list` returns a 200 with the correct schema" is Tier A.
+  4. **No design decision required** — the right approach is obvious from the
+     existing architecture. If the loop finds itself choosing between two
+     meaningfully different designs, or if the work touches external systems,
+     adds dependencies, or changes how the product is positioned, it drafts a
+     Proposed note instead and flags it for the human.
+  This source is renewable: product surfaces grow over time and every merge
+  can create new gaps. Unlike A1–A5, A6 may promote items directly from
+  Proposed to Ranked (bypassing the usual human-only rule) when the four gates
+  are met and the judge approves.
 
 ### Tier B (human-gated — drafted, never self-promoted)
 
-New features, API/contract changes, UX work, new dependencies or dev tools,
-refactors without a reproducing defect, anything justified mainly by positioning
-or product judgment. Goes to Proposed with evidence; surfaced in notifications.
+Anything that requires a product direction or design decision: new external
+dependencies, API/contract changes (removals, renames, breaking changes), UX
+redesigns, new product surfaces with unclear scope, refactors unjustified by a
+reproducing defect, or features whose value depends on positioning judgment the
+loop cannot make alone. Goes to Proposed with evidence and a clear "what the
+human needs to decide" note; surfaced in replenishment notifications.
+
+The boundary with A6: if a reasonable engineer, seeing the current codebase,
+would agree that the gap is obviously real and the fix is obviously correct —
+it's A6. If a reasonable engineer might say "good question, but I'm not sure
+that's the right direction" — it's Tier B.
 
 ### The cycle
 
 1. **Survey** the cheapest sufficient sources: journal debts (A4) + ratchet table
    (A5) first; then a drift sweep scoped to changes since last sweep (A3); then a
-   coverage measure (A2); then a bug hunt in the least-recently-hunted area (A1 —
-   rotate areas, record the rotation in the journal).
+   coverage measure (A2); then a product gap survey (A6 — scan Proposed for
+   newly-unblocked items, then scan the live product surface); then a bug hunt in
+   the least-recently-hunted area (A1 — rotate areas, record the rotation in the
+   journal).
 2. **Draft a slate**: every candidate with evidence (file:line, failing test,
    metric delta) and a tier.
 3. **Judge the slate**: the Sonnet judge verifies tier assignments — it must be
@@ -126,7 +161,7 @@ or product judgment. Goes to Proposed with evidence; surfaced in notifications.
 
 ### Pacing and the idle state
 
-- Idle is a *pause*, not an end state. When a full cycle (all five sources)
+- Idle is a *pause*, not an end state. When a full cycle (all six sources)
   yields zero judge-approved Tier A work, the loop idles and re-checks on wake:
   - **Repo changed** (new commits/merges since last survey) → run a drift sweep
     + targeted hunt over the changed areas.
@@ -150,6 +185,11 @@ or product judgment. Goes to Proposed with evidence; surfaced in notifications.
   choice — the loop never builds or triggers silent credential copying.
 - Outward-facing actions beyond pushing branches/PRs to this repo (publishing
   packages, posting anywhere external) are out of scope; propose instead.
+- **Security-surface items are out of scope for this loop.** Any backlog item
+  whose Surface tag contains "security" (e.g. `backend/security`, `publish/security`)
+  must be marked `blocked: security-session` and skipped — those items are handled
+  in a dedicated security-review session. Replenishment must not self-promote
+  security findings into Ranked; they go to Proposed only.
 
 ## Journal entry format
 
