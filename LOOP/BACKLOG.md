@@ -101,7 +101,7 @@ Done-when: a pytest that round-trips live server responses against the golden fi
 Surface: docs. Confirmed: roost/cli.py:~1440 `roost publish` docstring still says "uploads it via the blob store" (one-shot since PR #15; blob path is only the 422 fallback). Omissions: README "Job kinds" never says unbudgeted jobs get per-kind default caps (worker.py:~863, 120/240/240/360m, `default_runtime_cap_exceeded`); mobile-app/API.md §4 logs section doesn't mention the R11 write-time bounds (64KiB/append, 5000-row ceiling, events exempt).
 Done-when: three spots corrected (additive, no contract change); Docs-drift ratchet back to 0; pytest green.
 
-### R16. Tests for `roost up` orchestration in cli.py — `open` `self-promoted` *(A4 journal debt from R9, 2026-06-07, judge-approved)*
+### R16. Tests for `roost up` orchestration in cli.py — `done` *(2026-06-07, PR #23 — judge round 2; cli.py 28%→36% branch)* `self-promoted`
 Surface: tests. cli.py `up` (≈line 503+) spawns processes and drives boot.ping_ok/wait_for_health/wait_for_worker; zero tests reach it (cli.py at 28% branch coverage).
 Done-when: unit tests with bootstrap helpers + process-spawning mocked (R10 style); failure paths covered (CP already up, health timeout, worker never registers); pytest green.
 
