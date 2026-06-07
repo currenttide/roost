@@ -1410,8 +1410,13 @@ def _tar_site(src: Path) -> bytes:
     return buf.getvalue()
 
 
-def _print_sites(c) -> None:
-    r = c.get("/publish")
+def _print_sites(c, limit: Optional[int] = None, offset: int = 0) -> None:
+    params: dict = {}
+    if limit is not None:
+        params["limit"] = limit
+    if offset:
+        params["offset"] = offset
+    r = c.get("/publish", params=params)
     if r.status_code == 403:
         raise _admin_403("list sites")
     r.raise_for_status()
@@ -1422,6 +1427,13 @@ def _print_sites(c) -> None:
     for s in rows:
         click.echo(f"{s['slug']:20}  {s['files']:>5} files  "
                    f"{s['size'] / 1024:.0f} KB  {s['url']}")
+    # The listing is paginated (bounded by default); the total lets the user
+    # know when there's more to page through with --offset.
+    total = r.headers.get("X-Total-Count")
+    shown = offset + len(rows)
+    if total is not None and total.isdigit() and int(total) > shown:
+        click.echo(f"… showing {len(rows)} of {total} "
+                   f"(use --offset {shown} for more)")
 
 
 @cli.command()
@@ -1430,11 +1442,16 @@ def _print_sites(c) -> None:
 @click.option("--name", default=None,
               help="Site name / slug (default: the directory name).")
 @click.option("--list", "list_", is_flag=True, help="List published sites.")
+@click.option("--limit", type=int, default=None,
+              help="With --list: max sites to return (server caps at 500).")
+@click.option("--offset", type=int, default=0,
+              help="With --list: skip this many sites (page through).")
 @click.option("--unpublish", "unpublish_slug", default=None, metavar="SLUG",
               help="Remove a published site.")
 @click.pass_context
 def publish(ctx: click.Context, directory: Optional[str], name: Optional[str],
-            list_: bool, unpublish_slug: Optional[str]) -> None:
+            list_: bool, limit: Optional[int], offset: int,
+            unpublish_slug: Optional[str]) -> None:
     """Publish a built directory as a live site on your own control plane.
 
     One command, end to end: tars the directory and POSTs the bundle straight
@@ -1446,7 +1463,7 @@ def publish(ctx: click.Context, directory: Optional[str], name: Optional[str],
     url, _, _ = _resolve(ctx)
     with _ctx_client(ctx) as c:
         if list_:
-            _print_sites(c)
+            _print_sites(c, limit=limit, offset=offset)
             return
         if unpublish_slug:
             r = c.delete(f"/publish/{unpublish_slug}")

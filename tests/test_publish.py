@@ -369,6 +369,85 @@ def test_sites_table_list_and_unpublish(client: TestClient, db: Path):
     assert client.delete("/publish/demo").status_code == 404
 
 
+def _publish_n(client: TestClient, n: int, prefix: str = "site") -> None:
+    for i in range(n):
+        r = _publish_oneshot(client, _tar_gz({"index.html": b"x"}),
+                             f"{prefix}-{i:03d}")
+        assert r.status_code == 200, r.text
+
+
+# ---------- listing pagination (R36; bounded resources, north star #2) ----------
+
+
+def test_list_empty_returns_bare_list_with_zero_total(client: TestClient):
+    r = client.get("/publish")
+    assert r.status_code == 200
+    assert r.json() == []  # still a bare array (additive contract)
+    assert r.headers["X-Total-Count"] == "0"
+
+
+def test_list_default_is_bare_list_and_bounded(client: TestClient):
+    # 150 sites, no params: default cap (100) applies, body stays a bare list.
+    _publish_n(client, 150)
+    r = client.get("/publish")
+    assert r.status_code == 200
+    body = r.json()
+    assert isinstance(body, list)
+    assert len(body) == 100  # default limit caps the page
+    assert r.headers["X-Total-Count"] == "150"
+
+
+def test_list_exactly_limit(client: TestClient):
+    _publish_n(client, 5)
+    r = client.get("/publish", params={"limit": 5})
+    assert r.status_code == 200
+    assert len(r.json()) == 5
+    assert r.headers["X-Total-Count"] == "5"
+
+
+def test_list_beyond_limit_pages_with_offset(client: TestClient):
+    _publish_n(client, 7)
+    first = client.get("/publish", params={"limit": 3, "offset": 0})
+    second = client.get("/publish", params={"limit": 3, "offset": 3})
+    third = client.get("/publish", params={"limit": 3, "offset": 6})
+    assert [len(r.json()) for r in (first, second, third)] == [3, 3, 1]
+    for r in (first, second, third):
+        assert r.headers["X-Total-Count"] == "7"
+    # Pages are disjoint and cover everything, newest-updated first overall.
+    seen = [s["slug"] for r in (first, second, third) for s in r.json()]
+    assert len(set(seen)) == 7
+
+
+def test_list_offset_past_end_is_empty(client: TestClient):
+    _publish_n(client, 3)
+    r = client.get("/publish", params={"limit": 10, "offset": 99})
+    assert r.status_code == 200
+    assert r.json() == []  # empty page, not an error
+    assert r.headers["X-Total-Count"] == "3"  # total still reflects the table
+
+
+def test_list_max_limit_enforced(client: TestClient):
+    # limit above the hard cap (500) is rejected by validation, not silently
+    # serving an unbounded page; the cap itself (500) is accepted.
+    assert client.get("/publish", params={"limit": 501}).status_code == 422
+    assert client.get("/publish", params={"limit": 500}).status_code == 200
+
+
+def test_list_invalid_params_rejected(client: TestClient):
+    assert client.get("/publish", params={"limit": 0}).status_code == 422
+    assert client.get("/publish", params={"limit": -1}).status_code == 422
+    assert client.get("/publish", params={"offset": -1}).status_code == 422
+
+
+def test_list_ordering_preserved_across_pages(client: TestClient):
+    # updated_at desc must hold across the page boundary, not just within a page.
+    _publish_n(client, 6)
+    full = client.get("/publish", params={"limit": 6}).json()
+    paged = (client.get("/publish", params={"limit": 4, "offset": 0}).json()
+             + client.get("/publish", params={"limit": 4, "offset": 4}).json())
+    assert [s["slug"] for s in full] == [s["slug"] for s in paged]
+
+
 def test_publish_missing_blob(client: TestClient):
     r = client.post("/publish", json={"name": "demo", "blob_id": "deadbeef"})
     assert r.status_code == 404
