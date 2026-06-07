@@ -80,6 +80,25 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: rs.roost.mobile.tests
         GENERATE_INFOPLIST_FILE: YES
 
+  # UI smoke suite (R84). XCUITest drives the real app via the accessibility
+  # tree — no app source is linked in; it talks to the app over the automation
+  # bridge. The smoke flows pair via launch-arg, assert live dashboard data,
+  # open the New-session sheet, push into a Session, and open the
+  # Notifications/Schedules sheets. Runs headless on the Mac node via
+  # `xcodebuild test` (see README "UI smoke suite").
+  RoostUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: RoostUITests
+    dependencies:
+      - target: Roost
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: rs.roost.mobile.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: Roost
+
 schemes:
   Roost:
     build:
@@ -89,3 +108,14 @@ schemes:
     test:
       targets:
         - RoostTests
+  # Dedicated UI scheme so `xcodebuild test -scheme RoostUI` runs only the
+  # XCUITest smoke flows (the unit scheme stays fast and host-free). Result
+  # bundles + automatic screenshots come from this scheme's runs.
+  RoostUI:
+    build:
+      targets:
+        Roost: all
+        RoostUITests: [test]
+    test:
+      targets:
+        - RoostUITests

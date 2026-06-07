@@ -71,6 +71,8 @@ struct SessionView: View {
             Spacer()
         }
         .padding(.horizontal).padding(.vertical, 8)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("session-header")
     }
 
     private var headerMeta: String {
@@ -162,12 +164,14 @@ struct SessionView: View {
                 Button(role: .destructive) { confirmCancel = true } label: {
                     Label("Cancel", systemImage: "xmark.circle")
                 }
+                .accessibilityIdentifier("session-cancel")
             }
             Spacer()
             Button {
                 Task { await store.loadTree() }
                 showTree = true
             } label: { Label("Tree", systemImage: "list.bullet.indent") }
+            .accessibilityIdentifier("session-tree")
         }
         .padding(.horizontal).padding(.vertical, 8)
         .background(.bar)
@@ -186,11 +190,13 @@ struct SessionView: View {
                     .lineLimit(1...4)
                     .disabled(store.sending)
                     .onSubmit { Task { await store.sendFollowUp() } }
+                    .accessibilityIdentifier("session-composer-field")
                 Button {
                     Task { await store.sendFollowUp() }
                 } label: {
                     Image(systemName: "arrow.up.circle.fill").font(.title2)
                 }
+                .accessibilityIdentifier("session-composer-send")
                 .disabled(store.sending || !Composer.canSend(store.draft))
             }
         }

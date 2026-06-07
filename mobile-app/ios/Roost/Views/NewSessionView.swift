@@ -57,11 +57,13 @@ struct NewSessionView: View {
                     Text(error).font(.footnote).foregroundStyle(.red)
                 }
             }
+            .accessibilityIdentifier("new-session-form")
             .navigationTitle("New session")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("Cancel") { dismiss() }
+                        .accessibilityIdentifier("new-session-cancel")
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Dispatch") {
@@ -69,6 +71,7 @@ struct NewSessionView: View {
                             if let id = await store.dispatch() { onDispatched(id) }
                         }
                     }
+                    .accessibilityIdentifier("new-session-dispatch")
                     .disabled(store.submitting ||
                               store.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
@@ -89,6 +92,7 @@ struct NewSessionView: View {
         TextField("refactor the matcher to use capability sets…",
                   text: $store.text, axis: .vertical)
             .lineLimit(3...8)
+            .accessibilityIdentifier("new-session-prompt")
     }
 
     /// Hold-to-talk: press starts dictation (seeded with current text), release

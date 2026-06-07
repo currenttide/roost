@@ -18,6 +18,7 @@ struct NotificationSettingsView: View {
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .keyboardType(.URL)
+                        .accessibilityIdentifier("notifications-topic-field")
                     if let preview = store.preview {
                         LabeledContent("Subscribes to", value: preview)
                             .font(.footnote)
@@ -44,11 +45,13 @@ struct NotificationSettingsView: View {
                     Text(error).font(.footnote).foregroundStyle(.red)
                 }
             }
+            .accessibilityIdentifier("notifications-form")
             .navigationTitle("Notifications")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("Done") { dismiss() }
+                        .accessibilityIdentifier("notifications-done")
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Save") { store.save() }
