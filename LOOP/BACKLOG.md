@@ -217,10 +217,14 @@ Done-when: every confirmed drift fixed additively with claims truth-checked; doc
 Surface: hunt. Deepening per protocol: all core areas hunted once; re-hunt the server's event-ingestion/lifecycle seams (worker event POST → state transitions, finalize, cancel/tree-cancel, sweeper interactions with the new input queue + notify hook) with a CONCURRENCY lens — interleavings the per-area hunts didn't try (e.g. cancel racing finalize, input-ack racing terminal, two workers' stale events crossing). Reproducing test required per finding; cleared hypotheses are valid output.
 Done-when: repros (LOOP/repro-a1-hunt5.py) for confirmed bugs merged after judge verification, or an honest all-clear report; pytest green.
 
-### R65. Orphaned interactive input on terminal transitions — `open` `self-promoted`
+### R65. Orphaned interactive input on terminal transitions — `done` *(2026-06-07, PR #76 — race 10/10→12/12; requeue-survival + cascade-scoping pinned)* `self-promoted`
 Surface: backend/correctness. A1 hunt #5 (PR #75). No server-side path reconciles `job_inputs` when a job goes terminal: `_apply_event` succeeded/failed (server.py:1546-1560), `_cancel_job` (:879-941), `_finalize_job` (:944-982), and `_sweep` lease-fail (:1887-1891) all leave `queued` rows untouched, and `_pending_input_job_ids` (:1730) only offers delivery for assigned/running jobs — so a queued input is stranded forever, violating R38's "every input ends delivered or dropped" contract (README:364).
 Repro: `LOOP/repro-a1-hunt5.py` — 4 tests FAIL on master incl. a genuine cancel-race (orphans ~40%/trial, fails 10/10).
 Done-when: each terminal site drops still-queued inputs (`queued`→`dropped` with a reason) inside its existing BEGIN IMMEDIATE; the `_cancel_job` cascade scopes the drop to jobs transitioned in THIS call (not the whole BFS set — children already terminal must be untouched); the lease-expiry REQUEUE path deliberately left alone (job still active); all 4 repros pass, promoted into tests/; repro file deleted; pytest green.
+
+### R66. A1 hunt #6 — worker-side concurrency (this session's own changes) — `open` `self-promoted`
+Surface: hunt (protocol deepening #1). The worker was heavily modified this session (R25 try/finally rewrite, R31 relay-task lifecycle, R38 input fetch/deliver/ack loop, R26 OSError path) and has never been hunted under a concurrency lens. Fresh attack surface created by our own changes: heartbeat-reconcile racing input delivery; _reap_stale_attempt vs the new finally cleanup; input-ack racing job teardown; relay cancellation vs the input writer on the same stdin pipe; capacity slots under cancel storms.
+Done-when: repros (LOOP/repro-a1-hunt6.py) for confirmed bugs merged after judge verification, or an honest all-clear (which counts as deepening-clear #1 toward the protocol's long-idle trigger); pytest green.
 
 ### R21. Make presigned blob PUT single-use and race-safe — `done` *(2026-06-07, PR #30)* `self-promoted`
 Surface: backend/security. A1 hunt #2 reproduced that a presigned `put_url`

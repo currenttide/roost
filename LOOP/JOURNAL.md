@@ -1818,3 +1818,27 @@ Entries are written by the loop; humans read, never need to edit.
   confirmed bug → does NOT count toward the two-clear-hunts long-idle trigger.
   Cycle #16 = R65 alone (one strong item; anti-churn over padding). Hunter's fix
   guidance recorded in the backlog item incl. the cascade-scoping subtlety.
+
+## 2026-06-07 ~14:50 UTC — R65: orphaned-input fix (hunt #5 consumed)
+- Verdict: shipped
+- Branch/PR: loop/r65-orphaned-input-fix / https://github.com/currenttide/roost/pull/76 (merged fdc5661)
+- What changed: _drop_pending_inputs(conn, job_ids, now) — queued→dropped with
+  reason job_terminal (existing vocabulary) + a log divider, executed INSIDE each
+  caller's BEGIN IMMEDIATE so the drop is atomic with the transition (that
+  atomicity is what kills the repro'd race). Wired at all four terminal sites;
+  _cancel_job cascade scoped via state='cancelled' AND finished_at=now (only
+  jobs transitioned THIS call); both deliberate non-drops preserved (requeue
+  survival; already-terminal children untouched — pinned by capturing the child's
+  delivered_at across the cascade, since the reason string alone can't
+  distinguish an original drop from a re-drop).
+- Evidence:
+  - `python -m pytest -q` → 800 passed (+8); promoted race test 12/12 (failed
+    10/10 on master pre-fix); LOOP/repro-a1-hunt5.py deleted
+- Judge: approve (round 1) — verified all four sites' BEGIN→drop→COMMIT spans,
+  both non-drops, repro deletion, race ×10, suite count
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only)
+- Notes: iteration #15 complete (single-item cycle). R38's contract now holds
+  under every interleaving the hunt could construct. Cycle #17 = R66: hunt #6
+  over the worker-side code THIS SESSION rewrote (R25/R31/R38/R26) under the
+  concurrency lens — deepening #1; an all-clear starts the protocol's
+  two-clear long-idle counter.
