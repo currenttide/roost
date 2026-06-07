@@ -50,7 +50,9 @@ TOOLS: list[dict[str, Any]] = [
             "otherwise). A single, safe goal runs: a worker self-selects the best-fit "
             "node, runs it, and an INDEPENDENT verifier checks the goal was actually "
             "achieved (and self-heals a wrong result). On a run it returns {run_id, "
-            "state} — call roost_result to get the verified outcome + evidence."
+            "state} — call roost_result to get the verified outcome + evidence. "
+            'Example: {"goal": "report the hostname of an idle box"} → '
+            "{run_id, state: queued}; then roost_result(run_id)."
         ),
         "inputSchema": {
             "type": "object",
@@ -75,7 +77,8 @@ TOOLS: list[dict[str, Any]] = [
             "result. Reach for this to answer 'what's running?' / 'how did that go?' / "
             "'why did it fail?'. Returns {runs: [{run_id, goal, phase, verified, "
             "result, worker}]}. Gotcha: results are truncated one-liners — use "
-            "roost_result(run_id) for the full verified outcome + evidence."
+            "roost_result(run_id) for the full verified outcome + evidence. "
+            'Example: {"limit": 5} → the 5 most recent runs.'
         ),
         "inputSchema": {
             "type": "object",
@@ -87,7 +90,9 @@ TOOLS: list[dict[str, Any]] = [
         "description": (
             "Wait for a run to finish and return its verified outcome: {state, verified, "
             "evidence, output}. Block up to timeout_sec. This is how you report back to "
-            "the user with proof, not just 'it ran'."
+            "the user with proof, not just 'it ran'. "
+            'Example: {"run_id": "<run_id from roost_do>"} → '
+            "{state: succeeded, verified: true, evidence, output}."
         ),
         "inputSchema": {
             "type": "object",
@@ -105,7 +110,8 @@ TOOLS: list[dict[str, Any]] = [
             "GPU nodes (model + VRAM) — in plain language. Reach for this to answer "
             "'what can this run?' or to size a job before submitting. Returns {nodes, "
             "cpu_cores, gpu_nodes, can}. Gotcha: only counts ONLINE (idle/busy) "
-            "workers, so offline nodes don't show."
+            "workers, so offline nodes don't show. "
+            "Example: {} → {nodes: 3, cpu_cores: 24, gpu_nodes: [...], can}."
         ),
         "inputSchema": {"type": "object", "properties": {}},
     },
@@ -118,7 +124,10 @@ TOOLS: list[dict[str, Any]] = [
             "immediately with {job_id, state, depth, root_job_id}; block with "
             "roost_wait. Gotcha: the job inherits the caller's job as parent, so "
             "depth/tree-budget guardrails apply — a 409 comes back as "
-            "{error: guardrail}."
+            "{error: guardrail}. Example: {\"kind\": \"docker\", \"image\": "
+            "\"pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime\", \"command\": "
+            "\"python train.py\", \"requires\": {\"gpu_vram_gb\": 24}, \"reason\": "
+            "\"GPU train step\"} → {id, state: queued, depth, root_job_id}."
         ),
         "inputSchema": {
             "type": "object",
@@ -185,7 +194,8 @@ TOOLS: list[dict[str, Any]] = [
             "stuck), `queued_sec`, and `capable_workers` (online workers that satisfy "
             "the job's requires — 0 on a queued job means it can NEVER be placed as "
             "specified). Interpret these yourself; the control plane reports facts, "
-            "not verdicts."
+            "not verdicts. Example: {\"job_id\": \"<job_id>\"} → "
+            "{state: running, last_activity, idle_sec, capable_workers}."
         ),
         "inputSchema": {
             "type": "object",
@@ -198,7 +208,9 @@ TOOLS: list[dict[str, Any]] = [
         "description": (
             "Block until the job reaches a terminal state (succeeded/failed/cancelled) "
             "or timeout_sec elapses. Returns the final job record including result, "
-            "exit_code, error, tokens_used."
+            "exit_code, error, tokens_used (timed_out_waiting: true if it never "
+            "settled). Example: {\"job_id\": \"<job_id>\", \"timeout_sec\": 300} → "
+            "{id, state: succeeded, exit_code: 0, result, tokens_used}."
         ),
         "inputSchema": {
             "type": "object",
@@ -217,7 +229,9 @@ TOOLS: list[dict[str, Any]] = [
             "WHAT a job actually printed — progress, errors, output — after "
             "roost_status/roost_wait tells you the state. Returns {logs: [{seq, "
             "stream, data}]}. Gotcha: logs are paginated — pass `since` (the last seq "
-            "you saw) to tail incrementally rather than re-reading from the top."
+            "you saw) to tail incrementally rather than re-reading from the top. "
+            "Example: {\"job_id\": \"<job_id>\", \"since\": 40} → "
+            "{logs: [{seq, stream, data}]} from seq 41 on."
         ),
         "inputSchema": {
             "type": "object",
@@ -234,8 +248,10 @@ TOOLS: list[dict[str, Any]] = [
         "description": (
             "Cancel a job — stop a run that's stuck, runaway, or no longer needed. "
             "Set tree=true to also cancel everything it spawned (the whole subtree). "
-            "Returns the updated job record. Gotcha: a job already in a terminal "
-            "state can't be cancelled and comes back as {error: not_cancellable}."
+            "Returns {cancelled: N}, the count of jobs moved to cancelled (>1 for a "
+            "tree). Gotcha: a job already in a terminal state can't be cancelled and "
+            "comes back as {error: not_cancellable}. "
+            "Example: {\"job_id\": \"<job_id>\", \"tree\": true} → {cancelled: 3}."
         ),
         "inputSchema": {
             "type": "object",
@@ -253,7 +269,8 @@ TOOLS: list[dict[str, Any]] = [
             "capabilities (os, arch, hostname, cpus, gpu, tools, …). Reach for this "
             "to pick a target for roost_exec/send_file, or to debug why a job won't "
             "place. Returns {workers: [...]}. Gotcha: includes offline/stale rows — "
-            "check `status` (idle/busy = reachable) before pinning work to one."
+            "check `status` (idle/busy = reachable) before pinning work to one. "
+            "Example: {} → {workers: [{id, name, status, capabilities}]}."
         ),
         "inputSchema": {"type": "object", "properties": {}},
     },
@@ -265,7 +282,9 @@ TOOLS: list[dict[str, Any]] = [
             "Hard-pins a `command` job to the named node (id OR name), waits for it, "
             "and returns {job_id, state, exit_code, output, worker}. Gotcha: if a "
             "NAME matches several online workers it errors — use an id; set "
-            "wait:false to submit and return the job_id without blocking."
+            "wait:false to submit and return the job_id without blocking. "
+            "Example: {\"worker\": \"gpu-box\", \"command\": \"nvidia-smi\"} → "
+            "{state: succeeded, exit_code: 0, output, worker}."
         ),
         "inputSchema": {
             "type": "object",
@@ -290,7 +309,9 @@ TOOLS: list[dict[str, Any]] = [
             "credentials — drop the get_url straight into a goal ('fetch <url> and "
             "run it'). Returns {id, name, size, sha256, get_url, expires_at}. Gotcha: "
             "it's a staging area, not a fileserver — blobs are size-capped and expire "
-            "(default 24h); pass ttl_sec to extend up to the CP's ceiling."
+            "(default 24h); pass ttl_sec to extend up to the CP's ceiling. "
+            "Example: {\"path\": \"/tmp/setup.sh\"} → "
+            "{id, name: setup.sh, size, sha256, get_url, expires_at}."
         ),
         "inputSchema": {
             "type": "object",
@@ -312,7 +333,10 @@ TOOLS: list[dict[str, Any]] = [
             "(exit 1 on mismatch). Reach for this to seed a node with a dataset, "
             "script, or model. Returns {job_id, destination, worker, blob}; poll it "
             "with roost_wait/roost_status. Gotcha: the destination is a path on the "
-            "REMOTE worker, and the parent dir is created for you."
+            "REMOTE worker, and the parent dir is created for you. "
+            "Example: {\"worker\": \"gpu-box\", \"local_path\": \"./model.bin\", "
+            "\"destination_path\": \"/opt/data/model.bin\"} → "
+            "{job_id, destination, worker, blob}."
         ),
         "inputSchema": {
             "type": "object",
@@ -337,7 +361,9 @@ TOOLS: list[dict[str, Any]] = [
             "local_path. Reach for this to retrieve a result/log/artifact off a node "
             "with no inbound SSH. Returns {local_path, size, worker, job_id}. Gotcha: "
             "this blocks until the remote upload finishes; local_path defaults to the "
-            "remote basename in the current directory."
+            "remote basename in the current directory. "
+            "Example: {\"worker\": \"gpu-box\", \"remote_path\": "
+            "\"/var/log/run.log\"} → {local_path, size, worker, job_id}."
         ),
         "inputSchema": {
             "type": "object",
@@ -362,7 +388,9 @@ TOOLS: list[dict[str, Any]] = [
             "presigned get_urls. Use to see what's available to hand to a job, or to "
             "find a stale upload. Returns {staged: [{id, name, size, sha256, state, "
             "get_url, expires_at}]}. Gotcha: expired blobs are swept and won't appear; "
-            "a `pending` state means an upload (fetch) hasn't finished yet."
+            "a `pending` state means an upload (fetch) hasn't finished yet. "
+            "Example: {} → {staged: [{id, name, size, sha256, state, get_url, "
+            "expires_at}]}."
         ),
         "inputSchema": {"type": "object", "properties": {}},
     },
@@ -376,7 +404,9 @@ TOOLS: list[dict[str, Any]] = [
             "action: create (goal or spec, + every), list, remove, enable, disable. "
             "Gotchas: `every` accepts seconds or '<N>[smhd]' (min 30s); a plain "
             "`goal` schedules a kind:auto task (worker self-selects, verifier "
-            "checks); re-enabling restarts the clock one interval out."
+            "checks); re-enabling restarts the clock one interval out. "
+            "Example: {\"action\": \"create\", \"goal\": \"prune stale workers\", "
+            "\"every\": \"6h\"} → {id, name, interval_sec, enabled, next_run_at}."
         ),
         "inputSchema": {
             "type": "object",
