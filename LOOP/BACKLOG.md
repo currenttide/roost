@@ -93,7 +93,7 @@ Done-when: per-append size cap + per-job rate or row ceiling enforced at write t
 ### R12. Bare `except Exception` rollback guards — `invalid` *(closed 2026-06-05)*
 Survey claim was wrong: the guards at roost/server.py:222, 513, 725, 984 roll back then **re-raise**, with comments explaining the "no transaction is active" masking they prevent. Intentional, correct, nothing to do.
 
-### R13. Fixture drift guard for the mobile contract — `open`
+### R13. Fixture drift guard for the mobile contract — `done` *(2026-06-07, PR #20 — capture() refactor + per-fixture shape guard on every pytest run)*
 Surface: mobile/tests. Contract verified in sync on 2026-06-05 (all 9 API.md endpoints match server.py) — but nothing *automated* signals when server response shapes drift from `mobile-app/fixtures/*.json`; today it takes a manual audit like that one.
 Done-when: a pytest that round-trips live server responses against the golden fixtures' shapes (additive-only rule from API.md §7 enforced: new fields OK, removals/renames fail); wired into the default test run.
 

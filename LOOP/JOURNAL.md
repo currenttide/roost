@@ -405,3 +405,37 @@ Entries are written by the loop; humans read, never need to edit.
 - Notes: the relay crash was only discoverable live — the unit suite never
   pushes a 64KiB line through a real pipe. Evidence-table discipline
   (live smoke for behavior changes) is earning its keep.
+
+## 2026-06-07 02:55 UTC — R13: Fixture drift guard for the mobile contract
+- Verdict: shipped
+- Branch/PR: loop/r13-fixture-drift-guard / https://github.com/currenttide/roost/pull/20
+- What changed: record_fixtures.py refactored — the canonical scenario now
+  lives in capture(db_path) → {fixture_name: payload}; main() writes goldens
+  from it (regen verified values-only; goldens NOT regenerated in this PR).
+  New tests/test_fixture_drift.py (23 tests): per-golden parametrized shape
+  comparison, additive-only per API.md §8 — extra live keys pass; removed/
+  renamed keys, JSON-type changes, and non-null→null fail with path-precise
+  messages + the regen command. Best-fit list matching (ordering ≠ drift),
+  bool-before-int typing, null-pins-existence, orphaned-golden detection,
+  SSE event-vocabulary coverage, and self-tests for the checker itself.
+- Evidence:
+  - `python -m pytest -q` → 482 passed in 15.43s (was 459; +23, none removed)
+  - negative check: fake key injected into healthz.json → guard failed with
+    "$.future_field_the_server_dropped: REMOVED (additive-only contract)";
+    golden restored, fixtures dir clean
+- Judge: approve (round 1) — re-ran pytest (482) + the file alone; verified
+  goldens untouched in the PR and regen equivalence by ACTUALLY regenerating
+  (values-only) then restoring; ran its OWN two negative checks (injected key
+  → REMOVED; ok:true→"yes" → type change); probed best-fit list matching
+  with a field missing from EVERY live element (still caught per golden
+  element — not bypassable by reordering); capture() measured 0.30s/session.
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (fenced
+  first-line model-ID block present)
+- Notes: RANKED IS NOW DRY — R1-R3 done pre-cut, R4 cut, R5/R12 invalid,
+  R6-R11+R13+R14 done. Next iteration runs the Replenishment protocol
+  (PROTOCOL.md): survey A4 journal debts + A5 ratchets first, then A3 drift
+  sweep scoped to changes since the last sweep, A2 coverage, A1 bug hunt.
+  Known A4 candidates already journaled: judge fenced-ID instruction holds
+  only intermittently (R2 note); `roost up` orchestration in cli.py untested
+  (R9 note). A5: branch-coverage ratchet has baseline unset (measure-only
+  iteration available).
