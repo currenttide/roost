@@ -27,11 +27,13 @@ struct DashboardView: View {
                         RunRow(run: run)
                             .contentShape(Rectangle())
                             .onTapGesture { path.append(run.runId) }
+                            .accessibilityIdentifier("run-row-\(run.runId)")
                             .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                                 swipeActions(for: run)
                             }
                     }
                 }
+                .accessibilityIdentifier("dashboard-list")
                 .listStyle(.plain)
                 .safeAreaPadding(.bottom, 72)   // keep last row above the button
 
@@ -47,16 +49,21 @@ struct DashboardView: View {
                         Button {
                             showPublish = true
                         } label: { Label("Publish a site", systemImage: "globe") }
+                        .accessibilityIdentifier("overflow-publish")
                         Button {
                             showNotifySettings = true
                         } label: { Label("Notifications", systemImage: "bell") }
+                        .accessibilityIdentifier("overflow-notifications")
                         Button {
                             showSchedules = true
                         } label: { Label("Schedules", systemImage: "clock.arrow.circlepath") }
+                        .accessibilityIdentifier("overflow-schedules")
                         Divider()
                         Button("Unpair", role: .destructive) { app.unpair() }
+                            .accessibilityIdentifier("overflow-unpair")
                         if let name = app.credential?.name { Text(name) }
                     } label: { Image(systemName: "ellipsis.circle") }
+                    .accessibilityIdentifier("overflow-menu")
                 }
             }
             .overlay(alignment: .top) { stalePill }
@@ -117,10 +124,13 @@ struct DashboardView: View {
             Text("\(store.liveWorkerCount) nodes")
                 .font(.caption.weight(.medium))
                 .foregroundStyle(.secondary)
+                .accessibilityIdentifier("node-count")
         }
         .padding(.horizontal)
         .padding(.vertical, 12)
         .background((v.isAlert ? Color.red : Color.green).opacity(0.12))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("verdict-bar")
     }
 
     @ViewBuilder
@@ -150,6 +160,7 @@ struct DashboardView: View {
                 .padding(.vertical, 6)
         }
         .buttonStyle(.borderedProminent)
+        .accessibilityIdentifier("new-session-button")
         .padding(.horizontal)
         .padding(.bottom, 8)
     }

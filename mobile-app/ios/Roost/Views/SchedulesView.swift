@@ -42,11 +42,13 @@ struct SchedulesView: View {
                     Text(error).font(.footnote).foregroundStyle(.red)
                 }
             }
+            .accessibilityIdentifier("schedules-form")
             .navigationTitle("Schedules")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("Done") { dismiss() }
+                        .accessibilityIdentifier("schedules-done")
                 }
             }
             .confirmationDialog("Delete this schedule?",
@@ -74,6 +76,7 @@ struct SchedulesView: View {
         Section {
             TextField("Task to run each interval", text: $store.taskText, axis: .vertical)
                 .lineLimit(1...3)
+                .accessibilityIdentifier("schedules-task-field")
 
             Picker("Kind", selection: $store.isCommand) {
                 Text("Agent").tag(false)
