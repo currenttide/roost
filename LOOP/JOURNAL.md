@@ -312,3 +312,32 @@ Entries are written by the loop; humans read, never need to edit.
   scheduled runs get self-selection + the verifier. Mobile parity stays in
   Proposed (pre-existing entry). Cosmetic mid-iteration fix: CLI interval
   display rounded 30s to "0m" — _fmt_interval added before the judge round.
+
+## 2026-06-07 01:15 UTC — R9: Tests for bootstrap.py (`roost up`)
+- Verdict: shipped
+- Branch/PR: loop/r9-bootstrap-tests / https://github.com/currenttide/roost/pull/17
+- What changed: tests-only — new tests/test_bootstrap.py (24 tests, no
+  processes/sockets). Pure helpers asserted by exact value (build_url
+  0.0.0.0 rewrite, panel_url, is_loopback ±, config_payload `credential`
+  contract, env_file_text, write_env_file 0600/mkdir/ROOST_HOME/overwrite,
+  gen_admin_token, default_worker_name). Pollers run against a stubbed CP
+  (httpx.MockTransport monkeypatched over bootstrap.httpx.Client): ping_ok
+  auth-header present/absent + 500 + ConnectError; wait_for_health immediate /
+  comes-up-late (exact call count) / timeout; wait_for_worker found /
+  offline→busy awaited / worker_id filter / empty-list timeout / 401+transport
+  flap tolerated / persistent-401 timeout.
+- Evidence:
+  - `python -m pytest -q` → 428 passed in 13.74s (was 404; +24, none removed)
+  - new file alone: 24 passed in 0.36s (tiny poll intervals; no real sleeps)
+- Judge: approve (round 1) — re-ran pytest (428) + the file in isolation
+  (0.34s), confirmed tests-only scope (single added file), zero removed
+  tests, and did mutation analysis: build_url verbatim-0.0.0.0 mutation and
+  wait_for_worker drop-the-id-filter mutation are each caught by a specific
+  test; no tautological tests found; monkeypatch fixture auto-undo rules out
+  stub leakage.
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (fenced
+  first-line model-ID block present)
+- Notes: tests-only change → pytest gate is the full evidence-table
+  requirement; no live smoke claimed. The `up` orchestration in cli.py
+  remains untested (process spawning) — noted for a possible future item,
+  not promised.
