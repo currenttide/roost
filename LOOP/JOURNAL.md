@@ -1701,3 +1701,23 @@ Entries are written by the loop; humans read, never need to edit.
 - Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only)
 - Notes: iteration #13 slot 2. The headline-verb matrix is now complete: every
   verb reachable from every appropriate surface. R59 + R61 in flight.
+
+## 2026-06-07 ~11:20 UTC — R59: input states on aggregate views
+- Verdict: shipped
+- Branch/PR: loop/r59-input-visibility / https://github.com/currenttide/roost/pull/71 (merged a2dcacc)
+- What changed: _derive_run gains optional inputs {queued, delivered, dropped} —
+  attached ONLY when any count > 0; new _input_counts_for batches one GROUP BY ...
+  IN (...) (no N+1) returning only input-bearing jobs; wired into /derived,
+  /jobs/{id}/derived, and /jobs/{id}/tree per-node. `roost tree --health` prints
+  `inputs N/N/N` on nodes that have any. API.md §2+§4 additively document the
+  optional field. FIXTURE DECISION: no regen — capture() never posts input and
+  only-when-nonzero keeps the field absent from the golden flows; drift guard
+  green by construction.
+- Evidence:
+  - `python -m pytest -q` → 784 passed (+6); judge re-verified all 7 done-when
+    criteria with file:line evidence incl. the single-query shape
+- Judge: approve (round 1, all criteria PASS)
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only)
+- Notes: iteration #13 slot 1. Key finding logged: default worker capacity 1
+  makes two-running-jobs-per-worker unreachable via the poll path — tests use
+  queued jobs (input accepted on any non-terminal job). R61 last in flight.

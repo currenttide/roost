@@ -193,7 +193,7 @@ Done-when: both modules' branch coverage strictly up (≥8 points each); migrati
 Surface: docs/deploy. This session added ROOST_PRICING (R44), ROOST_NARRATE_INTERVAL (R49), ROOST_NOTIFY_URL (R37) and the backup/metrics admin endpoints. Verify each is (a) documented where operators look (DEPLOY.md's config reference, README), (b) passed through docker/stack.yml like ROOST_PUBLISH_DOMAIN is, (c) consistent with the code's actual parsing (truth-check defaults/fallbacks). R37 added its own passthrough — verify; R44/R49 likely did not.
 Done-when: every operator-facing env var documented + docker-passthrough'd + truth-checked; gaps fixed additively; pytest green.
 
-### R59. Surface input states on aggregate views (derived + tree) — `open` `self-promoted` `feature`
+### R59. Surface input states on aggregate views (derived + tree) — `done` *(2026-06-07, PR #71 — batched, only-when-nonzero, no fixture regen needed)* `self-promoted` `feature`
 Surface: backend/CLI/feature. A6 survey #2 finding 1+3 (judge-approved, merged — same helper, same contract). `_derive_run` (server.py:777-806) — consumed by /panel, roost history, mac-app, both mobile dashboards — has no `inputs` key; the tree endpoint never calls `_input_counts` per node, so `tree --health` (cli.py:1902-1913) can't show what `roost status` already does. An operator can't see dropped/queued input without per-job drilling.
 Done-when: `_derive_run` includes `inputs: {queued, delivered, dropped}` present only when any count > 0 (mirroring GET /jobs/{id}); tree endpoint annotates per-node counts; `tree --health` prints `inputs N/N/N` when nonzero; API.md §2 run row additively documents the optional field (fixture regen values-only if needed); tests for both surfaces; pytest green.
 
