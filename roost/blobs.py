@@ -23,6 +23,13 @@ from typing import Any, Optional
 BLOB_TTL_DEFAULT = 24 * 3600.0          # staged files live a day by default
 BLOB_TTL_MAX = 7 * 86400.0              # hard ceiling on requested TTLs
 BLOB_MAX_BYTES = 512 * 1024 * 1024      # staging cap, not a fileserver
+# The name is a label/filename (every client sends a path's basename: the CLI's
+# "<slug>.tar.gz", the mac-app's lastPathComponent, the mobile "<site>.tar.gz",
+# the MCP stage_file os.path.basename). Filesystem path components top out at
+# 255 bytes, so 512 chars is generous headroom for a full unicode filename while
+# still bounding the field — a 32k name is never a real file (matches the
+# PLAN_REASON_MAX_CHARS label-cap precedent in server.py).
+BLOB_NAME_MAX_CHARS = 512
 
 _SECRET_FILE = "blob_secret"
 
@@ -73,6 +80,21 @@ def clamp_ttl(ttl_sec: Optional[float]) -> float:
 # ---------- rows ----------
 
 
+def validate_name(name: Optional[str]) -> str:
+    """Normalize + bound a blob name (the single validation seam for every
+    entry point: POST /blobs ?name=, POST /blobs/presign {"name"}, MCP
+    stage_file). Empty → "blob"; over the cap → ValueError (the route maps it
+    to 422). Filenames are <=255 bytes in practice, so the cap never bites a
+    legitimate name."""
+    name = name or "blob"
+    if len(name) > BLOB_NAME_MAX_CHARS:
+        raise ValueError(
+            f"blob name exceeds {BLOB_NAME_MAX_CHARS} chars "
+            f"(got {len(name)}); use a short filename"
+        )
+    return name
+
+
 def insert_blob(
     conn: sqlite3.Connection,
     name: str,
@@ -80,10 +102,11 @@ def insert_blob(
     state: str,
     created_by: str,
 ) -> dict[str, Any]:
+    name = validate_name(name)
     now = time.time()
     row = {
         "id": uuid.uuid4().hex[:12],
-        "name": name or "blob",
+        "name": name,
         "size": 0,
         "sha256": None,
         "state": state,  # 'pending' (awaiting PUT) | 'uploading' | 'ready'
