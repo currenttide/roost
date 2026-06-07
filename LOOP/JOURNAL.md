@@ -531,3 +531,36 @@ Entries are written by the loop; humans read, never need to edit.
   TWICE without noticing — exactly the failure mode the different-model
   judge exists for. Real-config hygiene now has a reusable helper + loud
   comment. Next: R17 (config/triage tests, last Ranked item).
+
+## 2026-06-07 05:30 UTC — R17: Tests for config.py + triage.py
+- Verdict: shipped
+- Branch/PR: loop/r17-config-triage-tests / https://github.com/currenttide/roost/pull/24
+- What changed: tests-only — tests/test_config.py (22 collected: path
+  precedence ROOST_CONFIG_DIR→XDG→HOME, round-trips through the REAL toml
+  parser for every supported type, 0600 contract, truncate-on-overwrite,
+  hostile-string escaping incl. a TOML-injection attempt asserting no keys
+  added, TypeError paths, resolve_url_token full flag→env→config→default
+  chain) + tests/test_triage.py (8 collected: placeholders, exact machine-
+  spec lines for GPU/CPU-only shapes, decline sentinel + FINAL-line protocol
+  + no-delegation rule, fleet rows, empty-snapshot, 20-row cap, graceful
+  degradation). R16's lesson applied: every default-path test pins env to
+  tmp; judge hash-verified the real config untouched.
+- Evidence:
+  - `python -m pytest -q` → 525 passed in 15.69s (was 495; +30, none removed)
+  - coverage: config.py 48% → 95-97%, triage.py 67% → 100%, TOTAL ≥65%
+    (judge measured 68%); no module down (bootstrap/service hold 100%)
+- Judge: approve (round 1) — re-ran both gates, hash-checked
+  ~/.config/roost/config.toml across the run (byte-identical), ran a REAL
+  mutation probe on a /tmp copy (removing quote-escaping from _toml_escape
+  → TOMLDecodeError → test fails: not tautological), verified triage
+  assertions quote actual rendered text. Two non-blocking notes: my claimed
+  21+9 split was actually 22+8 collected (total 30 correct); one triage
+  assertion uses a weaker disjunction fallback.
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (fenced
+  first-line model-ID block present)
+- Notes: RANKED DRY AGAIN — replenishment cycle #2 next wake. Survey order
+  per protocol: A4 debts (judge fenced-ID flakiness largely self-resolved;
+  none new), A5 ratchets (coverage 63%→~68% already up; examples 3/3),
+  A3 drift sweep (scope: PRs #21–#24, small), then A2 (next-worst modules:
+  worker.py 55%, mcp.py 59%, schema.py 60%) and A1 (first hunt area:
+  matcher/placement — never hunted).

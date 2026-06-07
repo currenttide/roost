@@ -105,7 +105,7 @@ Done-when: three spots corrected (additive, no contract change); Docs-drift ratc
 Surface: tests. cli.py `up` (≈line 503+) spawns processes and drives boot.ping_ok/wait_for_health/wait_for_worker; zero tests reach it (cli.py at 28% branch coverage).
 Done-when: unit tests with bootstrap helpers + process-spawning mocked (R10 style); failure paths covered (CP already up, health timeout, worker never registers); pytest green.
 
-### R17. Tests for config.py + triage.py — `open` `self-promoted` *(A2 coverage gaps, 2026-06-07, judge-approved)*
+### R17. Tests for config.py + triage.py — `done` *(2026-06-07, PR #24 — config 48%→97%, triage 67%→100%)* `self-promoted`
 Surface: tests. Measured: config.py 48% branch (60 stmts), triage.py 67% (30 stmts); no dedicated test file for either (pre-listed in Proposed).
 Done-when: dedicated tests asserting real behavior (config TOML read/write/perms/resolution order; triage prompt rendering); both modules' branch coverage strictly up, no other module down; pytest green.
 
