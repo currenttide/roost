@@ -47,6 +47,11 @@ Each job dict may carry:
 - `queued_sec` — seconds a job has sat queued
 - `capable_workers` — count of ONLINE workers whose capabilities satisfy this
   job's `requires`
+- `inputs` — present only when the job has received interactive follow-ups
+  (`roost send`): its `{queued, delivered, dropped}` counts. On `--health` it
+  renders as `inputs N/N/N`. A `command` job stalled mid-step with `inputs`
+  showing `queued > 0` is waiting on a send you (or the user) can deliver; a
+  `dropped` count on an agent/`docker` node confirms the send never reached it.
 - `tokens_used`, `exit_code`, `error`, `worker_id`, `requires`
 
 ## How to judge (reason, don't pattern-match a fixed threshold)

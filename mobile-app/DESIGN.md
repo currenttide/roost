@@ -231,6 +231,22 @@ optional Whisper-on-fleet transcription job behind a setting; the UI doesn't cha
 - **v1.1** — terminal-state notifications (ntfy/webhook). **v2** — interactive mid-job
   steering (CP feature), optional Whisper-on-fleet STT, widgets/watch complications.
 
+### Post-v1 screens (shipped, both platforms)
+
+v1 was deliberately the two screens + sheet of §3; everything else was cut. Since
+then the app has grown three additive surfaces, each reached from the dashboard
+overflow menu (a sheet on iOS / a route on Android) with all grammar, validation,
+and reducer logic kept in the pure, Linux-tested layer — so §3/§7's "two screens"
+describe the v1 *decision*, not the current screen count:
+
+- **Publish** (iOS R50, Android R53) — pick a `.tar.gz`, one-shot `POST /publish`,
+  show + share the live site URL (API.md §6).
+- **Notifications** (R55, both) — the ntfy-topic setting + deep-link routing wiring;
+  **delivers the v1.1 milestone's client slice** (details in §8a). The push
+  *transport* remains device-only and unverified here.
+- **Schedules** (R61, both) — list/create/toggle/delete interval schedules, the
+  `every` grammar mirroring `roost/server.py::parse_every` exactly (API.md §7).
+
 ### 8a. v1.1 push notifications — client wiring
 
 The CP side shipped first (R37): on every terminal job the control plane fires a
