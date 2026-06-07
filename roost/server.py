@@ -2810,13 +2810,23 @@ def create_app(
         return {"deleted": True, "id": sched_id}
 
     @app.get("/publish", dependencies=[Depends(require_any)])
-    async def list_sites_endpoint(request: Request):
-        def _list() -> list[dict]:
+    async def list_sites_endpoint(
+        request: Request,
+        limit: int = Query(100, ge=1, le=500),
+        offset: int = Query(0, ge=0),
+    ):
+        # Bounded by default (north star #2): a fleet publishing for months
+        # would otherwise return megabytes per call. The response stays a bare
+        # array (additive contract — CLI/mobile/§6c unchanged); paginating
+        # clients read the additive X-Total-Count header to walk pages.
+        def _page() -> tuple[list[dict], int]:
             with _connect(db) as conn:
-                return publishlib.list_sites(conn)
-        rows = await asyncio.to_thread(_list)
-        return [publishlib.public_dict(r, str(request.base_url), publish_domain)
+                rows = publishlib.list_sites(conn, limit=limit, offset=offset)
+                return rows, publishlib.count_sites(conn)
+        rows, total = await asyncio.to_thread(_page)
+        body = [publishlib.public_dict(r, str(request.base_url), publish_domain)
                 for r in rows]
+        return JSONResponse(body, headers={"X-Total-Count": str(total)})
 
     @app.delete("/publish/{slug}", dependencies=[Depends(require_admin)])
     async def unpublish_site(slug: str):

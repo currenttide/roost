@@ -217,9 +217,31 @@ def get_site(conn: sqlite3.Connection, slug: str) -> Optional[dict[str, Any]]:
     return dict(row) if row is not None else None
 
 
-def list_sites(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-    cur = conn.execute("SELECT * FROM sites ORDER BY updated_at DESC")
+def list_sites(
+    conn: sqlite3.Connection,
+    *,
+    limit: Optional[int] = None,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    """One page of published sites, newest-updated first.
+
+    A fleet that publishes for months accumulates unboundedly, so the listing
+    is paginated at the SQL layer (``LIMIT``/``OFFSET``) — the server caps
+    ``limit`` before calling. ``limit=None`` returns everything (kept only for
+    internal callers that genuinely want the whole table).
+    """
+    sql = "SELECT * FROM sites ORDER BY updated_at DESC"
+    params: list[Any] = []
+    if limit is not None:
+        sql += " LIMIT ? OFFSET ?"
+        params += [limit, max(0, offset)]
+    cur = conn.execute(sql, params)
     return [dict(r) for r in cur.fetchall()]
+
+
+def count_sites(conn: sqlite3.Connection) -> int:
+    """Total number of published sites (for the listing's X-Total-Count)."""
+    return int(conn.execute("SELECT COUNT(*) FROM sites").fetchone()[0])
 
 
 def delete_site(db_path: Path, conn: sqlite3.Connection, slug: str) -> bool:

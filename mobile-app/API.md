@@ -241,6 +241,13 @@ Array of the `Site` shape above (fixture `publish_list.json`), sorted by
 `updated_at` desc — covers sites from either flow. `DELETE /publish/{slug}` is
 **403** for app tokens (unpublish is admin-only; don't offer it in the app).
 
+**Paginated (bounded):** the response is one page. Optional query params
+`limit` (default 100, range 1–500; out-of-range is **422**) and `offset`
+(default 0, ≥0) page through; the total count comes back in an additive
+`X-Total-Count` response header (you've reached the end once
+`offset + len(page) >= X-Total-Count`). The body shape is unchanged — a client
+that ignores both params still gets a valid `Site` array (the first 100).
+
 ## 7. Golden fixtures
 
 | File | What it pins |
