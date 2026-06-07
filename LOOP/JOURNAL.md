@@ -1246,3 +1246,31 @@ Entries are written by the loop; humans read, never need to edit.
 - Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only,
   fenced MODEL line both phases)
 - Notes: iteration #6 slot 2. R39 (backup) last in flight.
+
+## 2026-06-07 ~01:30 UTC — R39: roost backup — online SQLite backup + restore docs
+- Verdict: shipped
+- Branch/PR: loop/r39-backup / https://github.com/currenttide/roost/pull/52 (merged 58eb401)
+- What changed: SEAM CHOSEN FROM EVIDENCE (option A): `GET /admin/backup` streams a
+  consistent snapshot (stdlib sqlite3.Connection.backup() to temp, then streamed);
+  `roost backup <dest.db>` calls it. Why A: the CLI is always HTTP and the documented
+  deployment runs the DB inside docker on a volume while operators sit elsewhere —
+  CLI-local attach (option B) is false for remote operators. Judge's one non-blocking
+  concern (temp-file leak if client disconnects mid-stream — FileResponse skips its
+  BackgroundTask on send() error) CLOSED before merge: generator-streamed
+  StreamingResponse whose finally unlinks on GeneratorExit + regression test + live
+  disconnect verification. DEPLOY.md gains backup/restore/verify procedure.
+- Evidence:
+  - `python -m pytest -q` → 622 at merge (now 635 with siblings); 425 insertions,
+    0 deletions
+  - consistency test: concurrent writes during backup → every snapshot passes
+    integrity_check, row count in [baseline, final]
+  - live-socket smoke: download + integrity_check ok, correct headers; aborted
+    mid-download leaves zero temp files
+- Judge: both phases approve — gate independently verified no existing backup path
+  + option-A reasoning; review re-ran suite + consistency test, raised the
+  disconnect-leak concern the implementer then closed
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only)
+- Notes: iteration #6 COMPLETE — R39 #52, R40 #51, R41 #50; master 635. RANKED DRY →
+  replenishment cycle #8 promotes R42 (A3 drift sweep over PRs #40-#52 + --version),
+  R43 (cred-refresh/lease race — investigate, repro-or-clear), R44 (configurable
+  per-model cost pricing). A1 captain/steward hunt remains queued for cycle #9.

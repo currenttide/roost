@@ -111,7 +111,7 @@ Done-when: per DESIGN.md v1.1 — opt-in config documented; stubbed-endpoint tes
 Surface: backend/worker/feature. North star #3, v2 design. Read `mobile-app/DESIGN.md` §3.2 first. Where the design leaves choices open, the loop makes the call and documents the rationale (standing direction 2026-06-06). Expected shape: `POST /jobs/{id}/input` queues a message; worker delivers to the running agent job; clients can steer mid-flight.
 Done-when: input verb exists end-to-end for at least the `claude` kind on the CLI surface (`roost send <id> <text>` or similar); delivery semantics documented (queued vs dropped when no consumer); tests with a stubbed agent process; pytest green + live smoke (behavior change).
 
-### R39. `roost backup` — online SQLite backup + documented restore — `open` `self-promoted` `feature`
+### R39. `roost backup` — online SQLite backup + documented restore — `done` *(2026-06-07, PR #52)* `self-promoted` `feature`
 Surface: backend/CLI/feature. Production north star #2 (recoverable state). The CP's SQLite DB is the whole fleet state; today there is no safe way to back it up while the CP runs (file copy under WAL is corruption-prone) and DEPLOY.md has no restore procedure (pre-existing Proposed item).
 Done-when: `roost backup <dest.db>` (admin) performs an online backup via the sqlite3 backup API against the live CP (decide the seam: CP endpoint streaming a consistent snapshot vs CLI attaching directly when local — pick what fits deployment reality, document the choice); DEPLOY.md gains backup + restore + verify procedure; tests: backup of a live busy DB is consistent (readable, row counts match a quiesced copy), restore round-trip; pytest green.
 
@@ -122,6 +122,18 @@ Done-when: API.md documents the schedule endpoints (list/create/enable/disable/d
 ### R41. Capability detection: distinguish "no GPU" from "GPU detection failed" — `done` *(2026-06-07, PR #50)* `self-promoted` `feature`
 Surface: worker/operability. North star #2. Pre-existing Proposed item: when GPU probing errors (driver hiccup, nvidia-smi missing vs failing), the worker silently advertises no GPU — placement then quietly routes GPU jobs elsewhere and operators can't tell a bare node from a broken one.
 Done-when: detection failure is distinguishable from absence in the worker's advertised capabilities and/or logs (additive — e.g. `gpu_detection: "failed"` capability or a loud structured log + worker event); matcher behavior for GPU constraints unchanged for both cases (failed ≠ schedulable); tests for probe-success/absence/failure paths; pytest green.
+
+### R42. Docs truth pass over the feature wave (PRs #40-#52) — `open` `self-promoted`
+Surface: docs. A3 drift sweep — eight features landed since the last sweep (metrics, captain plan, one-shot publish mobile, pagination, push notify, interactive input, backup, mobile schedules, GPU detection-failed). README's feature/verb tables, INTEGRATIONS.md's verb table, and the quickstart/oversee skills likely don't mention `roost send`, `roost backup`, `/metrics`, or `--notify-url`. Includes the R32 leftover: add `roost --version` (tiny, fits a docs/CLI-surface truth pass).
+Done-when: every user-facing doc surface (README, INTEGRATIONS.md, DEPLOY.md cross-refs, .claude/skills/roost-*) accurately reflects the new verbs/flags — each claim truth-checked against code; `roost --version` exists and reports `__version__`; docs-drift ratchet back to 0; pytest green.
+
+### R43. Worker credential refresh racing lease TTL — `open` `self-promoted`
+Surface: backend/robustness. Old survey hypothesis (Proposed since pre-loop): the worker's credential refresh can race the lease lifecycle — a refresh mid-lease may invalidate the credential the CP knows, or a lease renewal may race a rotating token. INVESTIGATE FIRST per A1 rules: trace the actual refresh + lease paths in worker.py/server.py; a fix requires a failing repro. If the race is not real on current code, clear the item honestly (that is a valid outcome — journal it `invalid`).
+Done-when: either (a) reproducing test written and FAILS on master, fix makes it pass, pytest green + live smoke; or (b) the hypothesis is refuted with cited code paths and the item closes `invalid`.
+
+### R44. Cost estimation: configurable per-model pricing — `open` `self-promoted` `feature`
+Surface: backend/feature. North star #2 (operability). Cost estimates use a fixed rate (find it — grep worker.py/captain.py/server.py for the pricing constant); real fleets run mixed models and the estimate is wrong for most of them.
+Done-when: per-model pricing configurable (worker policy or CP config — pick the seam that matches where the estimate is computed; document the choice); sane defaults preserved (zero-config behavior unchanged); estimate uses the job's actual model; tests for default + override + unknown-model fallback; pytest green.
 
 ### R21. Make presigned blob PUT single-use and race-safe — `done` *(2026-06-07, PR #30)* `self-promoted`
 Surface: backend/security. A1 hunt #2 reproduced that a presigned `put_url`
@@ -247,8 +259,6 @@ first iteration on that ratchet measures and records it here (no code changes).
 >>>>>>> Stashed changes
 - **A6 (cycle #4, unblocked from Proposed):** Version drift — `pyproject.toml` says `0.1.0`, server self-reports `0.2.0`; single-source via `importlib.metadata`
 - Drop `cred_hash` on worker revoke — make revocation total *(security-session — credential lifecycle belongs in the dedicated session)*
-- Worker credential refresh racing lease TTL — sync refresh with lease lifecycle
-- Cost estimation: configurable per-model pricing instead of fixed rate
 - Narration re-render `min_interval` configurable
 - MCP tool docstrings: add usage examples for each tool
 - Tests for `triage.py` prompt rendering and `config.py` TOML/perms
