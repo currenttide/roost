@@ -150,6 +150,43 @@ final class ModelDecodingTests: XCTestCase {
         XCTAssertEqual(snap.runs.map(\.id), ["r2"])
     }
 
+    // MARK: goal_display (R86)
+
+    func testDisplayGoalPrefersServerSummaryWithFallback() throws {
+        // A command run carries the server's glanceable `goal_display` summary;
+        // `displayGoal` shows it, while `goal` keeps the full shell text.
+        let withSummary = """
+        {"run_id": "c1", "state": "running", "phase": "running",
+         "goal": "cd /tmp && curl -s -o run.sh 'http://h/blobs/x' && bash run.sh",
+         "goal_display": "curl -s -o run.sh 'http://h/blobs/x'…",
+         "health": {"status": "running", "reason": ""},
+         "cost": {"tokens_used": 0, "cost_est_usd": 0}}
+        """
+        let run = try JSONDecoder().decode(Run.self, from: Data(withSummary.utf8))
+        XCTAssertEqual(run.displayGoal, "curl -s -o run.sh 'http://h/blobs/x'…")
+        XCTAssertTrue(run.goal.hasPrefix("cd /tmp"))  // full text preserved
+
+        // Older control plane: no `goal_display` → fall back to the full goal.
+        let noSummary = """
+        {"run_id": "c2", "state": "running", "phase": "running",
+         "goal": "echo ok", "health": {"status": "running", "reason": ""},
+         "cost": {"tokens_used": 0, "cost_est_usd": 0}}
+        """
+        let run2 = try JSONDecoder().decode(Run.self, from: Data(noSummary.utf8))
+        XCTAssertNil(run2.goalDisplay)
+        XCTAssertEqual(run2.displayGoal, "echo ok")
+
+        // An empty-string `goal_display` is treated as absent (fall back).
+        let emptySummary = """
+        {"run_id": "c3", "state": "running", "phase": "running",
+         "goal": "agent goal", "goal_display": "",
+         "health": {"status": "running", "reason": ""},
+         "cost": {"tokens_used": 0, "cost_est_usd": 0}}
+        """
+        let run3 = try JSONDecoder().decode(Run.self, from: Data(emptySummary.utf8))
+        XCTAssertEqual(run3.displayGoal, "agent goal")
+    }
+
     // MARK: raw jobs
 
     func testDecodeJobAndGoalText() throws {

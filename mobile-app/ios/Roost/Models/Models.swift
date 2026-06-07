@@ -77,6 +77,10 @@ struct Run: Codable, Equatable, Identifiable {
     /// guessed (R85 — guessing "claude" for every job was the bug; iOS previously
     /// showed no kind at all, this adds the truthful one).
     let kind: String?
+    /// R86: server-summarized glanceable goal for the verdict bar (collapses a
+    /// raw `command`'s shell text). Absent against older control planes — read
+    /// via `displayGoal`, which falls back to `goal`.
+    let goalDisplay: String?
     let state: String
     let phase: String?
     let health: Health?
@@ -102,6 +106,7 @@ struct Run: Codable, Equatable, Identifiable {
         case runId = "run_id"
         case goal, kind, state, phase, health, worker, verified, evidence, result
         case narration, progress, cost, diagnosis
+        case goalDisplay = "goal_display"
         case etaSec = "eta_sec"
         case createdAt = "created_at"
         case finishedAt = "finished_at"
@@ -109,6 +114,14 @@ struct Run: Codable, Equatable, Identifiable {
         case rootJobId = "root_job_id"
         case capableWorkers = "capable_workers"
         case declineCount = "decline_count"
+    }
+
+    /// R86: the goal to show in a glanceable row. Prefers the server's
+    /// summarized `goal_display`; falls back to the full `goal` against an
+    /// older control plane that doesn't send it.
+    var displayGoal: String? {
+        if let g = goalDisplay, !g.isEmpty { return g }
+        return goal
     }
 
     /// Health may be absent on some rows; synthesize from `state` so the UI

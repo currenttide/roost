@@ -227,7 +227,7 @@ struct RunDetailView: View {
 
     private func header(_ run: Run) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(run.goal.isEmpty ? run.id : run.goal)
+            Text(run.displayGoal.isEmpty ? run.id : run.displayGoal)
                 .font(compact ? .headline : .title3.weight(.semibold))
                 .lineLimit(2)
             HStack(spacing: 4) {

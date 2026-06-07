@@ -196,6 +196,10 @@ function esc(s) {
 /* phase/status -> css class suffix (strip non-word chars) */
 function cls(s) { return String(s || "").toLowerCase().replace(/[^a-z]+/g, "-").replace(/^-|-$/g, ""); }
 function clip(s, n) { s = String(s || "").replace(/\s+/g, " ").trim(); return s.length > n ? s.slice(0, n - 1) + "…" : s; }
+/* R86: the glanceable goal for the verdict bar — server-summarized for raw
+   `command` jobs, falling back to the full `goal` against older control planes
+   that don't send `goal_display`. */
+function goalLine(t) { return (t && t.goal_display) || (t && t.goal) || ""; }
 
 function ago(ts) {
   if (!ts) return "";
@@ -308,7 +312,7 @@ async function tick() {
           '<div class="' + klass + '">' +
             '<div class="trow">' +
               '<span class="pill p-' + cls(phase) + '">' + esc(phase) + '</span>' +
-              '<span class="goal">' + esc(t.goal) + '</span>' +
+              '<span class="goal">' + esc(goalLine(t)) + '</span>' +
               (cost ? '<span class="cost">' + esc(cost) + '</span>'
                     : (elapsedTxt ? '<span class="elapsed">' + esc(elapsedTxt) + '</span>' : '')) +
             '</div>' +
@@ -352,7 +356,7 @@ async function tick() {
 
         let detail;
         if (job) {
-          detail = '<div class="ntask"><span class="run"></span>' + esc(clip(job.goal, 80)) + '</div>';
+          detail = '<div class="ntask"><span class="run"></span>' + esc(clip(goalLine(job), 80)) + '</div>';
         } else {
           const bits = [(c.cpus || 0) + " cores"];
           if (gl) bits.push(esc(gl));

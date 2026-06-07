@@ -10,7 +10,7 @@ final class DecodeTests: XCTestCase {
         let d = try dec.decode(Derived.self, from: Fixtures.data("derived.json"))
         XCTAssertEqual(d.fleetVerdict.level, "alert")
         XCTAssertTrue(d.fleetVerdict.isAlert)
-        XCTAssertEqual(d.runs.count, 5)
+        XCTAssertEqual(d.runs.count, 6)
         XCTAssertEqual(d.workers.count, 1)
         // Locate runs by goal/state — ids are random per fixture recording.
         // Run-row `result` is a STRING here (not the job-detail object).
@@ -22,6 +22,15 @@ final class DecodeTests: XCTestCase {
         let unplaceable = d.runs.first { $0.goal == "train on the gpu box" }
         XCTAssertEqual(unplaceable?.healthStatus, .unplaceable)
         XCTAssertTrue(unplaceable?.healthStatus.isError ?? false)
+        // R86: the raw `command` row carries a glanceable `goal_display` summary
+        // distinct from the full `goal`; `displayGoal` shows it.
+        let cmd = d.runs.first { ($0.goal ?? "").hasPrefix("cd /tmp") }
+        XCTAssertNotNil(cmd)
+        XCTAssertEqual(cmd?.goalDisplay?.hasPrefix("curl"), true)
+        XCTAssertEqual(cmd?.displayGoal?.hasPrefix("curl"), true)
+        XCTAssertNotEqual(cmd?.displayGoal, cmd?.goal)
+        // An agent run with no special summary: displayGoal == goal.
+        XCTAssertEqual(unplaceable?.displayGoal, unplaceable?.goal)
         // Live worker count = idle+busy.
         XCTAssertTrue(d.workers[0].isLive)
         // R85: the run row carries the job's effective kind, so the subtitle reads

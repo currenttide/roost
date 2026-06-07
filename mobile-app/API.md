@@ -66,6 +66,10 @@ Run row (fixture has every field; the app renders a subset):
                                        // kind (a `command` job reads "command", not
                                        // "claude"). Older CPs omit it → clients drop
                                        // the kind segment rather than guess.
+  "goal_display": "fix the flaky auth test", // glanceable verdict-bar summary:
+                                       // == goal for agent jobs; for a raw `command`
+                                       // it collapses the shell text to its program/
+                                       // verb. Additive — fall back to `goal` if absent.
   "state": "queued"|"assigned"|"running"|"succeeded"|"failed"|"cancelled",
   "phase": state ∪ "verifying"|"self-healing",
   "health": {"status": <below>, "reason": "<≤160 chars>"},

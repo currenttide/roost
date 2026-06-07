@@ -90,7 +90,7 @@ fun SessionScreen(
                 title = {
                     Column {
                         Text(
-                            state.story?.goal ?: jobId,
+                            state.story?.displayGoal ?: jobId,
                             maxLines = 1,
                             style = MaterialTheme.typography.titleMedium,
                         )

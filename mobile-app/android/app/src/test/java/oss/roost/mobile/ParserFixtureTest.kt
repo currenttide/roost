@@ -39,7 +39,7 @@ class ParserFixtureTest {
         val d = Parsers.parseDerived(Fixtures.read("derived.json"))
         assertEquals("alert", d.fleetVerdict.level)
         assertFalse(d.fleetVerdict.isOk)
-        assertEquals(5, d.runs.size)
+        assertEquals(6, d.runs.size)
         assertEquals(1, d.workers.size)
         // worker is busy → live.
         assertTrue(d.workers.first().isLive)
@@ -48,6 +48,8 @@ class ParserFixtureTest {
         val unplaceable = d.runs.first { it.goal == "train on the gpu box" }
         assertEquals("unplaceable", unplaceable.health.status)
         assertEquals("queued", unplaceable.state)
+        // R86: an agent goal has no special summary — displayGoal == goal.
+        assertEquals(unplaceable.goal, unplaceable.displayGoal)
 
         val verified = d.runs.first { it.state == "succeeded" }
         assertEquals("verified", verified.health.status)
@@ -66,6 +68,13 @@ class ParserFixtureTest {
         assertEquals("claude", verified.kind)
         assertEquals("command", d.runs.first { it.goal == "echo ANDROID_UXTEST" }.kind)
         assertEquals("docker", d.runs.first { it.goal == "python -V" }.kind)
+
+        // R86: the raw `command` row carries a glanceable `goal_display` summary
+        // distinct from the full `goal`; displayGoal prefers it.
+        val cmd = d.runs.first { it.goal.startsWith("cd /tmp") }
+        assertTrue(cmd.goalDisplay!!.startsWith("curl"))
+        assertTrue(cmd.displayGoal.startsWith("curl"))
+        assertTrue(cmd.displayGoal != cmd.goal)
     }
 
     @Test fun workers() {

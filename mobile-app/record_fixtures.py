@@ -119,6 +119,16 @@ def capture(db_path: Path) -> dict[str, Any]:
             "kind": "docker", "image": "python:3.12", "command": "python -V"})
         docker_id = r.json()["id"]
 
+        # 5. a raw `command` job with a LONG shell goal (R86): exercises the
+        # additive `goal_display` summary — the apps render this collapsed
+        # ("curl …") in the verdict bar while `goal` keeps the full text.
+        c.post("/jobs", headers=mh, json={
+            "kind": "command",
+            "command": "cd /tmp && curl -s -o run.sh "
+                       "'http://192.168.1.193:8787/blobs/deadbeef' && bash run.sh",
+            "hierarchy": {"can_dispatch": True},
+        })
+
         # -- snapshots the apps render -------------------------------------
         out["derived.json"] = c.get("/derived", headers=mh).json()
         out["jobs_list.json"] = c.get("/jobs", headers=mh).json()
