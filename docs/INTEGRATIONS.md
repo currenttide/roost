@@ -29,10 +29,17 @@ That registers Roost's stdio MCP server. Your agent now has these tools (from
 | `roost_result` | Wait for a run and return its verified outcome `{state, verified, evidence, output}`. |
 | `roost_capabilities` | What the fleet can do (nodes, cores, GPUs) in plain language. |
 | `roost_submit` | Submit a precise sub-job (`kind` auto/claude/codex/docker, `requires`, `container`, `budget`). Use `kind: auto` for the self-selecting verified path (equivalent to `roost do`). |
-| `roost_status` / `roost_wait` / `roost_logs` | One job's state + liveness facts / block to terminal / its logs. |
+| `roost_status` | One job's current state + liveness facts (`last_activity`, `idle_sec`, `queued_sec`, `capable_workers`) for judging health. |
+| `roost_wait` | Block until a job reaches a terminal state (succeeded/failed/cancelled) or timeout; returns the final record. |
+| `roost_logs` | Return a job's captured stdout/stderr log lines (paginated — pass `since` to tail). |
 | `roost_cancel` | Cancel a job (`tree: true` for its descendants). |
 | `roost_workers` | List workers and a capability summary. |
 | `roost_exec` | Run a shell command on **one** named worker — no SSH. |
+| `stage_file` | Stage a **local** file into the blob store and get a presigned `get_url` that carries its own auth. |
+| `send_file` | Push a **local** file **to** a worker (no-SSH `scp`) — stages, delivers, and sha256-verifies it. |
+| `fetch_file` | Pull a file **from** a worker to here (the reverse of `send_file`). |
+| `list_staged` | List files currently staged in the blob store with their presigned `get_url`s. |
+| `roost_schedule` | Run work on an interval — the schedule verb (`create`/`list`/`remove`/`enable`/`disable`). |
 
 Then just talk: *"run the tests on a GPU box"*, *"what's running?"*, *"why did that
 fail?"*.
