@@ -163,8 +163,45 @@ a single line of JSON. Hand-rolled parser rules: split frames on blank line, tak
 
 ## 6. Publish — built thing → live URL
 
-A phone (or a phone-driven agent) ships a static site in two calls; the token
-from §1 is all it needs.
+A phone (or a phone-driven agent) ships a static site; the token from §1 is all
+it needs. Two interchangeable flows, both yielding the same `Site` object — pick
+by what you have in hand:
+
+- **One-shot** (§6a) — POST the `tar.gz` *as the request body* in a single call.
+  Preferred for the phone: nothing is staged, so a dropped connection can't leave
+  a dangling blob.
+- **Two-step** (§6b) — stage a blob, then publish it by `blob_id`. Kept for
+  callers that already have a blob in flight.
+
+Both honor `?name=` (required for one-shot, optional for two-step) and return
+the **same** `Site` shape (`publish_response.json` / `publish_oneshot_response.json`
+are byte-identical in structure; one slug differs). `GET /publish` (§6c) lists
+sites for either flow.
+
+### 6a. One-shot — `POST /publish?name=<slug>` (bundle is the body)
+
+One transactional call. The `tar.gz` is the **raw request body**; set
+`Content-Type: application/gzip` (or `application/octet-stream` — anything but
+`application/json` selects this path). `name` is **required** here (there's no
+blob name to default from) and is slugified (`^[a-z0-9][a-z0-9-]{0,39}$`).
+Re-publishing an existing slug replaces the site atomically. Response = a `Site`
+(§6b), fixture `publish_oneshot_response.json`:
+
+```
+{
+  "slug": "phone-oneshot",
+  "url": "http://<cp>/pub/phone-oneshot/",        // LAN URL, always present
+  "public_url": "https://phone-oneshot.<domain>/",// ONLY when the CP has a publish domain
+  "files": <int>, "size": <bytes>,
+  "created_at": <epoch>, "updated_at": <epoch>
+}
+```
+
+One-shot errors: **400** missing `name` / bad slug / empty body / body isn't a
+valid `tar.gz` · **413** bundle over the size cap · **401** missing/invalid
+token. (No staged blob exists, so the 404/409/410 blob states below don't apply.)
+
+### 6b. Two-step — stage a blob, then publish
 
 1. **Stage the bundle** — `POST /blobs?name=<site>.tar.gz`, raw `tar.gz` body
    (`Content-Type: application/octet-stream`). Fixture: `blob_upload_response.json`:
@@ -194,14 +231,15 @@ from §1 is all it needs.
 }
 ```
 
-3. **List sites** — `GET /publish` → array of the same site shape
-   (fixture `publish_list.json`). Sorted by `updated_at` desc.
+Two-step errors: 400 missing `blob_id`/bad name · 404 blob unknown or expired ·
+409 blob upload unfinished · 410 blob file missing. The blob expires after
+publish — the site lives on; don't surface blob TTL as site TTL.
 
-Errors: 400 missing `blob_id`/bad name · 404 blob unknown or expired ·
-409 blob upload unfinished · 410 blob file missing · 403 on
-`DELETE /publish/{slug}` (unpublish is admin-only; don't offer it in the app).
-The blob expires after publish — the site lives on; don't surface blob TTL
-as site TTL.
+### 6c. List sites — `GET /publish`
+
+Array of the `Site` shape above (fixture `publish_list.json`), sorted by
+`updated_at` desc — covers sites from either flow. `DELETE /publish/{slug}` is
+**403** for app tokens (unpublish is admin-only; don't offer it in the app).
 
 ## 7. Golden fixtures
 
@@ -219,7 +257,8 @@ as site TTL.
 | `stream_succeeded.sse.txt` | full SSE transcript incl. `event` log rows + `done` |
 | `job_cancel_response.json` | cancel ack |
 | `blob_upload_response.json` | staged bundle (`POST /blobs`) |
-| `publish_response.json` | published site (`POST /publish`) |
+| `publish_response.json` | published site, two-step (`POST /publish` w/ `blob_id`) |
+| `publish_oneshot_response.json` | published site, one-shot (`POST /publish?name=` + body) |
 | `publish_list.json` | site list (`GET /publish`) |
 | `error_401/403/404*.json` | error envelope |
 

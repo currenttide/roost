@@ -4,7 +4,7 @@
     "cost_est_usd": 0.0,
     "tokens_used": 0
   },
-  "created_at": 1780785952.5625553,
+  "created_at": 1780810381.677879,
   "decline_count": 0,
   "diagnosis": null,
   "eta_sec": null,
@@ -22,9 +22,9 @@
   "progress": null,
   "queued_sec": null,
   "result": "",
-  "root_job_id": "0350969c6395",
-  "run_id": "0350969c6395",
+  "root_job_id": "5c01b333e54e",
+  "run_id": "5c01b333e54e",
   "state": "running",
   "verified": null,
-  "worker": "224446b04761"
+  "worker": "a7c24b411c74"
 }

@@ -149,8 +149,16 @@ class ParserFixtureTest {
         assertEquals(site.url, site.shareUrl)
         assertEquals(1, site.files)
 
-        // List shape.
+        // One-shot publish (API.md §6a): same Site shape, slug from ?name=.
+        val shot = Parsers.parseSite(Fixtures.read("publish_oneshot_response.json"))
+        assertEquals("phone-oneshot", shot.slug)
+        assertTrue(shot.url.endsWith("/pub/phone-oneshot/"))
+        assertNull(shot.publicUrl)
+        assertEquals(shot.url, shot.shareUrl)
+        assertEquals(1, shot.files)
+
+        // List shape (covers sites from either flow).
         val sites = Parsers.parseSites(Fixtures.read("publish_list.json"))
-        assertEquals(listOf("phone-site"), sites.map { it.slug })
+        assertEquals(listOf("phone-oneshot", "phone-site"), sites.map { it.slug }.sorted())
     }
 }
