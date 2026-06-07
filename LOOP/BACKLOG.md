@@ -78,7 +78,7 @@ Done-when: publish either accepts content in one transactional call or reconcile
 Surface: backend/feature. README.md:74 and docs/INTEGRATIONS.md:124 promise "schedule" as a product verb; nothing implements it. Biggest documented-but-missing feature.
 Done-when: minimal honest slice — schema for schedules, CP tick that enqueues due jobs, `roost schedule` CLI + MCP tool, docs updated; tests for due/overdue/disabled schedules; pytest green. (Mobile parity goes to Proposed.)
 
-### R9. Tests for `bootstrap.py` (`roost up`) — `open`
+### R9. Tests for `bootstrap.py` (`roost up`) — `done` *(2026-06-07, PR #17)*
 Surface: tests. The zero-to-fleet onramp has no test file; regressions break new users silently.
 Done-when: unit tests for `build_url`, `wait_for_health`, `wait_for_worker` et al. with a stubbed CP; failure paths covered; pytest green.
 
