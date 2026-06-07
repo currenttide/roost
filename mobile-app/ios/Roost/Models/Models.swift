@@ -356,6 +356,15 @@ struct Schedule: Codable, Equatable, Identifiable {
         case lastJobId = "last_job_id"
         case createdAt = "created_at"
     }
+
+    /// One-liner describing what this schedule runs, for the list row. Prefers the
+    /// agent `intent`, then a `command`, then a generic kind/label fallback so a
+    /// future spec shape still renders something (never blank).
+    var taskSummary: String {
+        if let intent = spec?.intent, !intent.isEmpty { return intent }
+        if let command = spec?.command, !command.isEmpty { return command }
+        return name ?? (spec?.kind.map { "\($0) job" } ?? "scheduled job")
+    }
 }
 
 /// `POST /schedules` request body (API.md §7a). `every` is seconds or

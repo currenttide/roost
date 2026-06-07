@@ -23,6 +23,7 @@ import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Public
+import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
@@ -63,7 +64,8 @@ import oss.roost.mobile.ui.publish.PublishSheet   // R53: publish-a-site entry p
 fun DashboardScreen(
     container: AppContainer,
     onOpenSession: (String) -> Unit,
-    onOpenSettings: () -> Unit = {},   // R55: notification settings entry point
+    onOpenSettings: () -> Unit = {},    // R55: notification settings entry point
+    onOpenSchedules: () -> Unit = {},   // R61: interval schedules entry point
 ) {
     val vm = remember { DashboardViewModel(container) }
     val state by vm.state.collectAsState()
@@ -77,10 +79,11 @@ fun DashboardScreen(
     val nowMs = System.currentTimeMillis()
 
     Scaffold(
-        topBar = {   // R53 publish + R55 notifications share one overflow menu
+        topBar = {   // R53 publish + R55 notifications + R61 schedules share one overflow menu
             DashboardTopBar(
                 onPublish = { showPublish = true },
                 onOpenSettings = onOpenSettings,
+                onOpenSchedules = onOpenSchedules,
             )
         },
         floatingActionButton = {
@@ -298,12 +301,17 @@ private fun subtitle(run: Run): String {
 
 /**
  * The dashboard top bar. Title + an overflow menu mirroring the iOS DashboardView's
- * `ellipsis.circle` menu: "Publish a site" (R53) and "Notifications" (R55, the
- * notification-settings entry per DESIGN.md §6 v1.1).
+ * `ellipsis.circle` menu: "Publish a site" (R53), "Notifications" (R55, the
+ * notification-settings entry per DESIGN.md §6 v1.1), and "Schedules" (R61, the
+ * interval-schedules entry per API.md §7).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun DashboardTopBar(onPublish: () -> Unit, onOpenSettings: () -> Unit) {
+private fun DashboardTopBar(
+    onPublish: () -> Unit,
+    onOpenSettings: () -> Unit,
+    onOpenSchedules: () -> Unit,
+) {
     var menu by remember { mutableStateOf(false) }
     TopAppBar(
         title = { Text("Roost") },
@@ -321,6 +329,11 @@ private fun DashboardTopBar(onPublish: () -> Unit, onOpenSettings: () -> Unit) {
                     text = { Text("Notifications") },
                     leadingIcon = { Icon(Icons.Filled.Notifications, contentDescription = null) },
                     onClick = { menu = false; onOpenSettings() },
+                )
+                DropdownMenuItem(
+                    text = { Text("Schedules") },
+                    leadingIcon = { Icon(Icons.Filled.Schedule, contentDescription = null) },
+                    onClick = { menu = false; onOpenSchedules() },
                 )
             }
         },
