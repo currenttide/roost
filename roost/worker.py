@@ -1735,7 +1735,7 @@ class Worker:
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=True,  # own process group, so cancel/timeout can kill the whole job tree
             )
-        except (FileNotFoundError, PermissionError) as e:
+        except OSError as e:
             await self._send_log(job_id, "stderr", f"spawn failed: {e}")
             await self._post_event(
                 job_id,

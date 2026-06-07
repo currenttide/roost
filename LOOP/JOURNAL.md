@@ -5,6 +5,25 @@ Entries are written by the loop; humans read, never need to edit.
 
 ---
 
+## 2026-06-06 — R26: broaden OSError catch in run_job spawn handler
+- Verdict: shipped
+- Branch/PR: loop/r26-oserror-escape / https://github.com/currenttide/roost/pull/33
+- What changed: `except (FileNotFoundError, PermissionError)` → `except OSError` in
+  `roost/worker.py` at the `asyncio.create_subprocess_exec` call site (one line).
+  Added `test_bug4_other_oserror_does_not_escape_run_job` in `tests/test_worker.py`
+  which injects `OSError(errno.EMFILE, "Too many open files")` and verifies the error
+  is caught, a `type="failed"` event is posted with the OS message, and `_running` is
+  decremented back to its pre-call value.
+- Evidence:
+  - `pytest tests/test_worker.py::test_bug4_other_oserror_does_not_escape_run_job -v` → PASSED
+  - `python -m pytest -q` → 539 passed in 16.39s
+- Judge: claude-sonnet-4-6 — APPROVE. "The change is correct and the motivation is
+  sound. OSError is the documented base class for all OS-level failures from
+  asyncio.create_subprocess_exec. Catching it here is the right level of specificity.
+  Test quality is high."
+
+---
+
 ## 2026-06-05 — pre-loop: repo truth pass + backlog audit (interactive session)
 - Verdict: shipped (uncommitted, on feat/agent-substrate)
 - Branch/PR: feat/agent-substrate / - (working tree, user reviewing)

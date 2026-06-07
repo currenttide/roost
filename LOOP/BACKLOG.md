@@ -61,7 +61,7 @@ Surface: backend/robustness. A1 hunt #3. `self._running += 1` and `self._active[
 Repro: `tests/test_judge_r4_bugs.py::test_bug1_running_and_active_not_leaked_on_cancellation` — FAILS on master.
 Done-when: `try/finally` wraps the full body after `_running += 1`; decrement and `_active.pop` unconditional on any exit path including `CancelledError`; repro test passes; pytest green.
 
-### R26. `OSError` subclasses escape `run_job` without posting terminal event — `open` `self-promoted`
+### R26. `OSError` subclasses escape `run_job` without posting terminal event — `done` *(2026-06-06, PR #33)* `self-promoted`
 Surface: backend/robustness. A1 hunt #3. The `except` clause around `asyncio.create_subprocess_exec` catches only `FileNotFoundError` and `PermissionError`. Broader `OSError` subclasses (e.g. `BlockingIOError` EAGAIN, `OSError` EMFILE) propagate uncaught — `_running` stays incremented, no terminal event posted, job stuck at "started" forever.
 Repro: `tests/test_judge_r4_bugs.py::test_bug4_other_oserror_does_not_escape_run_job` — FAILS on master.
 Done-when: except broadened to `OSError`; spawn failures post `type="failed"` and decrement `_running`; repro test passes; pytest green.

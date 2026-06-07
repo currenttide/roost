@@ -1059,3 +1059,50 @@ def test_auto_job_crash_after_decline_marker_reported_as_failed():
         )
 
     asyncio.run(go())
+
+
+def test_bug4_other_oserror_does_not_escape_run_job():
+    """[R26] OSError subclasses beyond FileNotFoundError/PermissionError (e.g.
+    BlockingIOError EAGAIN when the fd table is exhausted, OSError EMFILE) must
+    not escape run_job uncaught.  Pre-fix they propagated out, leaving _running
+    incremented and no terminal event posted to the control plane.
+
+    The fix broadens the except clause to the OSError base class so any spawn
+    failure posts a type='failed' event and decrements _running correctly."""
+    from unittest.mock import patch
+    import errno
+    import roost.worker as wmod
+
+    async def _fake_create_emfile(*a, **k):
+        raise OSError(errno.EMFILE, "Too many open files")
+
+    async def go():
+        w, events, logs = _mk_runjob_worker({})
+        running_before = w._running
+        with patch("asyncio.create_subprocess_exec", side_effect=_fake_create_emfile), \
+             patch.object(wmod, "build_command",
+                          side_effect=lambda spec, job_id, **kw: (
+                              ["/bin/true"], "/tmp", [])):
+            # Must NOT raise — the OSError must be caught inside run_job.
+            await asyncio.wait_for(
+                w.run_job({"id": "j-r26", "spec": {"kind": "command", "command": "true"}}),
+                timeout=10.0,
+            )
+        await w.close()
+
+        # A terminal 'failed' event must have been posted.
+        terminal = [e for e in events if e.get("type") in ("succeeded", "failed")]
+        assert terminal, f"no terminal event posted; events={events}"
+        assert terminal[-1]["type"] == "failed", (
+            f"spawn OSError must produce type='failed', got {terminal[-1]['type']!r}"
+        )
+        # The error description must be present.
+        assert "Too many open files" in terminal[-1].get("error", ""), (
+            f"error field missing OS message: {terminal[-1]}"
+        )
+        # _running must be back to its pre-call value (decremented on failure).
+        assert w._running == running_before, (
+            f"_running not decremented: before={running_before} after={w._running}"
+        )
+
+    asyncio.run(go())
