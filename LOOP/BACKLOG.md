@@ -56,7 +56,7 @@ Surface: backend/correctness. A1 hunt #3 (worker executors). `run_job` checks `d
 Repro: `tests/test_judge_r4_bugs.py::test_bug5_auto_decline_then_crash_reported_as_declined_not_failed` — FAILS on master.
 Done-when: exit_code check wins over the `declined` flag (non-zero exit is always `failed` regardless of marker); repro test passes; pytest green.
 
-### R25. `_running`/`_active` leaked when `run_job` is cancelled — `open` `self-promoted`
+### R25. `_running`/`_active` leaked when `run_job` is cancelled — `done` *(2026-06-07, PR #35)* `self-promoted`
 Surface: backend/robustness. A1 hunt #3. `self._running += 1` and `self._active[job_id] = ...` are set early in `run_job` with no enclosing `try/finally`. On `task.cancel()`, `CancelledError` propagates out leaving both counters permanently wrong — capacity accounting corrupts over time.
 Repro: `tests/test_judge_r4_bugs.py::test_bug1_running_and_active_not_leaked_on_cancellation` — FAILS on master.
 Done-when: `try/finally` wraps the full body after `_running += 1`; decrement and `_active.pop` unconditional on any exit path including `CancelledError`; repro test passes; pytest green.
