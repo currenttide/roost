@@ -341,3 +341,31 @@ Entries are written by the loop; humans read, never need to edit.
   requirement; no live smoke claimed. The `up` orchestration in cli.py
   remains untested (process spawning) — noted for a possible future item,
   not promised.
+
+## 2026-06-07 01:40 UTC — R10: Tests for service.py
+- Verdict: shipped
+- Branch/PR: loop/r10-service-tests / https://github.com/currenttide/roost/pull/18
+- What changed: tests-only — new tests/test_service.py (26 tests, zero real
+  subprocesses: FakeRun records every systemctl/launchctl/loginctl/journalctl/
+  tail argv; HOME redirected to tmp for all file writes). Covers
+  _resolve_roost_bin's three-tier fallback, the _service_env allowlist (an
+  AWS secret asserted NOT to propagate; empty values skipped), the systemd
+  unit renderer (incl. the exact KEY=value quoting contract for
+  space/backslash/quote env values), the launchd plist renderer validated via
+  plistlib (multi-word bin → argv split; XML escaping round-trips), install()
+  on linux/darwin/unsupported (file content + argv + rc propagation +
+  systemctl-missing rc 2 with the unit still written), and
+  start/stop/status/logs per platform with their failure paths.
+- Evidence:
+  - `python -m pytest -q` → 454 passed in 14.32s (was 428; +26, none removed)
+  - new file alone: 26 passed in 0.07s
+- Judge: approve (round 1) — re-ran pytest (454) + the file alone; verified
+  single-file scope; ran three REAL mutation probes on /tmp copies (always-
+  start install, dropped XML escape, swapped bootout/kickstart — all caught);
+  safety-audited that no test can reach a live subprocess (every lifecycle
+  test takes fake_run; helpers have no subprocess sites) or write outside
+  tmp (home fixture on every file-writing path).
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (fenced
+  first-line model-ID block present)
+- Notes: with R9+R10 the two zero-test modules from the survey are closed.
+  Remaining Ranked: R11 (log-append bounds), R13 (fixture drift guard).
