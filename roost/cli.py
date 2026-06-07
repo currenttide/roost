@@ -1366,12 +1366,23 @@ def capabilities(ctx: click.Context) -> None:
             gpus.append(f"{w['name']}: {n}× {name}"
                         + (f" ({cp.get('gpu_vram_gb')}GB)" if cp.get("gpu_vram_gb") else ""))
     has_docker = any(w["capabilities"].get("docker") for w in live)
+    # [R41] Nodes where nvidia-smi is present but the GPU probe ERRORED — surfaced
+    # so an operator can tell a broken node from a genuinely-bare one (these do NOT
+    # take GPU jobs, exactly like a bare node, but the cause is fixable).
+    gpu_failed = [w["name"] for w in live
+                  if w["capabilities"].get("gpu_detection") == "failed"]
     click.echo(f"\033[1mYour Roost fleet\033[0m — {len(live)} nodes · {cores} CPU cores · "
                f"{len(gpus)} GPU node(s)")
     if gpus:
         click.echo("GPUs:")
         for g in gpus:
             click.echo(f"  • {g}")
+    if gpu_failed:
+        click.echo(click.style(
+            f"GPU detection FAILED on {len(gpu_failed)} node(s): "
+            f"{', '.join(gpu_failed)}", fg="red"))
+        click.echo("  (nvidia-smi present but failing — these won't take GPU jobs; "
+                   "check the driver on those hosts)")
     click.echo("\n\033[1mWhat it can do\033[0m")
     click.echo("  • Run anything you can say in plain language — it picks the best node and verifies the result.")
     click.echo("  • CPU work, agent tasks, and (on the GPU nodes) GPU / training jobs"
@@ -2092,6 +2103,10 @@ def list_workers_cmd(ctx: click.Context) -> None:
                 summary_bits.append(caps["hostname"])
             if "gpu_vram_gb" in caps:
                 summary_bits.append(f"gpu:{caps['gpu_vram_gb']}GB")
+            elif caps.get("gpu_detection") == "failed":
+                # [R41] nvidia-smi present but the GPU probe errored — flag it so an
+                # operator sees a BROKEN node, not a silently-bare one.
+                summary_bits.append(click.style("gpu:DETECTION-FAILED", fg="red"))
             if "arch" in caps:
                 summary_bits.append(caps["arch"])
             load = caps.get("load") or {}

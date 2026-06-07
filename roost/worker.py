@@ -106,6 +106,12 @@ def _detect_gpus() -> list[dict]:
             capture_output=True, text=True, timeout=5.0, check=True,
         ).stdout
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        # The probe ERRORED (nvidia-smi present but a nonzero exit / timeout /
+        # OSError — a driver hiccup, an XID error, a hung GPU). We return [] here
+        # to keep this function's contract (a list of usable GPUs) unchanged, but
+        # the failure-vs-absence distinction is recovered separately by
+        # _gpu_probe_failed() / detect_capabilities so a broken node is not
+        # silently advertised as bare (R41).
         return []
     gpus: list[dict] = []
     for line in out.strip().splitlines():
@@ -124,6 +130,44 @@ def _detect_gpus() -> list[dict]:
             }
         )
     return gpus
+
+
+def _gpu_probe_failed() -> Optional[str]:
+    """[R41] Distinguish a node that has NO GPU from one whose GPU probe ERRORED.
+
+    Called only when the discrete-GPU probe (_detect_gpus) AND the Tegra fallback
+    both yielded nothing, to classify *why*:
+
+      * nvidia-smi is NOT installed  → genuinely no NVIDIA GPU here → return None
+        (absence: advertise no gpu* keys at all, as before).
+      * nvidia-smi IS installed but querying it fails (nonzero exit / timeout /
+        OSError — driver not loaded, GPU fell off the bus, XID error) → return a
+        short reason string. The caller advertises `gpu_detection: "failed"` so an
+        operator can tell a broken node from a bare one, and placement of GPU jobs
+        still (correctly) skips it.
+
+    A successful query that simply returns no usable rows is treated as absence
+    (an nvgpu/Tegra board, already handled upstream) — only an actual error counts
+    as a failure. Pure best-effort; never raises."""
+    nvidia_smi = _find_nvidia_smi()
+    if not nvidia_smi:
+        return None  # no probe tool → genuinely no GPU, not a failure
+    try:
+        subprocess.run(
+            [nvidia_smi, "--query-gpu=name", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5.0, check=True,
+        )
+    except subprocess.CalledProcessError as e:
+        # nvidia-smi ran but exited nonzero — the canonical "driver/GPU broken" case.
+        err = (e.stderr or "").strip().splitlines()
+        detail = err[0][:120] if err else f"exit {e.returncode}"
+        return f"nvidia-smi failed: {detail}"
+    except subprocess.TimeoutExpired:
+        return "nvidia-smi timed out"
+    except OSError as e:
+        return f"nvidia-smi could not be run: {e}"
+    # Probe succeeded with no usable rows → not a discrete GPU, but not an error.
+    return None
 
 
 def _detect_ram_gb() -> Optional[float]:
@@ -327,6 +371,26 @@ def detect_capabilities(
             # Marker so the matcher / triage know this is unified-memory (shared with
             # the CPU), not dedicated VRAM — and that GPU work runs on a Jetson.
             caps["tegra"] = True
+    else:
+        # [R41] No GPU found — but is this a genuinely-bare node, or one whose GPU
+        # probe ERRORED (nvidia-smi present but failing: driver hiccup, timeout, GPU
+        # off the bus)? Advertise `gpu_detection: "failed"` ONLY in the latter case
+        # (absent entirely when there's simply no GPU) so an operator can tell a
+        # broken node from a bare one. Placement is unaffected: a numeric GPU
+        # constraint (e.g. `gpu_vram_gb: ">=8"`) fails for BOTH — there is still no
+        # `gpu_vram_gb` to satisfy it — and the non-numeric "failed" value can never
+        # satisfy a numeric constraint (matcher R18). Also emit a loud, structured
+        # log line so the failure is visible in the worker's own logs.
+        gpu_fail = _gpu_probe_failed()
+        if gpu_fail:
+            caps["gpu_detection"] = "failed"
+            print(
+                f'[roost] GPU_DETECTION_FAILED host={caps["hostname"]} '
+                f'gpu_detection=failed reason={json.dumps(gpu_fail)} '
+                "-- nvidia-smi is present but the GPU probe failed; this node will "
+                "NOT be placed for GPU jobs. Check the driver (nvidia-smi) on this host.",
+                flush=True,
+            )
     # Docker-as-executor capability: can this worker actually RUN containers
     # (daemon reachable), and can those containers see GPUs (nvidia runtime)?
     caps.update(_detect_docker())
