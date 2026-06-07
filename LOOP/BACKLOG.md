@@ -197,7 +197,7 @@ Done-when: every operator-facing env var documented + docker-passthrough'd + tru
 Surface: backend/CLI/feature. A6 survey #2 finding 1+3 (judge-approved, merged — same helper, same contract). `_derive_run` (server.py:777-806) — consumed by /panel, roost history, mac-app, both mobile dashboards — has no `inputs` key; the tree endpoint never calls `_input_counts` per node, so `tree --health` (cli.py:1902-1913) can't show what `roost status` already does. An operator can't see dropped/queued input without per-job drilling.
 Done-when: `_derive_run` includes `inputs: {queued, delivered, dropped}` present only when any count > 0 (mirroring GET /jobs/{id}); tree endpoint annotates per-node counts; `tree --health` prints `inputs N/N/N` when nonzero; API.md §2 run row additively documents the optional field (fixture regen values-only if needed); tests for both surfaces; pytest green.
 
-### R60. `roost_publish` MCP tool — the agent front door ships sites — `open` `self-promoted` `feature`
+### R60. `roost_publish` MCP tool — the agent front door ships sites — `done` *(2026-06-07, PR #70 — 17th tool; one-shot + 422 fallback + blob_id parity with CLI)* `self-promoted` `feature`
 Surface: MCP/feature. A6 survey #2 finding 2 (judge-approved). 16 tools, none publishes; the server allows scoped agent tokens to publish (INTEGRATIONS.md:168-170) and CLI + both mobile apps expose it — only the captain can't. "Build a site and publish it" via roost_do dead-ends.
 Done-when: `roost_publish` (name + bundle path or blob_id, mirroring the CLI one-shot/two-step) in TOOLS + TOOL_IMPL with an R46-style worked example; INTEGRATIONS.md row; tools/call test returns a Site; pytest green.
 

@@ -1679,3 +1679,25 @@ Entries are written by the loop; humans read, never need to edit.
 - Notes: iteration #12 COMPLETE — R56 survey, R57 #69, R58 #68; master 778.
   Cycle #14 gate cleared → dispatching R59 (input visibility), R60
   (roost_publish), R61 (mobile schedules UI) now.
+
+## 2026-06-07 ~11:00 UTC — R60: roost_publish MCP tool
+- Verdict: shipped
+- Branch/PR: loop/r60-mcp-publish-tool / https://github.com/currenttide/roost/pull/70 (merged 209c523)
+- What changed: 17th MCP tool. `roost_publish(name, path XOR blob_id)`: path = a
+  built tar.gz → one-shot raw-body POST /publish?name= (nothing staged; 422
+  fallback to stage+JSON for older CPs — exact CLI parity); blob_id = two-step
+  JSON (pairs with stage_file/send_file for worker-staged content). Returns the
+  Site dict (+public_url when domain configured); errors map to the established
+  {error: http_<code>} matrix; neither-or-both sources → bad_args guard that
+  never touches the CP. R46-style worked example; INTEGRATIONS.md 17th row +
+  verb-matrix row. INTENDED DIVERGENCE (judge-confirmed): CLI tars a directory,
+  MCP takes the finished tar.gz.
+- Evidence:
+  - `python -m pytest -q` → 786 passed (+8); R57's routing-integrity + 17-tool
+    set-equality hold
+- Judge: approve (round 1) — re-ran pytest, truth-checked the example against
+  publish.public_dict + the /pub route, verified all three flow branches against
+  the CLI, confirmed error mapping against the real handler
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only)
+- Notes: iteration #13 slot 2. The headline-verb matrix is now complete: every
+  verb reachable from every appropriate surface. R59 + R61 in flight.
