@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 _OPERATORS = (">=", "<=", "==", "!=", ">", "<")
@@ -18,13 +19,18 @@ def _as_number(x: Any) -> float | None:
     if isinstance(x, bool):
         return None
     if isinstance(x, (int, float)):
-        return float(x)
-    if isinstance(x, str):
+        v = float(x)
+    elif isinstance(x, str):
         try:
-            return float(x)
+            v = float(x)
         except ValueError:
             return None
-    return None
+    else:
+        return None
+    # Capabilities are real measured quantities; "nan"/"inf" only ever come
+    # from a broken probe. NaN would pass "!=0" (nan != 0 is True) and inf
+    # passes any ">=" — treat non-finite as not-a-number (R18).
+    return v if math.isfinite(v) else None
 
 
 def _check_one(cap: Any, requirement: Any) -> bool:
@@ -36,14 +42,20 @@ def _check_one(cap: Any, requirement: Any) -> bool:
             a = _as_number(cap)
             b = _as_number(rhs)
             if a is None or b is None:
-                # Non-numeric operands (e.g. `hostname: ==pi0`). Only equality
-                # comparators are meaningful; fall back to string compare so
-                # hard pins like `hostname: ==dgx` work as documented.
                 # A worker that doesn't advertise the capability at all must NOT
                 # satisfy a constraint *about* that capability (else a CPU-only
                 # box matches `gpu_vram_gb: "!=0"` via str(None)!="0").
                 if cap is None:
                     return False
+                # A NUMERIC constraint (the rhs parses as a number) can never be
+                # satisfied by a non-numeric capability: a worker whose GPU probe
+                # produced gpu_vram_gb: "N/A"/"none"/"" must not pass "!=0" via
+                # the string compare below (R18 — false-positive placement).
+                if b is not None:
+                    return False
+                # Both sides non-numeric (e.g. `hostname: ==pi0`). Only equality
+                # comparators are meaningful; fall back to string compare so
+                # hard pins like `hostname: ==dgx` work as documented.
                 if op == "==":
                     return str(cap) == rhs
                 if op == "!=":
