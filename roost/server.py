@@ -582,14 +582,25 @@ def _goal_text(job: dict) -> str:
     return (g if isinstance(g, str) else " ".join(g))[:140]
 
 
+# Phase markers the worker stamps into `last_activity` via a `progress` event when
+# it enters the trust-loop verify / self-heal phases (see worker.py `_phase_progress`:
+# "🔎 verifying result", "🔎 re-verifying result", "🔧 self-healing (attempt N)").
+# We anchor on the worker's exact emoji prefix — NOT a bare substring of the activity
+# text — so a job whose OWN activity legitimately mentions "verifying" (e.g. "verifying
+# build artifacts") is never misread as the worker's verify phase and thereby exempted
+# from the stuck check. Keep these in lockstep with worker.py's emission strings.
+VERIFY_PHASE_PREFIX = "🔎 "
+SELF_HEAL_PHASE_PREFIX = "🔧 "
+
+
 def _job_phase(job: dict) -> str:
     state = job.get("state")
     if state in ("succeeded", "failed", "cancelled"):
         return state
     act = job.get("last_activity") or ""
-    if "verifying" in act:
+    if act.startswith(VERIFY_PHASE_PREFIX):
         return "verifying"
-    if "self-healing" in act:
+    if act.startswith(SELF_HEAL_PHASE_PREFIX):
         return "self-healing"
     return state or "queued"
 
