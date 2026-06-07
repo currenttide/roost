@@ -2,7 +2,7 @@
   "assigned_at": null,
   "attempt": 0,
   "capable_workers": 0,
-  "created_at": 1780853830.3577662,
+  "created_at": 1780862528.2026622,
   "decline_count": 0,
   "declined_by": null,
   "depth": 0,
@@ -11,7 +11,7 @@
   "eta_sec": null,
   "exit_code": null,
   "finished_at": null,
-  "id": "c66b2cf578c5",
+  "id": "b8aacb786942",
   "intent": "train on the gpu box",
   "last_activity": null,
   "last_activity_at": null,
@@ -23,13 +23,13 @@
   "narration": null,
   "parent_job_id": null,
   "progress": null,
-  "queued_sec": 0.0,
+  "queued_sec": 0.1,
   "requeued_at": null,
   "requires": {
     "gpu_vram_gb": ">=24"
   },
   "result": null,
-  "root_job_id": "c66b2cf578c5",
+  "root_job_id": "b8aacb786942",
   "spec": {
     "args": null,
     "budget": {},

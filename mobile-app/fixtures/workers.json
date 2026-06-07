@@ -7,13 +7,13 @@
       ]
     },
     "capacity": 1,
-    "enroll_id": "2b2db662d4012fad15d95ea5b1978ecbae7b694387a9e7775252eea92333fe61",
-    "id": "35d2c0cf1aed",
-    "last_assigned_at": 1780853830.333405,
-    "last_seen": 1780853830.3515098,
+    "enroll_id": "f593d4d9c5745c0b39a4ac04833469fd289078cf7413602c2282dcf34e19b5b6",
+    "id": "d8d58b202358",
+    "last_assigned_at": 1780862528.178538,
+    "last_seen": 1780862528.1966317,
     "name": "fixture-node",
     "policy": {},
-    "registered_at": 1780853830.2634993,
+    "registered_at": 1780862528.1003878,
     "revoked": 0,
     "running": 1,
     "status": "busy"

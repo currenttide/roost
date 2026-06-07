@@ -922,6 +922,51 @@ def test_derive_run_shape():
     assert "cost" in r and "tokens_used" in r["cost"]
 
 
+# ---------- R85: run row carries the job's actual kind (not a hardcoded label) ----
+#
+# The mobile session/dashboard subtitles hardcoded "claude" for every job, so a
+# plain `command` job rendered "… · claude · succeeded" (user-testing/android/05,08).
+# The honest fix is server-side: /derived (and GET /jobs/{id}/derived, which the
+# session screen polls) now reports the job's effective kind. "Effective" mirrors
+# the worker's build_command resolution exactly (worker.py): a job carrying a
+# `command` runs as a command regardless of a declared kind; `auto`/`docker` win
+# by their explicit kind; everything else is the declared kind, defaulting to the
+# worker's own default of "claude" when the spec names none.
+
+def test_job_kind_command_beats_declared_kind():
+    # A spec with a `command` runs as a command on the worker even if kind is unset
+    # or mislabeled — the subtitle must say "command", not "claude" (the bug).
+    assert server._job_kind({"spec": {"command": "echo hi"}}) == "command"
+    assert server._job_kind({"spec": {"kind": "claude", "command": "echo hi"}}) == "command"
+
+
+def test_job_kind_explicit_kinds():
+    assert server._job_kind({"spec": {"kind": "docker", "image": "x"}}) == "docker"
+    assert server._job_kind({"spec": {"kind": "auto", "task": "t"}}) == "auto"
+    assert server._job_kind({"spec": {"kind": "codex", "intent": "i"}}) == "codex"
+    assert server._job_kind({"spec": {"kind": "captain", "intent": "i"}}) == "captain"
+
+
+def test_job_kind_defaults_to_claude_when_unspecified():
+    # An agent job with only an intent and no kind runs as claude on the worker.
+    assert server._job_kind({"spec": {"intent": "fix the test"}}) == "claude"
+    # A docker job's in-container `command` must not be misread as a command kind.
+    assert server._job_kind(
+        {"spec": {"kind": "docker", "image": "x", "command": "run"}}) == "docker"
+
+
+def test_derive_run_includes_kind():
+    cmd = server._derive_run({"id": "c", "state": "succeeded",
+                              "spec": {"command": "echo ANDROID_UXTEST"}})
+    assert cmd["kind"] == "command"
+    agent = server._derive_run({"id": "a", "state": "running",
+                                "spec": {"kind": "claude", "intent": "fix it"}})
+    assert agent["kind"] == "claude"
+    dock = server._derive_run({"id": "d", "state": "queued",
+                               "spec": {"kind": "docker", "image": "x"}})
+    assert dock["kind"] == "docker"
+
+
 # ---------- R70: /derived never 500s on a non-string goal/result field ----------
 #
 # Promoted from LOOP/repro-a1-hunt7.py (A1 hunt #7). One root cause, two surfaces:

@@ -705,6 +705,30 @@ def _goal_text(job: dict) -> str:
     return text[:140]
 
 
+def _job_kind(job: dict) -> str:
+    """The job's *effective* executor kind, for display (R85).
+
+    Mirrors the worker's build_command resolution (worker.py) exactly so the
+    label a client shows matches how the job actually runs:
+      1. `kind: auto`   → auto    (bare-worker triage agent)
+      2. `kind: docker` → docker  (its in-container `command` is NOT a command kind)
+      3. a `command`    → command (runs as a shell/argv process regardless of any
+                                   declared kind — this is the bug R85 fixes: a
+                                   plain command job was mislabeled "claude")
+      4. an explicit `kind` (claude/codex/captain/…) → that value
+      5. nothing named  → claude  (the worker's own default)
+    """
+    spec = job.get("spec") or {}
+    kind = (spec.get("kind") or "").lower()
+    if kind == "auto":
+        return "auto"
+    if kind == "docker":
+        return "docker"
+    if spec.get("command"):
+        return "command"
+    return kind or "claude"
+
+
 def _result_text(res: dict, job: dict) -> str:
     """Serializer defense (R70) for the run row's `result` display field.
 
@@ -902,6 +926,7 @@ def _derive_run(
     run = {
         "run_id": job.get("id"),
         "goal": _goal_text(job),
+        "kind": _job_kind(job),
         "state": job.get("state"),
         "phase": _job_phase(job),
         "health": _job_health(job),

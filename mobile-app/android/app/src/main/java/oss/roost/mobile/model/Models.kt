@@ -52,6 +52,10 @@ data class FleetVerdict(
 data class Run(
     val runId: String,
     val goal: String,
+    /** Effective executor kind (API.md §2: "command"|"claude"|"docker"|…). Null on
+     *  an older CP that doesn't send it — clients then drop the kind subtitle segment
+     *  rather than guess (the R85 bug was guessing "claude" for every job). */
+    val kind: String?,
     val state: String,
     val phase: String?,
     val health: Health,

@@ -48,6 +48,7 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
 import oss.roost.mobile.AppContainer
 import oss.roost.mobile.model.Composer
+import oss.roost.mobile.model.Subtitle
 import oss.roost.mobile.sse.RenderedLine
 import oss.roost.mobile.ui.Semantic
 import oss.roost.mobile.ui.common.Format
@@ -282,7 +283,9 @@ private fun ChildRowView(child: ChildRow, onClick: () -> Unit) {
 private fun sessionSubtitle(s: SessionUiState): String {
     val parts = ArrayList<String>()
     s.story?.worker?.let { parts.add(it) }
-    parts.add("claude")
+    // R85: the job's actual kind (was hardcoded "claude" — a `command` job read
+    // "claude · succeeded"). Omitted when the CP doesn't report it (older server).
+    Subtitle.kindSegment(s.story?.kind)?.let { parts.add(it) }
     parts.add(s.state)
     if (!s.connected && (s.state == "running" || s.state == "assigned")) {
         parts.add("reconnecting…")

@@ -108,6 +108,17 @@ def capture(db_path: Path) -> dict[str, Any]:
         })
         queued_id = r.json()["id"]
 
+        # 4. a plain `command` job and a `docker` job — so /derived covers the kinds
+        # the session/dashboard subtitle must label correctly (R85). These were the
+        # rows the old clients mislabeled "claude". Left queued; the point is the
+        # `kind` field on the run row, which is set at submit and independent of state.
+        r = c.post("/jobs", headers=mh, json={
+            "kind": "command", "command": "echo ANDROID_UXTEST"})
+        cmd_id = r.json()["id"]
+        r = c.post("/jobs", headers=mh, json={
+            "kind": "docker", "image": "python:3.12", "command": "python -V"})
+        docker_id = r.json()["id"]
+
         # -- snapshots the apps render -------------------------------------
         out["derived.json"] = c.get("/derived", headers=mh).json()
         out["jobs_list.json"] = c.get("/jobs", headers=mh).json()
@@ -185,7 +196,10 @@ def capture(db_path: Path) -> dict[str, Any]:
         out["error_401.json"] = c.get(
             "/jobs", headers={"Authorization": "Bearer nope"}).json()
         out["error_403_admin_endpoint.json"] = c.get("/pair-tokens", headers=mh).json()
-        out["error_404_job.json"] = c.get("/jobs/nope", headers=mh).json()
+        # A genuinely-missing job (id long enough to clear R79's ≥6-char prefix gate,
+        # so this records the "job not found" 404 the apps must handle, not the
+        # too-short-prefix 404).
+        out["error_404_job.json"] = c.get("/jobs/nonexistent-job-id", headers=mh).json()
 
     db_path.unlink(missing_ok=True)
     return out

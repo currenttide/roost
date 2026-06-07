@@ -216,6 +216,9 @@ struct RunRow: View {
     private var meta: String {
         var parts: [String] = []
         if let w = run.worker { parts.append(w) }
+        // R85: the job's actual kind (truthful "command"/"claude"/…); omitted on an
+        // older CP that doesn't report it.
+        if let k = Subtitle.kindSegment(run.kind) { parts.append(k) }
         // Active → elapsed since created; terminal → state (+ result snippet).
         if run.healthStatus.isActive, let e = UIFormat.elapsed(since: run.createdAt) {
             parts.append(e)
