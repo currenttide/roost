@@ -7,7 +7,9 @@ expiry, and the pending-upload (fetch) flow.
 
 from __future__ import annotations
 
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -111,6 +113,59 @@ def test_presign_upload_flow(client: TestClient):
     r = client.get(f"/blobs/{blob['id']}")
     assert r.status_code == 200
     assert r.content == b"remote bytes"
+
+
+def test_presigned_put_is_single_use(client: TestClient):
+    blob = client.post("/blobs/presign", json={"name": "result.bin"}).json()
+    path, q = _presigned_parts(blob["put_url"])
+
+    first = client.put(
+        path, params=q, content=b"trusted result", headers={"Authorization": ""}
+    )
+    assert first.status_code == 200
+    metadata = first.json()
+
+    replay = client.put(
+        path, params=q, content=b"attacker overwrite",
+        headers={"Authorization": ""},
+    )
+    assert replay.status_code == 409
+    assert client.get(f"/blobs/{blob['id']}").content == b"trusted result"
+
+    listed = next(row for row in client.get("/blobs").json()
+                  if row["id"] == blob["id"])
+    assert listed["size"] == metadata["size"]
+    assert listed["sha256"] == metadata["sha256"]
+
+
+def test_concurrent_presigned_puts_have_one_winner(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    blob = client.post("/blobs/presign", json={"name": "race.bin"}).json()
+    path, q = _presigned_parts(blob["put_url"])
+
+    real_claim = blobstore.claim_pending_blob
+    claim_barrier = threading.Barrier(2)
+
+    def synchronized_claim(conn, blob_id):
+        claim_barrier.wait(timeout=5)
+        return real_claim(conn, blob_id)
+
+    monkeypatch.setattr(blobstore, "claim_pending_blob", synchronized_claim)
+    bodies = (b"first contender", b"second contender")
+
+    def upload(body: bytes):
+        response = client.put(
+            path, params=q, content=body, headers={"Authorization": ""}
+        )
+        return response.status_code, body
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(upload, bodies))
+
+    assert sorted(status for status, _ in results) == [200, 409]
+    winner = next(body for status, body in results if status == 200)
+    assert client.get(f"/blobs/{blob['id']}").content == winner
 
 
 def test_put_with_get_sig_rejected(client: TestClient):

@@ -2180,11 +2180,11 @@ def create_app(
 
     blob_secret = blobstore.get_secret(db)
 
-    def _store_body_stream(blob_id: str):
+    def _store_body_stream(blob_id: str, destination: Optional[Path] = None):
         """Returns an async receiver that streams a request body to the blob
         file with size-cap + sha256, returning (size, hexdigest)."""
         async def receive(request: Request) -> tuple[int, str]:
-            path = blobstore.blob_path(db, blob_id)
+            path = destination or blobstore.blob_path(db, blob_id)
             digest = hashlib.sha256()
             size = 0
             with open(path, "wb") as f:
@@ -2246,17 +2246,54 @@ def create_app(
         """Presigned upload leg — no bearer needed; the signature IS the auth."""
         if not blobstore.verify_sig(blob_secret, blob_id, exp, "put", sig):
             raise HTTPException(403, "invalid or expired signature")
-        def _get() -> Optional[dict]:
+
+        def _claim() -> str:
             with _connect(db) as conn:
-                return blobstore.get_blob(conn, blob_id)
-        row = await asyncio.to_thread(_get)
-        if row is None:
+                if blobstore.claim_pending_blob(conn, blob_id):
+                    return "claimed"
+                return (
+                    "missing"
+                    if blobstore.get_blob(conn, blob_id) is None
+                    else "conflict"
+                )
+
+        claim = await asyncio.to_thread(_claim)
+        if claim == "missing":
             raise HTTPException(404, "blob not found")
-        size, sha = await _store_body_stream(blob_id)(request)
-        def _finalize() -> None:
-            with _connect(db) as conn:
-                blobstore.finalize_blob(conn, blob_id, size, sha)
-        await asyncio.to_thread(_finalize)
+        if claim == "conflict":
+            raise HTTPException(409, "blob upload already claimed or finalized")
+
+        final_path = blobstore.blob_path(db, blob_id)
+        tmp_path = (
+            blobstore.blob_dir(db)
+            / f".upload-{blob_id}-{secrets.token_hex(6)}"
+        )
+        installed = False
+        try:
+            size, sha = await _store_body_stream(blob_id, tmp_path)(request)
+            await asyncio.to_thread(os.replace, tmp_path, final_path)
+            installed = True
+
+            def _finalize() -> bool:
+                with _connect(db) as conn:
+                    return blobstore.finalize_claimed_blob(
+                        conn, blob_id, size, sha
+                    )
+
+            if not await asyncio.to_thread(_finalize):
+                raise HTTPException(409, "blob upload claim was lost")
+        except (Exception, asyncio.CancelledError):
+            tmp_path.unlink(missing_ok=True)
+            if installed:
+                final_path.unlink(missing_ok=True)
+
+            def _release() -> None:
+                with _connect(db) as conn:
+                    blobstore.release_blob_claim(conn, blob_id)
+
+            await asyncio.to_thread(_release)
+            raise
+
         return {"id": blob_id, "size": size, "sha256": sha, "state": "ready"}
 
     @app.get("/blobs/{blob_id}")
