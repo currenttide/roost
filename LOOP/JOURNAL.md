@@ -1911,3 +1911,27 @@ Entries are written by the loop; humans read, never need to edit.
   counter). Modules at 100%: captain, schema, verify, triage, bootstrap, service.
   Cycle #20 = R69, hunt #7 (mobile-contract robustness lens) — the long-idle
   gate: an all-clear there is deepening-clear #2 → long-idle.
+
+## 2026-06-07 ~18:40 UTC — A1 hunt #7: mobile-contract lens (long-idle gate NOT passed)
+- Verdict: shipped (repros merged; 2 confirmed, 6 cleared)
+- Branch/PR: loop/replenish-hunt7 / https://github.com/currenttide/roost/pull/80 (merged 627e085; repro only, server.py md5 unchanged)
+- What changed: the long-idle gate hunt found real contract breakage. ONE ROOT
+  CAUSE, TWO SURFACES: _goal_text/_derive_run assume str without proving it.
+  (a) MOBILE-REACHABLE: JobSubmit.command is Optional[Any] — command:[1,2,3]
+  accepted at POST /jobs, then " ".join(ints) raises → GET /derived 500s, and
+  since /derived iterates the page, ONE poisoned job kills the dashboard for
+  every job on every 2s mobile poll. (b) a non-conformant worker's dict-valued
+  result.output gets sliced → same 500. Non-tautology proven (str() coercion
+  flips both to 200; reverted). CLEARED (judge attacked each, all held): R59
+  only-when-nonzero (guards at :816/:3023/tree), SSE vocabulary (gen() emits
+  only state/log/done/error, states within the §2 enum), SSE single-line
+  framing, pagination edges incl. shrinking-list offset, blob/site/schedule
+  serializer nullability (mobile blobs always finalize ready), 64KiB/control-char
+  round-trips.
+- Evidence: repro 2 failed ×3 deterministic on master; `python -m pytest -q` → 812
+- Judge: approve (round 1) — re-ran both gates, confirmed both from source, no
+  counterexample to any clear
+- Models: hunter claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only)
+- Notes: iteration #19 complete. Long-idle counter RESET (gate found bugs) —
+  deepening keeps paying at depth 3. Cycle #21 = R70 (the fix, with the
+  non-breaking-typing investigation spelled out).
