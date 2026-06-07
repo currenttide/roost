@@ -1070,3 +1070,32 @@ Entries are written by the loop; humans read, never need to edit.
 - Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only)
 - Notes: iteration #4 slot 1. Operators can finally see captain INTENT, not just
   child states. R34 (mobile one-shot publish) still in flight — last of the wave.
+
+## 2026-06-06 ~23:30 UTC — R34: mobile one-shot publish parity
+- Verdict: shipped
+- Branch/PR: loop/r34-mobile-oneshot-publish / https://github.com/currenttide/roost/pull/46 (merged 9b02103)
+- What changed: the R7 one-shot publish (`POST /publish?name=` raw tar.gz body) is now
+  reachable from the full mobile surface — additive; two-step stays. API.md §6
+  restructured (§6a one-shot / §6b two-step / §6c list, per-path error matrices);
+  record_fixtures.py records the one-shot flow as the mobile token → new golden
+  publish_oneshot_response.json; iOS ApiClient.publishBundle(name:data:) +
+  DecodeTests.testPublish; Android ApiClient.publishBundle(name:bytes:) +
+  ParserFixtureTest.publishFlow. Sibling fixture diffs values-only except the
+  additive requeued_at:null the server emits since R19 (faithful regen).
+- Evidence:
+  - `python -m pytest -q` → 566 passed (drift guard 24/24)
+  - iOS: swift test (Swift 6.0.3 Linux) → 33 tests, 0 failures
+  - Android: kotlinc 1.9.24 + JUnitCore → OK (32 tests)
+  - NEGATIVE CONTROLS on both harnesses: hiding the one-shot fixture fails exactly the
+    new test at the decode/parse line; restoring passes — the layers are exercised,
+    not dead code
+- Judge: approve (round 1; one non-blocking API.md wording note, fixed pre-merge) —
+  re-ran pytest + BOTH mobile harnesses + its own negative controls
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only;
+  model attested via modelUsage JSON. Process note: judge under --permission-mode plan
+  produced empty output non-interactively — re-ran with default mode + no-edit
+  allowlist; future judges should avoid plan mode)
+- Notes: iteration #4 COMPLETE — R33 #45, R34 #46, R35 #44, all merged; master 566.
+  Iteration #5 dispatched next: R36 pagination, R37 push notifications, R38
+  interactive follow-up — the last three Ranked items; Ranked will be dry of
+  non-security items after this wave → replenishment cycle #7 follows.

@@ -91,7 +91,7 @@ Surface: backend/correctness. A6 promotion from Proposed. `__version__` in roost
 Surface: backend/CLI/feature. Production north star #2 (operability). When the captain splits a goal into sub-jobs, the plan (which sub-jobs, why, what order) is invisible — `roost tree` shows children but not the reasoning. An operator debugging a fleet cannot tell what the captain intended.
 Done-when: captain dispatch records a structured plan on the parent job (additive field); `roost tree <root>` renders per-child one-line reasoning; older plan-less jobs render gracefully; tests for plan recording + rendering; pytest green.
 
-### R34. Mobile one-shot publish parity — `open` `self-promoted` `feature`
+### R34. Mobile one-shot publish parity — `done` *(2026-06-06, PR #46)* `self-promoted` `feature`
 Surface: mobile/feature. Completes the half-landed R7 feature (north star #3: complete surfaces). Server has `POST /publish?name=` (raw body) since PR #15; mobile API.md §6 still documents only the two-step blob flow; neither client can use the one-shot path.
 Done-when: API.md §6 documents the one-shot path; `record_fixtures.py` records it (regen is values-only additive); iOS + Android decode layers + Linux-runnable tests; pytest green + both mobile harnesses green (per evidence table).
 
