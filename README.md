@@ -471,7 +471,7 @@ mac-app/build.sh http://<control-plane-host>:8787 "<admin-token>"
 
 ```bash
 uv tool install --python 3.12 --with pytest .    # or: pip install -e ".[dev]"
-python -m pytest -q                               # 792 tests
+python -m pytest -q                               # full suite
 ```
 
 Contributions welcome. Keep credentials and machine-specific config out of commits
