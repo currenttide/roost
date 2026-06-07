@@ -115,7 +115,7 @@ Done-when: input verb exists end-to-end for at least the `claude` kind on the CL
 Surface: backend/CLI/feature. Production north star #2 (recoverable state). The CP's SQLite DB is the whole fleet state; today there is no safe way to back it up while the CP runs (file copy under WAL is corruption-prone) and DEPLOY.md has no restore procedure (pre-existing Proposed item).
 Done-when: `roost backup <dest.db>` (admin) performs an online backup via the sqlite3 backup API against the live CP (decide the seam: CP endpoint streaming a consistent snapshot vs CLI attaching directly when local — pick what fits deployment reality, document the choice); DEPLOY.md gains backup + restore + verify procedure; tests: backup of a live busy DB is consistent (readable, row counts match a quiesced copy), restore round-trip; pytest green.
 
-### R40. Mobile schedule parity — `open` `self-promoted` `feature`
+### R40. Mobile schedule parity — `done` *(2026-06-07, PR #51)* `self-promoted` `feature`
 Surface: mobile/feature. North star #3 (complete surfaces). The schedule verb landed server-side with R8 (PR #16); mobile API.md has no schedule surface and neither client can list/create/toggle schedules. Mirror the proven R34 pattern.
 Done-when: API.md documents the schedule endpoints (list/create/enable/disable/delete per server.py's /schedules routes); record_fixtures.py records them (values-only additive regen; drift guard green); iOS + Android decode layers + Linux-runnable tests; pytest + both mobile harnesses green.
 

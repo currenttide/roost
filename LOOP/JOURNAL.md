@@ -1221,3 +1221,28 @@ Entries are written by the loop; humans read, never need to edit.
 - Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p
   read-only, fenced MODEL line present)
 - Notes: iteration #6 slot 3. R39 (backup) + R40 (mobile schedules) in flight.
+
+## 2026-06-07 ~01:10 UTC — R40: mobile schedule parity
+- Verdict: shipped
+- Branch/PR: loop/r40-mobile-schedules / https://github.com/currenttide/roost/pull/51 (merged aa4c72d)
+- What changed: R8's schedule verb now reachable from the full mobile surface.
+  SCOPE FINDING (gate crux): mobile pair tokens authenticate as kind=="client" and
+  _require_scheduler allows "client" — scope is an audit label, not a privilege
+  boundary, exactly as R6 found for publish; pinned by
+  test_mobile_scope_manages_schedules_end_to_end (create→list→disable→enable→delete).
+  API.md gains a Schedules section (every-format, 30s floor, no-backfill/no-pile-up
+  truth-checked against server.py; §7→§8/§8→§9 renumber). record_fixtures.py records
+  the flow → 2 new goldens; 16 sibling fixtures verified values-only by key-set
+  comparison. iOS Schedule model + calls + testSchedules; Android model/parsers/
+  ApiClient + schedules test.
+- Evidence:
+  - `python -m pytest -q` → 618 passed in the worktree (615 + 3); drift guard 26/26
+  - iOS swift test → 34 tests, 0 failures; Android kotlinc+JUnitCore → OK (28)
+  - negative controls on BOTH new fixtures: hiding each fails exactly the new
+    test at decode/parse
+- Judge: both phases approve (round 1) — gate independently confirmed routes + scope
+  resolution; review re-ran pytest + BOTH harnesses + drift guard, truth-checked
+  every API.md claim against server.py
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only,
+  fenced MODEL line both phases)
+- Notes: iteration #6 slot 2. R39 (backup) last in flight.
