@@ -16,7 +16,8 @@ of concurrent sessions from your pocket.
 On any machine with admin access to the control plane:
 
 ```
-roost pair --label "yang-iphone"          # add --url http://<LAN-addr>:8787 if needed
+roost pair --label "yang-iphone"          # if the CP isn't the default, prefix the
+                                          # global flag: roost --url http://<LAN-addr>:8787 pair --label "yang-iphone"
 ```
 
 Scan the printed QR with the system camera (the `roost://` link opens the app), or
