@@ -6,15 +6,16 @@ import SwiftUI
 // dot/badge — never to fill the UI (DESIGN.md §7).
 
 enum Format {
+    /// Past-tense relative label for instants known to be in the past (last-seen,
+    /// finished-at, updated-at). Single-sourced through RoostKit's `RelativeTime`
+    /// (R82) so the bucket logic lives in one Linux-tested place. The epoch is
+    /// clamped to now so a small clock skew still reads "0s ago" — these sites
+    /// never want the "in …" future phrasing. Future-time sites (e.g. Transfers
+    /// blob expiry) call `RelativeTime.signed` directly instead.
     static func timeAgo(_ epoch: Double?) -> String {
         guard let epoch, epoch > 0 else { return "—" }
-        let seconds = max(0, Date().timeIntervalSince1970 - epoch)
-        switch seconds {
-        case ..<60: return "\(Int(seconds))s ago"
-        case ..<3600: return "\(Int(seconds / 60))m ago"
-        case ..<86_400: return "\(Int(seconds / 3600))h ago"
-        default: return "\(Int(seconds / 86_400))d ago"
-        }
+        let now = Date().timeIntervalSince1970
+        return RelativeTime.ago(min(epoch, now), now: now)
     }
 
     static func duration(_ seconds: Double?) -> String {

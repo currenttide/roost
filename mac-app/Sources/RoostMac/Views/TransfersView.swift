@@ -197,7 +197,7 @@ struct TransfersPane: View {
                         .foregroundStyle(.secondary)
                     VStack(alignment: .leading, spacing: 1) {
                         Text(blob.name).font(.callout)
-                        Text("\(ByteCountFormatter.string(fromByteCount: Int64(blob.size), countStyle: .file)) · expires \(Format.timeAgo(blob.expiresAt).replacingOccurrences(of: " ago", with: " from now"))")
+                        Text("\(ByteCountFormatter.string(fromByteCount: Int64(blob.size), countStyle: .file)) · expires \(RelativeTime.signed(blob.expiresAt))")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
