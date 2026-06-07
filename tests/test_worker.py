@@ -1106,3 +1106,58 @@ def test_bug4_other_oserror_does_not_escape_run_job():
         )
 
     asyncio.run(go())
+
+
+def test_bug1_running_and_active_not_leaked_on_cancellation():
+    """[R25] When run_job is cancelled via task.cancel() while the subprocess is
+    running, _running must be decremented and _active must be cleared.
+    Before the fix a CancelledError propagated out leaving both counters wrong."""
+    from unittest.mock import patch
+    import roost.worker as wmod
+
+    # A fake process whose streams immediately signal EOF (so relay tasks finish
+    # quickly), but whose wait() hangs — the target await for task.cancel().
+    class _HangingProcess:
+        returncode = None
+        def __init__(self):
+            self.stdout = _EOFStream()
+            self.stderr = _EOFStream()
+        async def wait(self):
+            await asyncio.sleep(9999)  # hangs until outer task is cancelled
+            return 0
+
+    class _EOFStream:
+        """Returns EOF immediately so relay tasks exit without blocking gather."""
+        async def readline(self):
+            return b""
+
+    async def _fake_create(*a, **k):
+        return _HangingProcess()
+
+    async def go():
+        w, events, _logs = _mk_runjob_worker({})
+        task = asyncio.create_task(
+            _run_job_with_patches(w, "j-r25", _fake_create, wmod)
+        )
+        # Let the coroutine start and reach process.wait() (relay tasks finish fast
+        # because EOF streams, so gather in finally completes immediately on cancel).
+        await asyncio.sleep(0.05)
+        # Cancel the task to simulate worker shutdown / _spawn_job task.cancel()
+        task.cancel()
+        try:
+            await asyncio.wait_for(task, timeout=5.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
+        assert w._running == 0, (
+            f"_running leaked after cancellation: {w._running}")
+        assert "j-r25" not in w._active, (
+            f"_active leaked after cancellation: {w._active}")
+
+    async def _run_job_with_patches(w, job_id, fake_create, wmod):
+        with patch("asyncio.create_subprocess_exec", side_effect=fake_create), \
+             patch.object(wmod, "build_command",
+                          side_effect=lambda spec, jid, **kw: (
+                              ["/bin/true"], "/tmp", [])):
+            await w.run_job({"id": job_id, "spec": {"intent": "hang forever", "verify": False}})
+
+    asyncio.run(go())

@@ -1665,331 +1665,335 @@ class Worker:
 
         await self._post_event(job_id, {"type": "started", "attempt": attempt})
         self._running += 1
-        # [C4/H2] Wallclock origin for bounding the verify/self-heal loop's total cost.
-        job_started = time.monotonic()
-
-        can_dispatch = bool((spec.get("hierarchy") or {}).get("can_dispatch", False))
-
-        # Bare-worker (kind: auto): fetch the triage system prompt (rendered for us
-        # against the live fleet) from the control plane, with a local fallback.
-        triage_prompt: Optional[str] = None
-        decline_marker = triage.DECLINE_MARKER
-        if is_auto:
-            triage_prompt, decline_marker = await self._fetch_triage_prompt()
-
+        # [R25] Wrap the entire body so _running and _active are ALWAYS unwound,
+        # including when the task is cancelled via task.cancel() (CancelledError).
+        # The finally block is the single cleanup point; all early-exit return paths
+        # inside the try body do NOT touch _running/_active — the finally handles it.
         try:
-            argv, cwd, tempfiles = build_command(
-                spec, job_id,
-                default_cwd=self.default_cwd,
-                worker_policy=self.policy,
-                base_url=self.base_url,
-                token=self.token,
-                can_dispatch=can_dispatch,
-                triage_prompt=triage_prompt,
-            )
-        except (ValueError, FileNotFoundError) as e:
-            await self._send_log(job_id, "stderr", f"failed to build command: {e}")
-            await self._post_event(
-                job_id,
-                {"type": "failed", "attempt": attempt, "error": str(e), "exit_code": None},
-            )
-            self._running = max(0, self._running - 1)
-            return
+            # [C4/H2] Wallclock origin for bounding the verify/self-heal loop's total cost.
+            job_started = time.monotonic()
 
-        await self._send_log(
-            job_id, "event",
-            json.dumps({"argv": argv, "cwd": cwd, "attempt": attempt}),
-        )
+            can_dispatch = bool((spec.get("hierarchy") or {}).get("can_dispatch", False))
 
-        env = os.environ.copy()
-        # [M4] Layer the job-supplied env on top of the operator's real environment,
-        # but strip keys that could redirect/exfiltrate the Claude OAuth token or
-        # inject code (ANTHROPIC_*/CLAUDE_CODE_*/*_PROXY/NODE_OPTIONS/LD_*).
-        job_env, dropped_env = _sanitize_env(spec.get("env"), self.policy)
-        env.update(job_env)
-        if dropped_env:
-            await self._send_log(
-                job_id, "event",
-                f"dropped unsafe job env keys: {', '.join(sorted(dropped_env))}",
-            )
-        if spec.get("subagent_model"):
-            env["CLAUDE_CODE_SUBAGENT_MODEL"] = spec["subagent_model"]
+            # Bare-worker (kind: auto): fetch the triage system prompt (rendered for us
+            # against the live fleet) from the control plane, with a local fallback.
+            triage_prompt: Optional[str] = None
+            decline_marker = triage.DECLINE_MARKER
+            if is_auto:
+                triage_prompt, decline_marker = await self._fetch_triage_prompt()
 
-        budget = spec.get("budget") or {}
-        # [R2] No explicit budget → per-kind default cap (policy-overridable), so an
-        # unbudgeted job can't hold a capacity slot forever.
-        timeout_s, timeout_source = _resolve_timeout(spec, self.policy)
-        if timeout_source == "default":
-            await self._send_log(
-                job_id, "event",
-                f"no wallclock budget set; applying default cap {timeout_s:.0f}s "
-                f"for kind={spec.get('kind') or 'claude'} "
-                "(set budget.max_wallclock_min to override)",
-            )
-
-        try:
-            process = await asyncio.create_subprocess_exec(
-                *argv, cwd=cwd, env=env,
-                stdin=asyncio.subprocess.DEVNULL,  # headless: `claude -p` hangs on an open stdin with no TTY
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=True,  # own process group, so cancel/timeout can kill the whole job tree
-            )
-        except OSError as e:
-            await self._send_log(job_id, "stderr", f"spawn failed: {e}")
-            await self._post_event(
-                job_id,
-                {"type": "failed", "attempt": attempt, "error": str(e), "exit_code": None},
-            )
-            for p in tempfiles:
-                p.unlink(missing_ok=True)
-            self._running = max(0, self._running - 1)
-            return
-
-        is_docker = (spec.get("kind") or "").lower() == "docker"
-        self._active[job_id] = {"process": process, "is_docker": is_docker,
-                                "cancelled": None, "since": time.monotonic()}
-
-        tokens_used = 0
-        declined = False
-        decline_reason: Optional[str] = None
-        result_text: Optional[str] = None
-        # Bounded tails of each stream, kept only so a FAILED job can be diagnosed
-        # (steward). Capped lines so a chatty job can't grow worker memory.
-        tails: dict[str, deque] = {"stdout": deque(maxlen=40), "stderr": deque(maxlen=40)}
-
-        async def relay(stream: asyncio.StreamReader, kind: str) -> None:
-            nonlocal tokens_used, declined, decline_reason, result_text
-            assert stream is not None
-            while True:
-                try:
-                    line = await stream.readline()
-                except ValueError:
-                    # A single output line overran the 64 KiB stream buffer
-                    # (which matches the server's per-append cap). Pre-R11 this
-                    # exception KILLED the relay task, silently losing all
-                    # subsequent output. Drop the line with a loud marker and
-                    # keep relaying; the line's remainder drains as fragments.
-                    await self._send_log(
-                        job_id, "event",
-                        "oversized output line dropped (> 64 KiB stream limit)")
-                    continue
-                if not line:
-                    return
-                text = line.decode("utf-8", errors="replace").rstrip("\n")
-                tails[kind].append(text)
-                # Bare-worker accept/decline protocol: the triage agent emits the
-                # decline marker in its output to route the task to a better node.
-                if is_auto and not declined and decline_marker in text:
-                    declined = True
-                    after = text.split(decline_marker, 1)[1].strip()
-                    decline_reason = (after.split('"')[0].split("\\n")[0].strip()
-                                      or "declined")[:200]
-                # Parse stream-json for token usage if applicable.
-                if kind == "stdout" and text.startswith("{"):
-                    try:
-                        obj = json.loads(text)
-                        if obj.get("type") == "result" and obj.get("result") is not None:
-                            result_text = str(obj.get("result"))
-                        usage = (obj.get("message") or {}).get("usage") or obj.get("usage")
-                        delta = 0
-                        if isinstance(usage, dict):
-                            delta = int(usage.get("input_tokens") or 0) + int(
-                                usage.get("output_tokens") or 0
-                            )
-                            if delta:
-                                tokens_used += delta
-                        # Liveness: report token checkpoints AND structured
-                        # activity so observers see "what it's doing now", not
-                        # just raw JSON. Emit when either signal is present.
-                        activity = activity_from_stream_json(obj)
-                        if delta or activity:
-                            await self._post_event(
-                                job_id,
-                                {"type": "progress", "attempt": attempt,
-                                 "tokens_used": tokens_used, "activity": activity},
-                            )
-                    except (json.JSONDecodeError, TypeError):
-                        pass
-                await self._send_log(job_id, kind, text)
-                print(f"[{job_id} {kind}] {text}", flush=True)
-
-        stdout_task = asyncio.create_task(relay(process.stdout, "stdout"))
-        stderr_task = asyncio.create_task(relay(process.stderr, "stderr"))
-
-        timed_out = False
-        try:
-            if timeout_s:
-                await asyncio.wait_for(process.wait(), timeout=timeout_s)
-            else:
-                await process.wait()
-        except asyncio.TimeoutError:
-            timed_out = True
-            # [R2] Say which cap fired: an explicit budget vs the default cap (the
-            # latter tells the operator how to opt for a longer run).
-            if timeout_source == "default":
-                msg = (f"default runtime cap exceeded ({timeout_s:.0f}s, no budget "
-                       "set); killing — set budget.max_wallclock_min to run longer")
-            else:
-                msg = f"wallclock budget exceeded ({timeout_s:.0f}s); killing"
-            await self._send_log(job_id, "event", msg)
-            # Reuse the shared teardown (kills process + docker container).
-            await self._kill_active_job(job_id, "timeout")
             try:
-                await process.wait()
-            except Exception:  # noqa: BLE001
-                pass
-        finally:
-            await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
-            for p in tempfiles:
-                p.unlink(missing_ok=True)
+                argv, cwd, tempfiles = build_command(
+                    spec, job_id,
+                    default_cwd=self.default_cwd,
+                    worker_policy=self.policy,
+                    base_url=self.base_url,
+                    token=self.token,
+                    can_dispatch=can_dispatch,
+                    triage_prompt=triage_prompt,
+                )
+            except (ValueError, FileNotFoundError) as e:
+                await self._send_log(job_id, "stderr", f"failed to build command: {e}")
+                await self._post_event(
+                    job_id,
+                    {"type": "failed", "attempt": attempt, "error": str(e), "exit_code": None},
+                )
+                return
 
-        # Was this job killed by a server-side cancel (vs. finishing on its own)?
-        # NOTE: do NOT pop _active yet — keep the entry alive through the verify/
-        # self-heal phase so a server cancel still routes to _kill_active_job (which
-        # tears down the in-flight aux verifier/fix subprocess too). Popped below.
-        def _teardown_reason() -> Optional[str]:
-            """[R3] 'cancelled' (server cancel) or 'lease_lost' (lease
-            reconciliation after a CP outage / re-lease): either way this attempt
-            is torn down — report no terminal event, the server has moved on.
-            'timeout' is NOT a teardown; the timed_out branch reports it."""
-            r = (self._active.get(job_id) or {}).get("cancelled")
-            return r if r in ("cancelled", "lease_lost") else None
+            await self._send_log(
+                job_id, "event",
+                json.dumps({"argv": argv, "cwd": cwd, "attempt": attempt}),
+            )
 
-        def _is_cancelled() -> bool:
-            return _teardown_reason() is not None
+            env = os.environ.copy()
+            # [M4] Layer the job-supplied env on top of the operator's real environment,
+            # but strip keys that could redirect/exfiltrate the Claude OAuth token or
+            # inject code (ANTHROPIC_*/CLAUDE_CODE_*/*_PROXY/NODE_OPTIONS/LD_*).
+            job_env, dropped_env = _sanitize_env(spec.get("env"), self.policy)
+            env.update(job_env)
+            if dropped_env:
+                await self._send_log(
+                    job_id, "event",
+                    f"dropped unsafe job env keys: {', '.join(sorted(dropped_env))}",
+                )
+            if spec.get("subagent_model"):
+                env["CLAUDE_CODE_SUBAGENT_MODEL"] = spec["subagent_model"]
 
-        cancelled = _is_cancelled()
+            budget = spec.get("budget") or {}
+            # [R2] No explicit budget → per-kind default cap (policy-overridable), so an
+            # unbudgeted job can't hold a capacity slot forever.
+            timeout_s, timeout_source = _resolve_timeout(spec, self.policy)
+            if timeout_source == "default":
+                await self._send_log(
+                    job_id, "event",
+                    f"no wallclock budget set; applying default cap {timeout_s:.0f}s "
+                    f"for kind={spec.get('kind') or 'claude'} "
+                    "(set budget.max_wallclock_min to override)",
+                )
 
-        exit_code = process.returncode
-        terminal: dict[str, Any] = {"attempt": attempt, "tokens_used": tokens_used}
-        if cancelled:
-            # Torn down (server cancel, or lease lost to a newer attempt): the
-            # control plane has moved on — post nothing, just unwind accounting.
-            reason = _teardown_reason()
-            self._active.pop(job_id, None)
-            self._running = max(0, self._running - 1)
-            print(f"[roost] job {job_id} torn down ({reason})", flush=True)
-            return
-        if timed_out:
-            # [R2] Distinct error tokens so a timeout is tellable from an ordinary
-            # failure — and a default-cap kill from an explicit-budget one.
-            terminal.update(
-                type="failed",
-                error=("default_runtime_cap_exceeded" if timeout_source == "default"
-                       else "wallclock_exceeded"),
-                exit_code=exit_code)
-        elif declined and exit_code == 0:
-            # Self-declined clean exit: requeue for a better-fit node.
-            # A non-zero exit means the triage subprocess itself crashed — that is a
-            # failure, not a decision; fall through to the else branch below.
-            terminal.update(type="declined", reason=decline_reason or "declined")
-        elif exit_code == 0:
-            # Trust loop: for agentic jobs that opt in, an INDEPENDENT verifier checks
-            # the goal was actually achieved before we call it succeeded.
-            goal = spec.get("task") or spec.get("intent")
-            if _wants_verify(spec, is_auto) and goal:
-                # [C4/H2] Bound the verify/self-heal phase to the job's remaining
-                # budget (wallclock + tokens). Each _oneshot_agent is also capped per
-                # call, and we post a `progress` event BEFORE every subprocess so the
-                # 60s lease is renewed between phases (long verify/heal must not let
-                # the lease lapse → double-execution).
-                budget_exhausted_note: Optional[str] = None
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    *argv, cwd=cwd, env=env,
+                    stdin=asyncio.subprocess.DEVNULL,  # headless: `claude -p` hangs on an open stdin with no TTY
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    start_new_session=True,  # own process group, so cancel/timeout can kill the whole job tree
+                )
+            except OSError as e:
+                await self._send_log(job_id, "stderr", f"spawn failed: {e}")
+                await self._post_event(
+                    job_id,
+                    {"type": "failed", "attempt": attempt, "error": str(e), "exit_code": None},
+                )
+                for p in tempfiles:
+                    p.unlink(missing_ok=True)
+                return
 
-                async def _phase_progress(activity: str) -> Optional[float]:
-                    """Renew the lease (progress event) and return the per-subprocess
-                    wallclock cap, or None if the budget is exhausted."""
-                    nonlocal budget_exhausted_note
-                    rem, exhausted = _budget_remaining(
-                        budget, time.monotonic() - job_started, tokens_used)
-                    if exhausted:
-                        budget_exhausted_note = (
-                            "budget exhausted; accepting current result without further "
-                            "verify/self-heal")
-                        return None
-                    await self._post_event(job_id, {"type": "progress", "attempt": attempt,
-                                                    "tokens_used": tokens_used,
-                                                    "activity": activity})
-                    return rem
+            is_docker = (spec.get("kind") or "").lower() == "docker"
+            self._active[job_id] = {"process": process, "is_docker": is_docker,
+                                    "cancelled": None, "since": time.monotonic()}
 
-                cap = await _phase_progress("🔎 verifying result")
-                if cap is None:
-                    # No budget even to verify: accept the raw result, mark unverified.
-                    passed, evidence = None, "verification skipped (budget exhausted)"
-                    heals = 0
+            tokens_used = 0
+            declined = False
+            decline_reason: Optional[str] = None
+            result_text: Optional[str] = None
+            # Bounded tails of each stream, kept only so a FAILED job can be diagnosed
+            # (steward). Capped lines so a chatty job can't grow worker memory.
+            tails: dict[str, deque] = {"stdout": deque(maxlen=40), "stderr": deque(maxlen=40)}
+
+            async def relay(stream: asyncio.StreamReader, kind: str) -> None:
+                nonlocal tokens_used, declined, decline_reason, result_text
+                assert stream is not None
+                while True:
+                    try:
+                        line = await stream.readline()
+                    except ValueError:
+                        # A single output line overran the 64 KiB stream buffer
+                        # (which matches the server's per-append cap). Pre-R11 this
+                        # exception KILLED the relay task, silently losing all
+                        # subsequent output. Drop the line with a loud marker and
+                        # keep relaying; the line's remainder drains as fragments.
+                        await self._send_log(
+                            job_id, "event",
+                            "oversized output line dropped (> 64 KiB stream limit)")
+                        continue
+                    if not line:
+                        return
+                    text = line.decode("utf-8", errors="replace").rstrip("\n")
+                    tails[kind].append(text)
+                    # Bare-worker accept/decline protocol: the triage agent emits the
+                    # decline marker in its output to route the task to a better node.
+                    if is_auto and not declined and decline_marker in text:
+                        declined = True
+                        after = text.split(decline_marker, 1)[1].strip()
+                        decline_reason = (after.split('"')[0].split("\\n")[0].strip()
+                                          or "declined")[:200]
+                    # Parse stream-json for token usage if applicable.
+                    if kind == "stdout" and text.startswith("{"):
+                        try:
+                            obj = json.loads(text)
+                            if obj.get("type") == "result" and obj.get("result") is not None:
+                                result_text = str(obj.get("result"))
+                            usage = (obj.get("message") or {}).get("usage") or obj.get("usage")
+                            delta = 0
+                            if isinstance(usage, dict):
+                                delta = int(usage.get("input_tokens") or 0) + int(
+                                    usage.get("output_tokens") or 0
+                                )
+                                if delta:
+                                    tokens_used += delta
+                            # Liveness: report token checkpoints AND structured
+                            # activity so observers see "what it's doing now", not
+                            # just raw JSON. Emit when either signal is present.
+                            activity = activity_from_stream_json(obj)
+                            if delta or activity:
+                                await self._post_event(
+                                    job_id,
+                                    {"type": "progress", "attempt": attempt,
+                                     "tokens_used": tokens_used, "activity": activity},
+                                )
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+                    await self._send_log(job_id, kind, text)
+                    print(f"[{job_id} {kind}] {text}", flush=True)
+
+            stdout_task = asyncio.create_task(relay(process.stdout, "stdout"))
+            stderr_task = asyncio.create_task(relay(process.stderr, "stderr"))
+
+            timed_out = False
+            try:
+                if timeout_s:
+                    await asyncio.wait_for(process.wait(), timeout=timeout_s)
                 else:
-                    passed, evidence, vtok = await self._run_verifier(
-                        job_id, goal, result_text, timeout_s=cap)
-                    tokens_used += vtok
-                    # Self-healing (ease-of-use-plan Phase 3): if the verifier positively
-                    # rejected the result, fix-and-re-verify on this same node, bounded.
-                    heals = 0
-                    while passed is False and heals < MAX_FIX_ATTEMPTS and not _is_cancelled():
-                        heals += 1
-                        cap = await _phase_progress(f"🔧 self-healing (attempt {heals})")
-                        if cap is None:
-                            break
-                        await self._send_log(job_id, "event",
-                                             f"verification failed; self-healing attempt {heals}: {evidence[:120]}")
-                        fixed, _full, ftok = await self._oneshot_agent(
-                            job_id, verify_mod.render_fix(goal, evidence, result_text),
-                            label=f"fix{heals}", timeout_s=cap)
-                        tokens_used += ftok
-                        if fixed:
-                            result_text = fixed
-                        cap = await _phase_progress("🔎 re-verifying result")
-                        if cap is None:
-                            break
+                    await process.wait()
+            except asyncio.TimeoutError:
+                timed_out = True
+                # [R2] Say which cap fired: an explicit budget vs the default cap (the
+                # latter tells the operator how to opt for a longer run).
+                if timeout_source == "default":
+                    msg = (f"default runtime cap exceeded ({timeout_s:.0f}s, no budget "
+                           "set); killing — set budget.max_wallclock_min to run longer")
+                else:
+                    msg = f"wallclock budget exceeded ({timeout_s:.0f}s); killing"
+                await self._send_log(job_id, "event", msg)
+                # Reuse the shared teardown (kills process + docker container).
+                await self._kill_active_job(job_id, "timeout")
+                try:
+                    await process.wait()
+                except Exception:  # noqa: BLE001
+                    pass
+            finally:
+                await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+                for p in tempfiles:
+                    p.unlink(missing_ok=True)
+
+            # Was this job killed by a server-side cancel (vs. finishing on its own)?
+            # NOTE: do NOT pop _active yet — keep the entry alive through the verify/
+            # self-heal phase so a server cancel still routes to _kill_active_job (which
+            # tears down the in-flight aux verifier/fix subprocess too). Popped below.
+            def _teardown_reason() -> Optional[str]:
+                """[R3] 'cancelled' (server cancel) or 'lease_lost' (lease
+                reconciliation after a CP outage / re-lease): either way this attempt
+                is torn down — report no terminal event, the server has moved on.
+                'timeout' is NOT a teardown; the timed_out branch reports it."""
+                r = (self._active.get(job_id) or {}).get("cancelled")
+                return r if r in ("cancelled", "lease_lost") else None
+
+            def _is_cancelled() -> bool:
+                return _teardown_reason() is not None
+
+            cancelled = _is_cancelled()
+
+            exit_code = process.returncode
+            terminal: dict[str, Any] = {"attempt": attempt, "tokens_used": tokens_used}
+            if cancelled:
+                # Torn down (server cancel, or lease lost to a newer attempt): the
+                # control plane has moved on — post nothing, just unwind accounting.
+                reason = _teardown_reason()
+                print(f"[roost] job {job_id} torn down ({reason})", flush=True)
+                return
+            if timed_out:
+                # [R2] Distinct error tokens so a timeout is tellable from an ordinary
+                # failure — and a default-cap kill from an explicit-budget one.
+                terminal.update(
+                    type="failed",
+                    error=("default_runtime_cap_exceeded" if timeout_source == "default"
+                           else "wallclock_exceeded"),
+                    exit_code=exit_code)
+            elif declined and exit_code == 0:
+                # Self-declined clean exit: requeue for a better-fit node.
+                # A non-zero exit means the triage subprocess itself crashed — that is a
+                # failure, not a decision; fall through to the else branch below.
+                terminal.update(type="declined", reason=decline_reason or "declined")
+            elif exit_code == 0:
+                # Trust loop: for agentic jobs that opt in, an INDEPENDENT verifier checks
+                # the goal was actually achieved before we call it succeeded.
+                goal = spec.get("task") or spec.get("intent")
+                if _wants_verify(spec, is_auto) and goal:
+                    # [C4/H2] Bound the verify/self-heal phase to the job's remaining
+                    # budget (wallclock + tokens). Each _oneshot_agent is also capped per
+                    # call, and we post a `progress` event BEFORE every subprocess so the
+                    # 60s lease is renewed between phases (long verify/heal must not let
+                    # the lease lapse → double-execution).
+                    budget_exhausted_note: Optional[str] = None
+
+                    async def _phase_progress(activity: str) -> Optional[float]:
+                        """Renew the lease (progress event) and return the per-subprocess
+                        wallclock cap, or None if the budget is exhausted."""
+                        nonlocal budget_exhausted_note
+                        rem, exhausted = _budget_remaining(
+                            budget, time.monotonic() - job_started, tokens_used)
+                        if exhausted:
+                            budget_exhausted_note = (
+                                "budget exhausted; accepting current result without further "
+                                "verify/self-heal")
+                            return None
+                        await self._post_event(job_id, {"type": "progress", "attempt": attempt,
+                                                        "tokens_used": tokens_used,
+                                                        "activity": activity})
+                        return rem
+
+                    cap = await _phase_progress("🔎 verifying result")
+                    if cap is None:
+                        # No budget even to verify: accept the raw result, mark unverified.
+                        passed, evidence = None, "verification skipped (budget exhausted)"
+                        heals = 0
+                    else:
                         passed, evidence, vtok = await self._run_verifier(
                             job_id, goal, result_text, timeout_s=cap)
                         tokens_used += vtok
-                if _is_cancelled():
-                    reason = _teardown_reason()
-                    self._active.pop(job_id, None)
-                    self._running = max(0, self._running - 1)
-                    print(f"[roost] job {job_id} torn down ({reason} during verify)", flush=True)
-                    return
-                terminal["tokens_used"] = tokens_used
-                if budget_exhausted_note:
-                    evidence = f"{evidence} [{budget_exhausted_note}]"
-                bundle = {"output": result_text, "verified": passed is True,
-                          "evidence": evidence, "self_heal_attempts": heals}
-                if passed is False:
-                    terminal.update(
-                        type="failed", exit_code=0, result=bundle,
-                        error=f"verification failed after {heals} self-heal attempt(s): {evidence}"[:300])
-                elif passed is None:
-                    # [M3] Inconclusive — verifier gave no usable verdict (crash/timeout/
-                    # budget). Complete the job, but do NOT claim a confident success:
-                    # verified=null with explicit evidence so the operator can tell.
-                    bundle["verified"] = None
-                    terminal.update(type="succeeded", exit_code=0, result=bundle,
-                                    verified=None)
+                        # Self-healing (ease-of-use-plan Phase 3): if the verifier positively
+                        # rejected the result, fix-and-re-verify on this same node, bounded.
+                        heals = 0
+                        while passed is False and heals < MAX_FIX_ATTEMPTS and not _is_cancelled():
+                            heals += 1
+                            cap = await _phase_progress(f"🔧 self-healing (attempt {heals})")
+                            if cap is None:
+                                break
+                            await self._send_log(job_id, "event",
+                                                 f"verification failed; self-healing attempt {heals}: {evidence[:120]}")
+                            fixed, _full, ftok = await self._oneshot_agent(
+                                job_id, verify_mod.render_fix(goal, evidence, result_text),
+                                label=f"fix{heals}", timeout_s=cap)
+                            tokens_used += ftok
+                            if fixed:
+                                result_text = fixed
+                            cap = await _phase_progress("🔎 re-verifying result")
+                            if cap is None:
+                                break
+                            passed, evidence, vtok = await self._run_verifier(
+                                job_id, goal, result_text, timeout_s=cap)
+                            tokens_used += vtok
+                    if _is_cancelled():
+                        reason = _teardown_reason()
+                        print(f"[roost] job {job_id} torn down ({reason} during verify)", flush=True)
+                        return
+                    terminal["tokens_used"] = tokens_used
+                    if budget_exhausted_note:
+                        evidence = f"{evidence} [{budget_exhausted_note}]"
+                    bundle = {"output": result_text, "verified": passed is True,
+                              "evidence": evidence, "self_heal_attempts": heals}
+                    if passed is False:
+                        terminal.update(
+                            type="failed", exit_code=0, result=bundle,
+                            error=f"verification failed after {heals} self-heal attempt(s): {evidence}"[:300])
+                    elif passed is None:
+                        # [M3] Inconclusive — verifier gave no usable verdict (crash/timeout/
+                        # budget). Complete the job, but do NOT claim a confident success:
+                        # verified=null with explicit evidence so the operator can tell.
+                        bundle["verified"] = None
+                        terminal.update(type="succeeded", exit_code=0, result=bundle,
+                                        verified=None)
+                    else:
+                        terminal.update(type="succeeded", exit_code=0, result=bundle)
                 else:
-                    terminal.update(type="succeeded", exit_code=0, result=bundle)
+                    terminal.update(type="succeeded", exit_code=0,
+                                    result={"output": result_text} if result_text else None)
             else:
-                terminal.update(type="succeeded", exit_code=0,
-                                result={"output": result_text} if result_text else None)
-        else:
-            terminal.update(type="failed", error=f"exit_code={exit_code}", exit_code=exit_code)
-        # On a FAILED terminal event, attach a steward-authored root-cause `diagnosis`
-        # (agentic haiku, with a deterministic mechanical fallback). Never touches the
-        # success/decline paths, so it can't slow a healthy job down.
-        if terminal.get("type") == "failed":
-            terminal["diagnosis"] = await self._diagnose_failure(
-                spec, exit_code=terminal.get("exit_code"),
-                stdout_tail="\n".join(tails["stdout"]),
-                stderr_tail="\n".join(tails["stderr"]),
-                error=terminal.get("error"),
+                terminal.update(type="failed", error=f"exit_code={exit_code}", exit_code=exit_code)
+            # On a FAILED terminal event, attach a steward-authored root-cause `diagnosis`
+            # (agentic haiku, with a deterministic mechanical fallback). Never touches the
+            # success/decline paths, so it can't slow a healthy job down.
+            if terminal.get("type") == "failed":
+                terminal["diagnosis"] = await self._diagnose_failure(
+                    spec, exit_code=terminal.get("exit_code"),
+                    stdout_tail="\n".join(tails["stdout"]),
+                    stderr_tail="\n".join(tails["stderr"]),
+                    error=terminal.get("error"),
+                )
+            self._active.pop(job_id, None)
+            await self._post_event(job_id, terminal)
+            print(
+                f"[roost] job {job_id} finished exit={exit_code} timed_out={timed_out} "
+                f"tokens_used={tokens_used}",
+                flush=True,
             )
-        self._active.pop(job_id, None)
-        await self._post_event(job_id, terminal)
-        self._running = max(0, self._running - 1)
-        print(
-            f"[roost] job {job_id} finished exit={exit_code} timed_out={timed_out} "
-            f"tokens_used={tokens_used}",
-            flush=True,
-        )
+        finally:
+            # [R25] Single cleanup point: decrement _running and evict from _active on
+            # EVERY exit — normal completion, early return, and CancelledError alike.
+            # _active.pop is idempotent (no-op if already popped by the normal path above).
+            self._active.pop(job_id, None)
+            self._running = max(0, self._running - 1)
 
     async def _fetch_triage_prompt(self) -> tuple[str, str]:
         """Pull the bare-worker triage system prompt from the control plane (rendered
