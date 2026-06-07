@@ -8,6 +8,7 @@ relies on.
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
@@ -1365,3 +1366,96 @@ def test_install_script_pins_python_and_real_source(client: TestClient):
     assert "git+https://github.com" in body
     # Opt-in claude install flag is documented/handled.
     assert "--with-claude" in body
+
+
+# ---------- write-time log bounds (R11) ----------
+
+
+def _running_job(client: TestClient) -> tuple[str, str, dict, int]:
+    """Submit + lease + start a job; returns (worker_id, job_id, wh, attempt)."""
+    worker_id, cred = _enroll_worker(client, {"tools": ["python3"]})
+    wh = {"Authorization": f"Bearer {cred}"}
+    r = client.post("/jobs", json={"command": "echo hi",
+                                   "requires": {"tools": ["python3"]}})
+    job_id = r.json()["id"]
+    a = client.get(f"/workers/{worker_id}/poll", params={"timeout": 0},
+                   headers=wh).json()
+    client.post(f"/workers/{worker_id}/jobs/{job_id}/event",
+                json={"type": "started", "attempt": a["attempt"]}, headers=wh)
+    return worker_id, job_id, wh, a["attempt"]
+
+
+def test_log_append_oversize_rejected_413(client: TestClient):
+    worker_id, job_id, wh, _ = _running_job(client)
+    big = "x" * (server.LOG_APPEND_MAX_BYTES + 1)
+    r = client.post(f"/workers/{worker_id}/jobs/{job_id}/logs",
+                    json={"stream": "stdout", "data": big}, headers=wh)
+    assert r.status_code == 413
+    assert "split or truncate" in r.json()["detail"]
+    # Nothing was stored.
+    assert client.get(f"/jobs/{job_id}/logs").json()["logs"][-1]["stream"] == "event"
+    # A line exactly AT the cap is fine.
+    r = client.post(f"/workers/{worker_id}/jobs/{job_id}/logs",
+                    json={"stream": "stdout",
+                          "data": "x" * server.LOG_APPEND_MAX_BYTES},
+                    headers=wh)
+    assert r.status_code == 200
+
+
+def test_log_append_size_cap_counts_bytes_not_chars(client: TestClient):
+    # Multibyte text: char count under the cap, byte count over → rejected.
+    worker_id, job_id, wh, _ = _running_job(client)
+    snowmen = "☃" * (server.LOG_APPEND_MAX_BYTES // 3 + 100)  # 3 bytes each
+    r = client.post(f"/workers/{worker_id}/jobs/{job_id}/logs",
+                    json={"stream": "stdout", "data": snowmen}, headers=wh)
+    assert r.status_code == 413
+
+
+def test_log_append_row_ceiling_429(client: TestClient, monkeypatch):
+    monkeypatch.setattr(server, "LOG_MAX_ROWS_PER_JOB", 5)
+    worker_id, job_id, wh, attempt = _running_job(client)
+    # The `started` event row is exempt from the ceiling count's effects on
+    # events but still occupies a row; fill up to the ceiling with stdout.
+    url = f"/workers/{worker_id}/jobs/{job_id}/logs"
+    codes = [client.post(url, json={"stream": "stdout", "data": f"l{i}"},
+                         headers=wh).status_code for i in range(6)]
+    # 1 event row exists; stdout appends accepted until COUNT hits 5.
+    assert codes[:4] == [200, 200, 200, 200]
+    assert codes[4:] == [429, 429]
+    r = client.post(url, json={"stream": "stdout", "data": "one more"},
+                    headers=wh)
+    assert r.status_code == 429
+    assert "row ceiling" in r.json()["detail"]
+
+    # Liveness still bumped by the rejected append (capped ≠ stuck).
+    with server._connect(client.app.state.db_path) as conn:
+        row = conn.execute("SELECT last_activity_at FROM jobs WHERE id=?",
+                           (job_id,)).fetchone()
+    assert row["last_activity_at"] == pytest.approx(time.time(), abs=5)
+
+    # Lifecycle EVENT rows still land at the ceiling (exempt stream) — the
+    # terminal state divider must not be lost to stdout spam.
+    r = client.post(f"/workers/{worker_id}/jobs/{job_id}/event",
+                    json={"type": "succeeded", "attempt": attempt,
+                          "exit_code": 0}, headers=wh)
+    assert r.status_code == 200
+    logs = client.get(f"/jobs/{job_id}/logs").json()["logs"]
+    assert logs[-1]["stream"] == "event"
+    assert "succeeded" in logs[-1]["data"]
+
+
+def test_oversize_event_slimmed_not_rejected(client: TestClient):
+    # A terminal event with a huge result must not fail the state change OR
+    # the log row — the row is slimmed to parseable {"type", "truncated"}.
+    worker_id, job_id, wh, attempt = _running_job(client)
+    huge = "y" * (server.LOG_APPEND_MAX_BYTES + 100)
+    r = client.post(f"/workers/{worker_id}/jobs/{job_id}/event",
+                    json={"type": "succeeded", "attempt": attempt,
+                          "exit_code": 0, "result": {"output": huge}},
+                    headers=wh)
+    assert r.status_code == 200
+    assert r.json()["state"] == "succeeded"
+    last = client.get(f"/jobs/{job_id}/logs").json()["logs"][-1]
+    assert last["stream"] == "event"
+    parsed = json.loads(last["data"])
+    assert parsed == {"type": "succeeded", "truncated": True}

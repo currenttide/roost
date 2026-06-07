@@ -68,6 +68,12 @@ SCHEDULE_MIN_INTERVAL_SEC = 30.0
 LOG_PRUNE_INTERVAL = 1800.0   # seconds between prune passes (~30 min)
 LOG_MAX_AGE_SEC = 24 * 3600.0  # drop log rows older than 24h
 LOG_MAX_ROWS_PER_JOB = 5000   # and cap rows per job
+# Write-time bounds (R11): the prune above runs on a ~30 min cadence, so
+# between sweeps an unbounded append path could still bloat job_logs. Enforce
+# at write time too: a per-append byte cap, and the same per-job row ceiling
+# (stdout/stderr only — low-volume lifecycle `event` rows stay visible even
+# when a job has spammed its way to the ceiling).
+LOG_APPEND_MAX_BYTES = 64 * 1024
 # Hygiene: prune worker rows that have been offline/unseen this long AND own no
 # in-flight job. Non-enrolled workers that reconnect after an outage leave orphan
 # rows that age to 'offline' but are never deleted, so /derived + the panel
@@ -1083,10 +1089,40 @@ def _try_assign_one(db_path: Path, worker_id: str) -> Optional[dict]:
             raise
 
 
+class LogLimitExceeded(Exception):
+    """An append was rejected by a write-time bound; carries the HTTP status."""
+
+    def __init__(self, status: int, detail: str) -> None:
+        super().__init__(detail)
+        self.status = status
+        self.detail = detail
+
+
 def _append_log(db_path: Path, job_id: str, stream: str, data: str) -> int:
+    if len(data.encode("utf-8", "replace")) > LOG_APPEND_MAX_BYTES:
+        raise LogLimitExceeded(
+            413, f"log append exceeds {LOG_APPEND_MAX_BYTES} bytes; "
+                 "split or truncate the line client-side")
     with _connect(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         try:
+            # Row ceiling at write time (event rows exempt — see constant note).
+            if stream != "event":
+                cnt = conn.execute(
+                    "SELECT COUNT(*) AS c FROM job_logs WHERE job_id=?",
+                    (job_id,),
+                ).fetchone()["c"]
+                if cnt >= LOG_MAX_ROWS_PER_JOB:
+                    # The append IS still a sign of life — bump liveness so a
+                    # chatty job at the ceiling doesn't read as 'stuck?'.
+                    conn.execute(
+                        "UPDATE jobs SET last_activity_at=? WHERE id=?",
+                        (time.time(), job_id),
+                    )
+                    conn.execute("COMMIT")
+                    raise LogLimitExceeded(
+                        429, f"job log row ceiling ({LOG_MAX_ROWS_PER_JOB}) "
+                             "reached; older rows free up on the retention sweep")
             row = conn.execute(
                 "SELECT COALESCE(MAX(seq), 0) AS s FROM job_logs WHERE job_id=?",
                 (job_id,),
@@ -2598,7 +2634,12 @@ def create_app(
         data = payload.get("data", "")
         if not isinstance(data, str):
             data = json.dumps(data)
-        seq = await asyncio.to_thread(_append_log, db, job_id, stream, data)
+        try:
+            seq = await asyncio.to_thread(_append_log, db, job_id, stream, data)
+        except LogLimitExceeded as e:
+            # The POST is still proof of life for the worker.
+            await asyncio.to_thread(_heartbeat_worker, db, worker_id, None)
+            raise HTTPException(e.status, e.detail)
         await asyncio.to_thread(_heartbeat_worker, db, worker_id, None)
         return {"seq": seq}
 
@@ -2617,13 +2658,14 @@ def create_app(
             raise HTTPException(403, str(e))
         if not accepted:
             raise HTTPException(409, "stale attempt; event ignored")
-        await asyncio.to_thread(
-            _append_log,
-            db,
-            job_id,
-            "event",
-            json.dumps(event.model_dump(exclude_none=False)),
-        )
+        # The event already mutated job state above; its log row is a display
+        # divider. An oversize payload (huge result) is slimmed, never rejected
+        # — failing here would tell the worker a state change it made didn't
+        # happen. Kept as parseable JSON so log renderers still get a `type`.
+        data = json.dumps(event.model_dump(exclude_none=False))
+        if len(data.encode("utf-8", "replace")) > LOG_APPEND_MAX_BYTES:
+            data = json.dumps({"type": event.type, "truncated": True})
+        await asyncio.to_thread(_append_log, db, job_id, "event", data)
         return job
 
     return app
