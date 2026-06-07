@@ -1998,10 +1998,22 @@ def test_backup_consistent_under_concurrent_writes(tmp_path: Path):
             )
 
 
-def test_backup_leaves_no_temp_file_behind(client: TestClient, tmp_path: Path):
+def test_backup_leaves_no_temp_file_behind(
+    client: TestClient, tmp_path: Path, monkeypatch
+):
     """[R39] The server-side temp snapshot is cleaned up after the response is
-    streamed — repeated backups must not accumulate files in the temp dir."""
+    streamed — repeated backups must not accumulate files in the temp dir.
+
+    [R45] The observation is scoped to a test-private temp dir (``tempfile.tempdir``
+    monkeypatched to ``tmp_path``): ``_backup_db`` writes there via ``mkstemp`` and
+    we glob the same dir, so this assertion never races a sibling backup test (or a
+    concurrent pytest run) writing ``roost-backup-*.db`` into the *shared* system
+    temp dir. Without isolation, such a stray file would appear in ``after`` but not
+    ``before`` and falsely trip the leak check.
+    """
     import tempfile
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
 
     before = set(Path(tempfile.gettempdir()).glob("roost-backup-*.db"))
     for _ in range(3):
@@ -2011,11 +2023,20 @@ def test_backup_leaves_no_temp_file_behind(client: TestClient, tmp_path: Path):
     assert after <= before
 
 
-def test_backup_temp_file_cleaned_up_on_client_disconnect(client: TestClient):
+def test_backup_temp_file_cleaned_up_on_client_disconnect(
+    client: TestClient, tmp_path: Path, monkeypatch
+):
     """[R39] The snapshot is streamed from a generator whose `finally` deletes the
     temp file, so even a client that disconnects mid-download leaves nothing behind
-    (a leaked file would be a full copy of the fleet DB in the temp dir)."""
+    (a leaked file would be a full copy of the fleet DB in the temp dir).
+
+    [R45] Like the sibling leak test, the temp dir is monkeypatched to ``tmp_path``
+    so the observation is test-private — no assertion over the shared system temp
+    dir, hence no cross-test / cross-process race.
+    """
     import tempfile
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
 
     before = set(Path(tempfile.gettempdir()).glob("roost-backup-*.db"))
     # Open the stream but abandon it without reading the body — a client disconnect.
