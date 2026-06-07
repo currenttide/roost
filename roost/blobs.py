@@ -86,7 +86,7 @@ def insert_blob(
         "name": name or "blob",
         "size": 0,
         "sha256": None,
-        "state": state,                  # 'pending' (awaiting PUT) | 'ready'
+        "state": state,  # 'pending' (awaiting PUT) | 'uploading' | 'ready'
         "created_at": now,
         "expires_at": now + clamp_ttl(ttl_sec),
         "created_by": created_by,
@@ -119,6 +119,35 @@ def finalize_blob(
     conn.execute(
         "UPDATE blobs SET size=?, sha256=?, state='ready' WHERE id=?",
         (size, sha256, blob_id),
+    )
+
+
+def claim_pending_blob(conn: sqlite3.Connection, blob_id: str) -> bool:
+    """Atomically reserve a pending blob for one presigned PUT."""
+    cur = conn.execute(
+        "UPDATE blobs SET state='uploading' WHERE id=? AND state='pending'",
+        (blob_id,),
+    )
+    return cur.rowcount > 0
+
+
+def finalize_claimed_blob(
+    conn: sqlite3.Connection, blob_id: str, size: int, sha256: str
+) -> bool:
+    """Finalize only the uploader that owns the pending -> uploading claim."""
+    cur = conn.execute(
+        "UPDATE blobs SET size=?, sha256=?, state='ready' "
+        "WHERE id=? AND state='uploading'",
+        (size, sha256, blob_id),
+    )
+    return cur.rowcount > 0
+
+
+def release_blob_claim(conn: sqlite3.Connection, blob_id: str) -> None:
+    """Make a failed claimed upload retryable without disturbing ready blobs."""
+    conn.execute(
+        "UPDATE blobs SET state='pending' WHERE id=? AND state='uploading'",
+        (blob_id,),
     )
 
 
