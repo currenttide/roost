@@ -109,6 +109,18 @@ Done-when: unit tests with bootstrap helpers + process-spawning mocked (R10 styl
 Surface: tests. Measured: config.py 48% branch (60 stmts), triage.py 67% (30 stmts); no dedicated test file for either (pre-listed in Proposed).
 Done-when: dedicated tests asserting real behavior (config TOML read/write/perms/resolution order; triage prompt rendering); both modules' branch coverage strictly up, no other module down; pytest green.
 
+### R18. Matcher: non-numeric caps must not satisfy numeric constraints — `open` `self-promoted` *(A1 hunt #1: matcher/placement, 2026-06-07, judge-approved; failing repro test on file)*
+Surface: backend/correctness. matcher.py:~48: a numeric comparator with a non-numeric capability falls through to the string branch — `gpu_vram_gb: "N/A"` PASSES `"!=0"`. Repro: /tmp/a1-repro test_non_numeric_cap_does_not_satisfy_numeric_neq (FAILS on master).
+Done-when: non-numeric cap never satisfies a numeric-rhs constraint (all operators); string-pin fallback (hostname: ==x) preserved; repro + operator-matrix tests pass; existing matcher tests untouched; pytest green.
+
+### R19. Decline/requeue bookkeeping: grace restart + attempt budget — `open` `self-promoted` *(A1 hunt #1, 2026-06-07, judge-approved; two failing repro tests)*
+Surface: backend/robustness. Two bugs, one code region (server.py declined branch): (a) requeue keeps the old created_at, so one decline permanently arms the anti-starvation override — competitive placement/prefer abandoned; (b) declines consume the attempt counter — two declines + default max_attempts=2 means the first REAL execution dies on lease expiry with zero retries. Repro: test_decline_requeue_restarts_placement_grace + test_declines_do_not_consume_the_attempt_budget (both FAIL on master).
+Done-when: decline+requeue restarts the grace window and does not consume the attempt budget (semantics documented in code); both repro tests pass; no regression in MAX_DECLINES/declined_by/escalation tests; pytest green + live smoke (placement behavior change).
+
+### R20. prefer-by-name parity with target — `open` `self-promoted` *(A1 hunt #1, 2026-06-07, judge-approved; failing repro test — re-anchor it to the real placement_score signature when implementing)*
+Surface: backend/correctness. placement_score honors prefer.worker only as an ID; `target` resolves id OR name — prefer by name silently no-ops (+0 instead of +1000). README documents prefer with an id only, so also note the name form once supported.
+Done-when: prefer matches id or name; repro (against the real signature) + a grace-window routing test pass; README prefer line updated; pytest green.
+
 ### R14. Docs truth pass — `done` *(closed 2026-06-05)*
 Completed by the 27-agent repo-map workflow: README publish/kinds/test-count fixed, plus 5 stale docstrings/comments across server/worker/service/schema. The other two survey claims were already false — the verb matrix IS documented (docs/INTEGRATIONS.md) and `cancel --tree` IS documented (README.md:276, INTEGRATIONS.md:33). 347/347 tests green after edits.
 

@@ -564,3 +564,37 @@ Entries are written by the loop; humans read, never need to edit.
   A3 drift sweep (scope: PRs #21–#24, small), then A2 (next-worst modules:
   worker.py 55%, mcp.py 59%, schema.py 60%) and A1 (first hunt area:
   matcher/placement — never hunted).
+
+## 2026-06-07 06:15 UTC — Replenishment cycle #2 (first A1 bug hunt)
+- Verdict: shipped (slate promoted; no implementation this iteration)
+- Branch/PR: loop/replenish-2 (bookkeeping) / (PR on land)
+- What changed: Ranked refilled with 3 judge-approved Tier A items from the
+  FIRST A1 bug hunt (area: matcher/placement — rotation start), all with
+  reproducing tests that FAIL on master (/tmp/a1-repro/test_a1_findings.py,
+  4 failed): R18 matcher non-numeric-vs-numeric false positive ("N/A"
+  passes "!=0"); R19 decline/requeue bookkeeping (grace window permanently
+  bypassed after one decline + declines consume the attempt budget so real
+  executions get zero retries); R20 prefer-by-name silently ignored
+  (target resolves id|name, prefer only id).
+- Evidence (survey):
+  - A4 clean; A5 all moving (coverage 63→~68, examples 3/3, drift 0);
+    A3 trivially clean (PRs #21–#24 = bookkeeping/docs-fix/tests only).
+  - A1: two adversarial finder agents (matcher lens + placement lens),
+    every claim REPRODUCED by running code before reporting; 4 confirmed
+    bugs, 7+ hypotheses honestly cleared (capacity gating, target
+    isolation, escalation, decliner bookkeeping all verified correct).
+  - Reproducing tests: 4 failed on master in 0.56s — the qualifying bar.
+- Judge: slate approved (round 1) — re-ran the failing tests (exactly 4),
+  source-verified R18 (string-branch fallthrough) and R19 (requeue UPDATE
+  keeps created_at; attempt++ never undone; sweeper kills at
+  attempt>=max_attempts), confirmed no doc anywhere blesses the current
+  behavior, grouping of R19's two bugs legitimate (one code region), all
+  three user-reachable in normal operation. One judge note: the R20 repro
+  was written against a proposed signature (TypeError before assertion) —
+  re-anchor it to the real placement_score signature when implementing.
+- Models: surveyor claude-opus-4-8 (+2 sonnet finder agents) / judge
+  claude-sonnet-4-6 (fenced first-line model-ID block present)
+- Notes: A2 candidates (worker.py 55%, mcp.py 59%, schema.py 60%) deferred
+  — bug fixes outrank coverage; they're first in line for cycle #3.
+  Hunt rotation record: #1 matcher/placement (4 findings). Next areas:
+  blobs/publish serving, worker executors, captain/steward.
