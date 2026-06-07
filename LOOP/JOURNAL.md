@@ -598,3 +598,27 @@ Entries are written by the loop; humans read, never need to edit.
   — bug fixes outrank coverage; they're first in line for cycle #3.
   Hunt rotation record: #1 matcher/placement (4 findings). Next areas:
   blobs/publish serving, worker executors, captain/steward.
+
+## 2026-06-07 06:50 UTC — R18: Matcher — non-numeric caps vs numeric constraints
+- Verdict: shipped
+- Branch/PR: loop/r18-matcher-numeric / https://github.com/currenttide/roost/pull/26
+- What changed: _check_one — when the rhs parses as a number, a non-numeric
+  capability now fails ALL operators (was: fell through to string compare, so
+  gpu_vram_gb:"N/A" passed "!=0"); the string fallback fires only when BOTH
+  sides are non-numeric (hostname pins preserved, incl. numeric-looking cap
+  vs string rhs). Proactive same-class hardening: _as_number rejects
+  non-finite floats ("nan" passed "!=0" since nan!=0 is True; "inf" passed
+  any ">=") via math.isfinite. 5 new tests incl. the A1 repro trio, the full
+  6-operator matrix, coercion preservation, pin preservation, nan/inf.
+- Evidence:
+  - `python -m pytest -q` → 530 passed in 15.69s (was 525; +5, none removed)
+  - original A1 repro test now PASSES (failed on master pre-fix)
+- Judge: approve (round 1) — re-ran both gates + the original repro, ran 15
+  adversarial bypass probes (whitespace-masked rhs, unicode digits, hex,
+  scientific notation, +/- signs, bool/list/None caps — all correctly
+  handled), verified fleet safety (real worker probes emit gpu_vram_gb as
+  round(float,1), never strings — no legitimate placement changes) and that
+  no caller outside matcher.py depends on the old fallthrough.
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (fenced
+  first-line model-ID block present)
+- Notes: next R19 (decline/requeue bookkeeping — needs live smoke).

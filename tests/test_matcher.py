@@ -207,3 +207,42 @@ def test_service_env_quoting_and_xml_escaping(monkeypatch):
     assert 'Environment="CLAUDE_CONFIG_DIR=/home/me/My Creds & stuff"' in unit
     import xml.dom.minidom as md
     md.parseString(service._render_launchd_plist("/x/roost"))  # must be valid XML
+
+
+# ---------- [R18] non-numeric caps vs numeric constraints ----------
+
+
+def test_non_numeric_cap_does_not_satisfy_numeric_neq():
+    # A worker whose capability probe produced a sentinel string must NOT
+    # pass a numeric exclusion filter via the string-compare fallback.
+    assert matches({"gpu_vram_gb": "N/A"}, {"gpu_vram_gb": "!=0"}) is False
+    assert matches({"gpu_vram_gb": "none"}, {"gpu_vram_gb": "!=0"}) is False
+    assert matches({"gpu_vram_gb": ""}, {"gpu_vram_gb": "!=0"}) is False
+
+
+def test_non_numeric_cap_rejects_every_numeric_operator():
+    for req in (">=8", "<=8", ">8", "<8", "==8", "!=8"):
+        assert matches({"gpu_vram_gb": "unknown"}, {"gpu_vram_gb": req}) is False, req
+
+
+def test_numeric_string_cap_still_satisfies_numeric_ops():
+    # Numeric-looking strings keep coercing (pre-existing behavior).
+    assert matches({"gpu_vram_gb": "24"}, {"gpu_vram_gb": ">=24"}) is True
+    assert matches({"gpu_vram_gb": "24"}, {"gpu_vram_gb": "!=0"}) is True
+
+
+def test_string_pins_unaffected_by_the_numeric_guard():
+    # Both sides non-numeric → the documented hostname pin behavior holds.
+    assert matches({"hostname": "dgx"}, {"hostname": "==dgx"}) is True
+    assert matches({"hostname": "dgx"}, {"hostname": "!=pi0"}) is True
+    assert matches({"hostname": "pi0"}, {"hostname": "!=pi0"}) is False
+    # Numeric-looking cap against a string rhs still string-compares.
+    assert matches({"hostname": "8"}, {"hostname": "!=pi0"}) is True
+
+
+def test_non_finite_sentinels_rejected():
+    # float("nan") != 0 is True and float("inf") >= anything — a broken probe
+    # emitting "nan"/"inf" must not place via those quirks.
+    assert matches({"gpu_vram_gb": "nan"}, {"gpu_vram_gb": "!=0"}) is False
+    assert matches({"gpu_vram_gb": "inf"}, {"gpu_vram_gb": ">=24"}) is False
+    assert matches({"gpu_vram_gb": float("nan")}, {"gpu_vram_gb": "!=0"}) is False
