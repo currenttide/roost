@@ -716,6 +716,37 @@ Entries are written by the loop; humans read, never need to edit.
   02:52 UTC while the inherited preceding entry says 08:05 UTC, so append
   order is intentionally truthful rather than timestamp-sorted.
 
+## 2026-06-06 20:50 UTC — Replenishment cycle #4 (A1 worker-executor hunt + A6 product gap survey)
+- Verdict: shipped (slate promoted; implementation begins this iteration)
+- Branch/PR: carried on R24 branch
+- What changed: Ranked refilled with 3 judge-approved Tier A1 items from A1 hunt #3
+  (area: worker executors — rotation continues). Also ran first A6 product gap
+  survey (new source added to PROTOCOL.md this cycle per human direction).
+  A1 hunt initially stalled as a background agent (226 lines, no result); relaunched
+  as a foreground call, completed with 5 confirmed bugs + reproducing tests all
+  failing on master. A6 survey found 4 promotable items + 2 newly-unblocked Proposed
+  items; deferred (cap reached by A1 bugs — bugs outrank product gaps).
+  PROTOCOL.md updated to add A6 source and revise Tier B boundary.
+- Evidence (A1 survey):
+  - `python -m pytest -q tests/test_judge_r4_bugs.py` → 3 failed in 30.73s (exactly
+    the three promoted bugs: Bug5, Bug1, Bug4 — all FAIL on master as claimed)
+  - `python -m pytest -q` → 537 passed in 15.65s (baseline clean)
+- Evidence (A6 survey):
+  - roost/mcp.py:129 — `roost_submit` enum confirmed `["claude","codex","docker"]`, `"auto"` absent
+  - docs/INTEGRATIONS.md — tool table confirmed 9 of 16 tools; 6 absent by name
+  - roost/cli.py:1916, :1029 — `history` and `prune-workers` confirmed absent from README
+- Judge: A1 slate approved (round 1, claude-sonnet-4-6) — re-ran baseline (537),
+  independently verified all 3 bug claims by reading source, confirmed 3 repro tests
+  fail on master with precise error messages. A6 slate also judge-approved (round 1)
+  but deferred per 3-item cap; noted in Proposed for cycle #5 promotion without re-judging.
+- Models: surveyor claude-opus-4-8 / judge claude-sonnet-4-6 (fenced MODEL block present)
+- Notes: A1 hunt rotation record: #1 matcher/placement (R18-R20), #2 blobs/publish
+  (R21-R23), #3 worker executors (R24-R26 promoted; Bugs 2+3 deferred to Proposed).
+  Next hunt area: captain/steward. A6 items in Proposed tagged "cycle #4 judge-approved"
+  for fast-track promotion in cycle #5. Human direction this cycle: expanded loop to
+  include A6 product gap source — first run surfaced headline gap (kind:auto missing
+  from roost_submit schema and mobile API.md).
+
 ## 2026-06-07 03:01 UTC — R21: Make presigned blob PUT single-use and race-safe
 - Verdict: shipped
 - Branch/PR: loop/r21-presigned-put-single-use / https://github.com/currenttide/roost/pull/30

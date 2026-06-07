@@ -1879,8 +1879,10 @@ class Worker:
                 error=("default_runtime_cap_exceeded" if timeout_source == "default"
                        else "wallclock_exceeded"),
                 exit_code=exit_code)
-        elif declined:
-            # Self-declined: not a failure — the kernel requeues for a better-fit node.
+        elif declined and exit_code == 0:
+            # Self-declined clean exit: requeue for a better-fit node.
+            # A non-zero exit means the triage subprocess itself crashed — that is a
+            # failure, not a decision; fall through to the else branch below.
             terminal.update(type="declined", reason=decline_reason or "declined")
         elif exit_code == 0:
             # Trust loop: for agentic jobs that opt in, an INDEPENDENT verifier checks

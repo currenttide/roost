@@ -1010,3 +1010,52 @@ def test_run_job_oversized_line_does_not_kill_relay():
         assert not any(len(d) >= 70000 for _, d in logs)
 
     asyncio.run(go())
+
+
+def test_auto_job_crash_after_decline_marker_reported_as_failed():
+    """[R24] A kind:auto triage subprocess that emits ROOST_DECLINE: in stdout
+    then exits non-zero must be type='failed', not type='declined'.
+    'declined' requeues on another node; a crash causing requeue = infinite retry loop."""
+    from unittest.mock import patch
+    from roost import triage as triage_mod
+    import roost.worker as wmod
+
+    class _FakeStream:
+        def __init__(self, data: bytes):
+            self._lines = iter(data.splitlines(keepends=True) + [b""])
+        async def readline(self):
+            return next(self._lines, b"")
+
+    class _FakeProcess:
+        returncode = 1
+        def __init__(self):
+            self.stdout = _FakeStream(
+                (triage_mod.DECLINE_MARKER + " not the right node\n").encode())
+            self.stderr = _FakeStream(b"crash\n")
+        async def wait(self):
+            return 1
+
+    async def _fake_create(*a, **k):
+        return _FakeProcess()
+
+    async def go():
+        w, events, logs = _mk_runjob_worker({})
+        with patch("asyncio.create_subprocess_exec", side_effect=_fake_create), \
+             patch.object(wmod, "build_command",
+                          side_effect=lambda spec, job_id, **kw: (
+                              ["/bin/true"], "/tmp", [])):
+            await asyncio.wait_for(
+                w.run_job({"id": "j-r24", "spec": {
+                    "kind": "auto", "intent": "test", "verify": False,
+                }}),
+                timeout=30.0,
+            )
+        await w.close()
+        terminal = [e for e in events if e.get("type") in
+                    ("succeeded", "failed", "declined")]
+        assert terminal, f"no terminal event; events={events}"
+        assert terminal[-1]["type"] == "failed", (
+            f"crash after decline marker must be 'failed', got {terminal[-1]['type']!r}"
+        )
+
+    asyncio.run(go())
