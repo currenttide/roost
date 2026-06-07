@@ -181,7 +181,7 @@ Done-when: fresh `coverage run --branch -m pytest` TOTAL recorded (judge re-meas
 Surface: mobile/feature. R37 landed the CP webhook (ntfy-compatible); the deferred client side has a real codeable slice even without devices: (iOS) a notification-settings screen storing the ntfy topic/URL derived from the CP config + deep-link plumbing from a notification payload to the job detail screen; (Android) the same settings + an UnifiedPush-style receiver whose payload→navigation mapping is pure logic. Read mobile-app/DESIGN.md v1.1's client section first and implement what it actually specifies.
 Done-when: settings + payload-routing logic landed on both clients with the logic layer Linux-tested (payload parse → expected deep-link route table); device-only pieces (actual push registration/display) explicitly capped in the PR per the evidence table; API.md/DESIGN.md updated only if the implemented slice needs it (additive); pytest + both mobile harnesses green.
 
-### R56. A6 product gap survey #2 — `open` `self-promoted`
+### R56. A6 product gap survey #2 — `done` *(2026-06-07 — 3 promotables found, 2 Proposed, 5 verified-complete; no code)* `self-promoted`
 Surface: survey. The product surface roughly doubled this session (metrics, backup, send/input, mobile schedules, publish UIs, push, pagination, captain plans, cost pricing). Re-run the A6 user-lens survey over the grown surface: README/INTEGRATIONS/API.md/DESIGN.md vs code; CLI help vs docs; what would a daily operator or phone user now hit? Apply the four A6 gates per finding; output a judged slate for cycle #14 (promotables + Proposed notes). Survey #1 found the kind:auto schema hole within minutes — the surface has grown 10× since.
 Done-when: every user-facing surface swept; each finding gated + judge-verified (re-checkable evidence); slate of ≤3 promotables + Proposed additions reported to the orchestrator; no code changes (survey only).
 
@@ -192,6 +192,18 @@ Done-when: both modules' branch coverage strictly up (≥8 points each); migrati
 ### R58. Config/deploy truth pass for the new env vars — `open` `self-promoted`
 Surface: docs/deploy. This session added ROOST_PRICING (R44), ROOST_NARRATE_INTERVAL (R49), ROOST_NOTIFY_URL (R37) and the backup/metrics admin endpoints. Verify each is (a) documented where operators look (DEPLOY.md's config reference, README), (b) passed through docker/stack.yml like ROOST_PUBLISH_DOMAIN is, (c) consistent with the code's actual parsing (truth-check defaults/fallbacks). R37 added its own passthrough — verify; R44/R49 likely did not.
 Done-when: every operator-facing env var documented + docker-passthrough'd + truth-checked; gaps fixed additively; pytest green.
+
+### R59. Surface input states on aggregate views (derived + tree) — `open` `self-promoted` `feature`
+Surface: backend/CLI/feature. A6 survey #2 finding 1+3 (judge-approved, merged — same helper, same contract). `_derive_run` (server.py:777-806) — consumed by /panel, roost history, mac-app, both mobile dashboards — has no `inputs` key; the tree endpoint never calls `_input_counts` per node, so `tree --health` (cli.py:1902-1913) can't show what `roost status` already does. An operator can't see dropped/queued input without per-job drilling.
+Done-when: `_derive_run` includes `inputs: {queued, delivered, dropped}` present only when any count > 0 (mirroring GET /jobs/{id}); tree endpoint annotates per-node counts; `tree --health` prints `inputs N/N/N` when nonzero; API.md §2 run row additively documents the optional field (fixture regen values-only if needed); tests for both surfaces; pytest green.
+
+### R60. `roost_publish` MCP tool — the agent front door ships sites — `open` `self-promoted` `feature`
+Surface: MCP/feature. A6 survey #2 finding 2 (judge-approved). 16 tools, none publishes; the server allows scoped agent tokens to publish (INTEGRATIONS.md:168-170) and CLI + both mobile apps expose it — only the captain can't. "Build a site and publish it" via roost_do dead-ends.
+Done-when: `roost_publish` (name + bundle path or blob_id, mirroring the CLI one-shot/two-step) in TOOLS + TOOL_IMPL with an R46-style worked example; INTEGRATIONS.md row; tools/call test returns a Site; pytest green.
+
+### R61. Mobile schedules UI (both platforms) — `open` `self-promoted` `feature`
+Surface: mobile/feature. A6 survey #2 PROPOSED→promoted on Tier-B loop judgment: the interaction design is resolved BY PRECEDENT — the dashboard-overflow→sheet pattern established by publish (R50/R53) and notifications (R55). Both ApiClients already implement all four schedule calls (iOS ApiClient.swift:183-211, Android ApiClient.kt:174-209) — unreachable code today. API.md §7 frames phone scheduling as the point.
+Done-when: Schedules sheet on both platforms (list + create with every-interval + enable/disable + delete), following the established sheet/viewmodel patterns; pure logic (interval parse/format, state machine) Linux-tested on both harnesses; UI-render claims capped per evidence table; pytest + both harnesses green.
 
 ### R21. Make presigned blob PUT single-use and race-safe — `done` *(2026-06-07, PR #30)* `self-promoted`
 Surface: backend/security. A1 hunt #2 reproduced that a presigned `put_url`
@@ -319,3 +331,4 @@ first iteration on that ratchet measures and records it here (no code changes).
 - Drop `cred_hash` on worker revoke — make revocation total *(security-session — credential lifecycle belongs in the dedicated session)*
 - Tests for `triage.py` prompt rendering and `config.py` TOML/perms
 - Mac app follow-ups (the native SwiftPM app lands with I1; webview wrapper is the deleted PoC — never resurrect it)
+- Mac-app verb expansion (A6 survey #2): menu bar covers Runs/Workers/Console/Transfers but none of publish/schedules/send/backup/history — which belong in a menu-bar scope is a product call (2026-06-07)

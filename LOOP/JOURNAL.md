@@ -1609,3 +1609,28 @@ Entries are written by the loop; humans read, never need to edit.
 - Notes: iteration #11 COMPLETE — R53 #65, R54 #66, R55 #67; master 707. Cycle
   #13: R56 A6 survey #2 (surface doubled this session), R57 mcp/schema coverage,
   R58 env-var deploy truth pass.
+
+## 2026-06-07 ~09:20 UTC — R56: A6 product survey #2 (grown surface)
+- Verdict: shipped (survey only; no code)
+- Branch/PR: — (survey output to orchestrator)
+- What changed: user-lens sweep over the session-doubled surface (README,
+  INTEGRATIONS, DEPLOY, API.md, DESIGN.md, full CLI, 16 MCP tools, all server
+  routes, mac-app, both mobile screen sets). 3 judge-approved PROMOTE findings —
+  all "finish the half-landed feature": (1) /derived run rows omit input counts
+  (R38's verb invisible on every dashboard); (2) NO MCP publish tool — the agent
+  front door can't ship sites though server/CLI/mobile all can (headline-verb
+  gap); (3) tree --health blind to input states roost status already shows
+  (two-layer: tree endpoint + CLI). 2 PROPOSED: mobile schedules UI (client layer
+  complete, zero UI — promoted anyway as R61 on Tier-B judgment, design resolved
+  by the established sheet precedent); mac-app verb expansion (true product-scope
+  call — stays Proposed). 5 verified-complete: publish symmetry, push slice
+  symmetry vs DESIGN §8a, pricing/narration/GPU/--version surfacing, roost status
+  input states, captain ↳why end-to-end.
+- Evidence: every finding file:line-cited; judge independently re-verified all
+  PROMOTE evidence + gates (1 round; upgraded one borderline finding itself)
+- Judge: approve — claude-sonnet-4-6 (fenced MODEL line)
+- Models: surveyor claude-opus-4-8 / judge claude-sonnet-4-6
+- Notes: iteration #12 slot 1. Cycle #14 slate: R59 (input visibility, findings
+  1+3 merged — same helper/contract), R60 (roost_publish tool), R61 (mobile
+  schedules UI). Dispatch deliberately HELD until R57 lands (R60 and R57 both
+  touch tests/test_mcp.py — collision avoidance). R57+R58 still in flight.
