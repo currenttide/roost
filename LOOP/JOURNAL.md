@@ -686,3 +686,32 @@ Entries are written by the loop; humans read, never need to edit.
   RANKED DRY → replenishment cycle #3 next wake; A2 coverage items
   (worker.py 55%, mcp.py 59%, schema.py 60%) are first in line per the
   cycle-#2 deferral; A1 rotation continues at blobs/publish serving.
+
+## 2026-06-07 02:52 UTC — Replenishment cycle #3 (blob/publish security hunt)
+- Verdict: shipped
+- Branch/PR: loop/replenish-3 / https://github.com/currenttide/roost/pull/29
+- What changed: Ranked refilled with 3 judge-approved Tier A items from A1
+  hunt #2 (blobs/publish), all backed by failing reproductions: R21 makes
+  presigned PUT URLs single-use/race-safe; R22 rolls back failed direct blob
+  uploads; R23 counts every archive entry against the publish extraction cap.
+- Evidence:
+  - `python -m pytest -q LOOP/repro-a1-hunt2.py` → 3 failed in 0.60s,
+    exactly one per promoted defect and for the claimed reason
+  - `python -m pytest -q` → 535 passed in 15.79s
+  - `git diff --check` → clean
+- Judge: approve (3 substantive approvals). Every round independently reran
+  both gates (3 failed / 535 passed) and confirmed separate A1 classification,
+  scope, and Done-when sufficiency. AUDIT DEVIATION: Claude Code omitted the
+  mandatory first textual `MODEL-ID` line despite three explicit attempts;
+  round 2's machine-readable `modelUsage` records `claude-sonnet-4-6`, and
+  every invocation pinned `--model claude-sonnet-4-6`. The deviation is
+  recorded rather than silently represented as format-compliant.
+- Models: implementer gpt-5 (Codex) / judge claude-sonnet-4-6
+- Notes: A4 had no new debt; A3 over R18-R20 found no undocumented drift.
+  A2 remains worker.py 55%, mcp.py 59%, schema.py 60%, deferred again because
+  confirmed security bugs take priority. A coverage run started during the
+  survey did not terminate after several minutes and was killed; its report
+  snapshot was not used as completion evidence. Hunt rotation advances next
+  to worker executors. R21 is the top next iteration. The machine clock read
+  02:52 UTC while the inherited preceding entry says 08:05 UTC, so append
+  order is intentionally truthful rather than timestamp-sorted.
