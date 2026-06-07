@@ -93,6 +93,46 @@ def test_agent_token_can_observe_and_submit(client: TestClient):
     assert client.delete(f"/jobs/{job_id}", headers=ah).status_code == 200
 
 
+def test_client_token_can_send_input_to_running_job(client: TestClient):
+    """A client (mobile/agent) token may steer a RUNNING job (R38 INPUT verb).
+    Pinned alongside SUBMIT/CANCEL in the client scope→verbs matrix."""
+    # Admin (fixture) sets up a worker + a running command job.
+    r = client.post("/enroll-tokens", json={"label": "t"})
+    etok = r.json()["token"]
+    r = client.post(
+        "/enroll",
+        json={"token": etok, "name": "w1", "capabilities": {"tools": ["python3"]}},
+        headers={"Authorization": ""})
+    worker_id, cred = r.json()["worker_id"], r.json()["credential"]
+    wh = {"Authorization": f"Bearer {cred}"}
+    r = client.post("/jobs", json={"command": "cat", "requires": {"tools": ["python3"]}})
+    job_id = r.json()["id"]
+    client.get(f"/workers/{worker_id}/poll", params={"timeout": 0}, headers=wh)
+    client.post(f"/workers/{worker_id}/jobs/{job_id}/event",
+                json={"type": "started", "attempt": 1}, headers=wh)
+
+    # The client token sends input.
+    tok = _mint(client, "mobile")
+    ah = {"Authorization": f"Bearer {tok}"}
+    r = client.post(f"/jobs/{job_id}/input", json={"text": "steer me"}, headers=ah)
+    assert r.status_code == 200, r.text
+    assert r.json()["state"] == "queued"
+    # And it can read the input queue back.
+    r = client.get(f"/jobs/{job_id}/inputs", headers=ah)
+    assert r.status_code == 200 and len(r.json()["inputs"]) == 1
+
+
+def test_client_token_cannot_use_worker_input_plane(client: TestClient):
+    """The worker-plane input fetch/ack endpoints reject a client token (they are
+    worker-credentialed, like the rest of the lease plane)."""
+    tok = _mint(client, "mobile")
+    ah = {"Authorization": f"Bearer {tok}"}
+    assert client.get("/workers/any/jobs/j/inputs", headers=ah).status_code == 403
+    assert client.post("/workers/any/jobs/j/input-ack",
+                       json={"input_id": "i", "state": "delivered"},
+                       headers=ah).status_code == 403
+
+
 def test_agent_token_can_use_blobs(client: TestClient):
     tok = _mint(client, "agent")
     ah = {"Authorization": f"Bearer {tok}"}

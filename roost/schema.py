@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import sqlite3
 
-CURRENT_VERSION = 13
+CURRENT_VERSION = 14
 
 # Full current (V12) schema for fresh installs.
 SCHEMA_V1 = """
@@ -89,6 +89,19 @@ CREATE TABLE IF NOT EXISTS job_logs (
 );
 CREATE INDEX IF NOT EXISTS idx_job_logs_job ON job_logs(job_id, seq);
 CREATE INDEX IF NOT EXISTS idx_job_logs_ts  ON job_logs(ts);
+
+CREATE TABLE IF NOT EXISTS job_inputs (
+    id           TEXT PRIMARY KEY,
+    job_id       TEXT NOT NULL,
+    text         TEXT NOT NULL,
+    state        TEXT NOT NULL DEFAULT 'queued',  -- queued | delivered | dropped
+    detail       TEXT,                            -- why dropped, or how delivered (audit)
+    created_at   REAL NOT NULL,
+    delivered_at REAL,                            -- when the worker acked delivery/drop
+    created_by   TEXT                             -- principal kind that queued it (audit)
+);
+CREATE INDEX IF NOT EXISTS idx_job_inputs_job  ON job_inputs(job_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_job_inputs_pend ON job_inputs(state, job_id);
 
 CREATE TABLE IF NOT EXISTS enroll_tokens (
     token_hash      TEXT PRIMARY KEY,
@@ -204,6 +217,22 @@ CREATE TABLE IF NOT EXISTS schedules (
     created_by    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_schedules_due ON schedules(enabled, next_run_at);
+"""
+
+# V13 → V14 (interactive follow-up: durable queue of inputs sent to running jobs).
+_JOB_INPUTS_DDL = """
+CREATE TABLE IF NOT EXISTS job_inputs (
+    id           TEXT PRIMARY KEY,
+    job_id       TEXT NOT NULL,
+    text         TEXT NOT NULL,
+    state        TEXT NOT NULL DEFAULT 'queued',  -- queued | delivered | dropped
+    detail       TEXT,
+    created_at   REAL NOT NULL,
+    delivered_at REAL,
+    created_by   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_job_inputs_job  ON job_inputs(job_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_job_inputs_pend ON job_inputs(state, job_id);
 """
 
 # V0 → V1 additive migration. Each entry is (column_name, full DDL fragment).
@@ -335,6 +364,11 @@ def migrate(conn: sqlite3.Connection) -> int:
         # V12 → V13: decline/requeue bookkeeping (R19) — the placement grace
         # window restarts from requeued_at, not the original created_at.
         _add_missing("jobs", [("requeued_at", "requeued_at REAL")])
+
+    if version < 14:
+        # V13 → V14: interactive follow-up (R38) — a durable queue of inputs
+        # sent to a running job, fetched + delivered by the owning worker.
+        conn.executescript(_JOB_INPUTS_DDL)
 
     conn.execute(f"PRAGMA user_version = {CURRENT_VERSION}")
     return CURRENT_VERSION

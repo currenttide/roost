@@ -104,6 +104,12 @@ ACTIVE_STATES = ("queued", "assigned", "running")
 # _post_notification — it only logs, never raises, never retries).
 NOTIFY_TIMEOUT_SEC = 5.0  # whole-request budget; a hung endpoint must not pile up
 
+# Interactive follow-up (R38): a single sent message must not be unbounded — the
+# worker writes it to the running process's stdin, and a giant line could blow the
+# per-line stream buffer on the worker side. Clamp at the same per-append byte cap
+# the log path uses (see LOG_APPEND_MAX_BYTES below) so the wire contract is uniform.
+JOB_INPUT_MAX_BYTES = 64 * 1024
+
 
 # ---------- DB helpers ----------
 
@@ -1475,6 +1481,171 @@ def _apply_event(
             raise
 
 
+# ---------- Interactive follow-up: job input queue (R38) ----------
+#
+# A client (CLI / phone / agent) can POST a message to a RUNNING job; it lands in
+# the durable `job_inputs` queue. The OWNING worker fetches its pending inputs on
+# the heartbeat back-channel (same pull mechanism as cancel/owned), delivers them
+# to the running process, and ACKs each as `delivered` or `dropped`.
+#
+# DELIVERY SEMANTICS (documented honestly — see README "Interactive follow-up"):
+#   queued    — accepted, waiting for the owning worker to pull it.
+#   delivered — the worker wrote the bytes to the process's live stdin (kind:
+#               command only — those processes can read stdin mid-run).
+#   dropped   — the worker could NOT deliver live: the job is a kind whose process
+#               cannot accept mid-run stdin (claude/auto/codex run `-p` one-shot
+#               with stdin closed; docker likewise), or the job went terminal
+#               before pickup. `detail` records why. NEVER silently lost.
+#
+# POSTing to a terminal job is rejected at the API (409) so the caller learns
+# immediately rather than discovering a dropped row later.
+
+
+def _queue_job_input(
+    db_path: Path, job_id: str, text: str, created_by: Optional[str]
+) -> tuple[Optional[dict], Optional[str]]:
+    """Append an input to a job's durable queue. Returns (row, error):
+      (None, "not_found")  — no such job
+      (None, "terminal")   — job already finished; nothing to deliver to
+      (row,  None)         — queued
+    """
+    now = time.time()
+    input_id = uuid.uuid4().hex[:12]
+    with _connect(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            job = conn.execute(
+                "SELECT state FROM jobs WHERE id=?", (job_id,)
+            ).fetchone()
+            if job is None:
+                conn.execute("ROLLBACK")
+                return None, "not_found"
+            if job["state"] in TERMINAL_STATES:
+                conn.execute("ROLLBACK")
+                return None, "terminal"
+            conn.execute(
+                "INSERT INTO job_inputs(id, job_id, text, state, created_at, created_by) "
+                "VALUES (?, ?, ?, 'queued', ?, ?)",
+                (input_id, job_id, text, now, created_by),
+            )
+            # A divider in the job log so the input is visible in the stream/logs.
+            conn.execute(
+                "INSERT INTO job_logs(job_id, seq, stream, data, ts) "
+                "VALUES (?, (SELECT COALESCE(MAX(seq), 0)+1 FROM job_logs WHERE job_id=?), 'event', ?, ?)",
+                (job_id, job_id,
+                 json.dumps({"type": "input_queued", "input_id": input_id,
+                             "text": text[:200]}),
+                 now),
+            )
+            conn.execute("COMMIT")
+            row = conn.execute(
+                "SELECT * FROM job_inputs WHERE id=?", (input_id,)
+            ).fetchone()
+            return dict(row), None
+        except Exception:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+
+
+def _pending_input_job_ids(db_path: Path, worker_id: str) -> list[str]:
+    """Job ids OWNED by this worker (assigned/running) that have at least one
+    queued input awaiting delivery. Returned on the heartbeat so the worker knows
+    to fetch + deliver — the pull-model back-channel, same as cancel/owned."""
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT ji.job_id FROM job_inputs ji "
+            "JOIN jobs j ON j.id = ji.job_id "
+            "WHERE ji.state='queued' AND j.worker_id=? "
+            "AND j.state IN ('assigned','running')",
+            (worker_id,),
+        ).fetchall()
+    return [r["job_id"] for r in rows]
+
+
+def _take_pending_inputs(db_path: Path, job_id: str, worker_id: str) -> list[dict]:
+    """The queued inputs for a job the calling worker owns, oldest first. Read-only
+    (no state change) — the worker ACKs each row's outcome separately, so a delivery
+    that crashes mid-write isn't lost as 'delivered'."""
+    with _connect(db_path) as conn:
+        owns = conn.execute(
+            "SELECT 1 FROM jobs WHERE id=? AND worker_id=?", (job_id, worker_id)
+        ).fetchone()
+        if owns is None:
+            return []
+        rows = conn.execute(
+            "SELECT id, text, created_at FROM job_inputs "
+            "WHERE job_id=? AND state='queued' ORDER BY created_at ASC, id ASC",
+            (job_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _ack_job_input(
+    db_path: Path, input_id: str, job_id: str, worker_id: str,
+    state: str, detail: Optional[str],
+) -> bool:
+    """Mark a queued input delivered/dropped. Only the owning worker may ack, and
+    only a row still in 'queued' (idempotent: a duplicate ack is a no-op). Records a
+    log divider so the delivery outcome is visible in the job stream."""
+    if state not in ("delivered", "dropped"):
+        raise ValueError(f"invalid input ack state: {state!r}")
+    now = time.time()
+    with _connect(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            owns = conn.execute(
+                "SELECT 1 FROM jobs WHERE id=? AND worker_id=?", (job_id, worker_id)
+            ).fetchone()
+            if owns is None:
+                conn.execute("ROLLBACK")
+                return False
+            cur = conn.execute(
+                "UPDATE job_inputs SET state=?, detail=?, delivered_at=? "
+                "WHERE id=? AND job_id=? AND state='queued'",
+                (state, (detail or "")[:300] or None, now, input_id, job_id),
+            )
+            if cur.rowcount:
+                conn.execute(
+                    "INSERT INTO job_logs(job_id, seq, stream, data, ts) "
+                    "VALUES (?, (SELECT COALESCE(MAX(seq), 0)+1 FROM job_logs WHERE job_id=?), 'event', ?, ?)",
+                    (job_id, job_id,
+                     json.dumps({"type": f"input_{state}", "input_id": input_id,
+                                 "detail": (detail or "")[:200] or None}),
+                     now),
+                )
+            conn.execute("COMMIT")
+            return cur.rowcount > 0
+        except Exception:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+
+
+def _list_job_inputs(db_path: Path, job_id: str) -> list[dict]:
+    """All inputs queued for a job, newest first — for `roost status` visibility."""
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT id, state, detail, created_at, delivered_at, created_by "
+            "FROM job_inputs WHERE job_id=? ORDER BY created_at DESC",
+            (job_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _input_counts(db_path: Path, job_id: str) -> dict[str, int]:
+    """{queued, delivered, dropped} counts for a job (0 for absent states)."""
+    out = {"queued": 0, "delivered": 0, "dropped": 0}
+    with _connect(db_path) as conn:
+        for r in conn.execute(
+            "SELECT state, COUNT(*) AS n FROM job_inputs WHERE job_id=? GROUP BY state",
+            (job_id,),
+        ).fetchall():
+            if r["state"] in out:
+                out[r["state"]] = int(r["n"])
+    return out
+
+
 # ---------- Sweeper ----------
 
 
@@ -1826,6 +1997,7 @@ def _list_enroll_tokens(db_path: Path) -> list[dict]:
 #   scope → allowed verbs (enforced by require_any + explicit guards below):
 #     READ   GET  /derived /jobs* /workers /workers/{id}    (observe the fleet)
 #     SUBMIT POST /jobs                                       (queue work)
+#     INPUT  POST /jobs/{id}/input                            (steer a running job, R38)
 #     CANCEL DELETE /jobs/{id}                                (cancel own/any job)
 #     BLOBS  POST /blobs, POST /blobs/presign, GET /blobs,
 #            GET /blobs/{id}                                  (stage/list/download)
@@ -1991,6 +2163,16 @@ class JobEvent(BaseModel):
     tokens_used: Optional[int] = None
     activity: Optional[str] = None  # compact "what it's doing now" (liveness)
     diagnosis: Optional[str] = None  # root-cause on FAILED (≤~300 chars)
+
+
+class JobInputSubmit(BaseModel):
+    text: str  # the message to deliver to the running job (R38 interactive follow-up)
+
+
+class JobInputAck(BaseModel):
+    input_id: str
+    state: str  # "delivered" | "dropped"
+    detail: Optional[str] = None  # how delivered / why dropped (audit)
 
 
 # ---------- App factory ----------
@@ -2480,7 +2662,14 @@ def create_app(
         job = await asyncio.to_thread(_get_job, db, job_id)
         if not job:
             raise HTTPException(404, "job not found")
-        return (await asyncio.to_thread(_annotate_liveness, db, [job]))[0]
+        job = (await asyncio.to_thread(_annotate_liveness, db, [job]))[0]
+        # [R38] Attach interactive-input counts when any exist, so `roost status`
+        # shows queued/delivered/dropped without a second call. Absent when the job
+        # has no inputs (graceful absence — unchanged for the common case).
+        counts = await asyncio.to_thread(_input_counts, db, job_id)
+        if any(counts.values()):
+            job["inputs"] = counts
+        return job
 
     @app.get("/jobs/{job_id}/tree", dependencies=[Depends(require_any)])
     async def get_tree(job_id: str):
@@ -2501,6 +2690,46 @@ def create_app(
         # terminal event to surface — children are implementation detail.
         _fire_notify(await asyncio.to_thread(_get_job, db, job_id))
         return {"cancelled": count}
+
+    @app.post("/jobs/{job_id}/input", dependencies=[Depends(require_any)])
+    async def send_job_input(
+        job_id: str, payload: JobInputSubmit, principal: dict = Depends(require_any)
+    ):
+        """Interactive follow-up (R38): queue a message for a RUNNING job. Client
+        tokens are allowed (the phone/agent front door is the point). The OWNING
+        worker pulls it on its heartbeat and delivers it to the live process — for
+        `kind: command` jobs that read stdin, this reaches the process directly;
+        other kinds (claude/auto/codex/docker) run with stdin closed and the worker
+        marks the input `dropped` with a reason (see the README delivery semantics).
+
+        Rejects a terminal job with 409 so the caller learns immediately rather than
+        finding a dropped row later. The returned `state` is always `queued` here;
+        poll `roost status` / GET /jobs/{id}/inputs for the delivered/dropped outcome.
+        """
+        text = payload.text
+        if not text:
+            raise HTTPException(400, "input `text` must not be empty")
+        if len(text.encode("utf-8", "replace")) > JOB_INPUT_MAX_BYTES:
+            raise HTTPException(
+                413, f"input exceeds {JOB_INPUT_MAX_BYTES} bytes; send a shorter message")
+        row, err = await asyncio.to_thread(
+            _queue_job_input, db, job_id, text, principal.get("kind"))
+        if err == "not_found":
+            raise HTTPException(404, "job not found")
+        if err == "terminal":
+            raise HTTPException(
+                409, "job is terminal (succeeded/failed/cancelled); cannot accept input")
+        return {"input_id": row["id"], "job_id": job_id, "state": row["state"]}
+
+    @app.get("/jobs/{job_id}/inputs", dependencies=[Depends(require_any)])
+    async def list_job_inputs_endpoint(job_id: str):
+        """The follow-up inputs queued for a job and their delivery state
+        (queued / delivered / dropped) — drives `roost status` visibility."""
+        job = await asyncio.to_thread(_get_job, db, job_id)
+        if not job:
+            raise HTTPException(404, "job not found")
+        inputs = await asyncio.to_thread(_list_job_inputs, db, job_id)
+        return {"job_id": job_id, "state": job["state"], "inputs": inputs}
 
     @app.get("/jobs/{job_id}/logs", dependencies=[Depends(require_any)])
     async def get_logs_endpoint(job_id: str, since: int = 0, limit: int = 1000):
@@ -3057,7 +3286,11 @@ def create_app(
         # can abort local attempts whose lease was swept during a CP outage
         # (additive field; older workers ignore it).
         owned = await asyncio.to_thread(_owned_job_ids, db, worker_id)
-        return {"ok": True, "cancel": cancelled, "owned": owned}
+        # [R38] And which owned jobs have pending interactive input awaiting
+        # delivery, so the worker fetches + delivers it (additive; older workers
+        # ignore the field — the input simply stays queued until a worker pulls it).
+        inputs = await asyncio.to_thread(_pending_input_job_ids, db, worker_id)
+        return {"ok": True, "cancel": cancelled, "owned": owned, "inputs": inputs}
 
     @app.get("/workers/{worker_id}/poll", dependencies=[Depends(require_matching_worker)])
     async def poll(worker_id: str, timeout: float = Query(POLL_HOLD_MAX, ge=0, le=POLL_HOLD_MAX)):
@@ -3125,6 +3358,35 @@ def create_app(
         # non-terminal events (started/progress/requeued-decline).
         _fire_notify(job)
         return job
+
+    @app.get(
+        "/workers/{worker_id}/jobs/{job_id}/inputs",
+        dependencies=[Depends(require_matching_worker)],
+    )
+    async def fetch_job_inputs(worker_id: str, job_id: str):
+        """[R38] The queued interactive inputs for a job this worker owns, oldest
+        first. Read-only — the worker ACKs each row's delivery outcome via the
+        sibling /input-ack endpoint, so an input is never marked delivered before
+        the worker has actually written it to the process."""
+        inputs = await asyncio.to_thread(_take_pending_inputs, db, job_id, worker_id)
+        return {"job_id": job_id, "inputs": inputs}
+
+    @app.post(
+        "/workers/{worker_id}/jobs/{job_id}/input-ack",
+        dependencies=[Depends(require_matching_worker)],
+    )
+    async def ack_job_input(worker_id: str, job_id: str, payload: JobInputAck):
+        """[R38] Mark a queued input delivered (written to the live process) or
+        dropped (kind can't take mid-run stdin / process already gone). Idempotent."""
+        try:
+            ok = await asyncio.to_thread(
+                _ack_job_input, db, payload.input_id, job_id, worker_id,
+                payload.state, payload.detail)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        # A no-op (already acked, or not owned) is not an error — the worker may
+        # retry after a partial failure; tell it the row is no longer pending.
+        return {"acked": ok, "input_id": payload.input_id}
 
     return app
 

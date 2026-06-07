@@ -478,6 +478,28 @@ def docker_container_name(job_id: str) -> str:
     return f"roost-job-{job_id}"
 
 
+# [R38] Which job kinds can accept INTERACTIVE follow-up input delivered to a live
+# stdin. Only a plain `command` job runs an ordinary process whose stdin we can keep
+# open and write to mid-run. Agent kinds (`claude`/`auto`/`codex`) run `claude -p`
+# one-shot, which hangs on an open stdin with no TTY (see the spawn note in run_job),
+# and `kind: docker` runs `docker run` without `-i`, so its stdin isn't connected.
+# Anything not delivered live is honestly marked `dropped` (never silently lost).
+INPUT_DELIVERY_UNSUPPORTED = (
+    "this job kind cannot receive live input: agent (claude/auto/codex) jobs run "
+    "one-shot with stdin closed, and docker jobs run without an interactive stdin"
+)
+
+
+def _supports_live_input(spec: dict) -> bool:
+    """Whether a job's process can accept interactive input on a live stdin pipe.
+    True only for a plain `command` job (kind not auto/docker, has a `command`)."""
+    kind = (spec.get("kind") or "").lower()
+    if kind in ("auto", "docker"):
+        return False
+    # A `command` is the shell/argv path in build_command; agent kinds have none.
+    return bool(spec.get("command"))
+
+
 # [M4] Env vars a job must NOT be able to set, because they could redirect the
 # operator's Claude OAuth token to an attacker endpoint, inject code into the
 # subprocess, or proxy/exfiltrate traffic. The worker inherits the operator's real
@@ -1247,6 +1269,13 @@ class Worker:
                         owned = body.get("owned")
                         if owned is not None:
                             await self._reconcile_owned(set(owned))
+                        # [R38] Interactive follow-up: deliver any input the server
+                        # has queued for jobs we own (additive field; absent on older
+                        # servers). Done off the heartbeat so cancel/lease handling
+                        # above is never blocked by a slow stdin write.
+                        for jid in (body.get("inputs") or []):
+                            if jid in self._active:
+                                await self._deliver_inputs(jid)
                     except (ValueError, KeyError, AttributeError):
                         pass
             except httpx.HTTPError as e:
@@ -1731,10 +1760,17 @@ class Worker:
                     "(set budget.max_wallclock_min to override)",
                 )
 
+            # [R38] Interactive follow-up: a `command` job runs an ordinary process
+            # that can read its stdin mid-run, so open a PIPE we can write delivered
+            # input to. `claude -p` (and codex/auto, which wrap it) HANG on an open
+            # stdin with no TTY — and `kind: docker` runs `docker run` without -i — so
+            # those keep stdin CLOSED and any sent input is honestly marked `dropped`.
+            live_stdin = _supports_live_input(spec)
             try:
                 process = await asyncio.create_subprocess_exec(
                     *argv, cwd=cwd, env=env,
-                    stdin=asyncio.subprocess.DEVNULL,  # headless: `claude -p` hangs on an open stdin with no TTY
+                    stdin=(asyncio.subprocess.PIPE if live_stdin
+                           else asyncio.subprocess.DEVNULL),
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     start_new_session=True,  # own process group, so cancel/timeout can kill the whole job tree
@@ -1751,7 +1787,8 @@ class Worker:
 
             is_docker = (spec.get("kind") or "").lower() == "docker"
             self._active[job_id] = {"process": process, "is_docker": is_docker,
-                                    "cancelled": None, "since": time.monotonic()}
+                                    "cancelled": None, "since": time.monotonic(),
+                                    "live_stdin": live_stdin}
 
             tokens_used = 0
             declined = False
@@ -2154,6 +2191,74 @@ class Worker:
         if passed is None:
             reason = f"verification inconclusive (verifier produced no verdict): {reason}"
         return passed, reason, total_tokens
+
+    async def _deliver_inputs(self, job_id: str) -> None:
+        """[R38] Fetch the interactive inputs the server has queued for a job we own
+        and deliver each to the running process, then ACK its outcome. For a `command`
+        job we write the text (newline-terminated) to the live stdin pipe; for any
+        kind that can't take mid-run stdin (agent/docker) — or if the process has
+        already exited or has no pipe — we ACK `dropped` with a reason so the input is
+        recorded as undeliverable rather than silently lost.
+
+        Best-effort and self-contained: a write failure marks that one input dropped
+        and never crashes the heartbeat loop that calls this."""
+        entry = self._active.get(job_id)
+        if not entry:
+            return
+        try:
+            r = await self.client.get(
+                f"/workers/{self.worker_id}/jobs/{job_id}/inputs")
+            if r.status_code >= 400:
+                return
+            inputs = (r.json() or {}).get("inputs") or []
+        except (httpx.HTTPError, ValueError) as e:
+            print(f"[roost] input fetch failed for {job_id}: {e}", flush=True)
+            return
+
+        proc = entry.get("process")
+        for item in inputs:
+            input_id = item.get("id")
+            text = item.get("text") or ""
+            if not input_id:
+                continue
+            # Re-check liveness for EACH input: an earlier write may have closed the
+            # stream, or the process may have exited between inputs.
+            live = bool(entry.get("live_stdin")) and not entry.get("cancelled")
+            stdin = getattr(proc, "stdin", None) if proc is not None else None
+            proc_alive = proc is not None and proc.returncode is None
+            if not live or stdin is None or not proc_alive or stdin.is_closing():
+                await self._ack_input(
+                    job_id, input_id, "dropped",
+                    detail=(INPUT_DELIVERY_UNSUPPORTED if not live
+                            else "process is no longer accepting input (exited/closed)"))
+                continue
+            # Deliver: newline-terminate so a line-reading process (read/readline)
+            # sees a complete line, and flush so it isn't stuck in the pipe buffer.
+            payload = text if text.endswith("\n") else text + "\n"
+            try:
+                stdin.write(payload.encode("utf-8", "replace"))
+                await stdin.drain()
+            except (BrokenPipeError, ConnectionResetError, OSError, RuntimeError) as e:
+                await self._ack_input(
+                    job_id, input_id, "dropped",
+                    detail=f"stdin write failed: {e}")
+                continue
+            await self._send_log(
+                job_id, "event", f"delivered input to process stdin: {text[:120]}")
+            await self._ack_input(job_id, input_id, "delivered",
+                                  detail="written to process stdin")
+            print(f"[roost] job {job_id} input delivered to stdin", flush=True)
+
+    async def _ack_input(
+        self, job_id: str, input_id: str, state: str, detail: Optional[str] = None,
+    ) -> None:
+        try:
+            await self.client.post(
+                f"/workers/{self.worker_id}/jobs/{job_id}/input-ack",
+                json={"input_id": input_id, "state": state, "detail": detail},
+            )
+        except httpx.HTTPError as e:
+            print(f"[roost] input ack failed for {job_id}/{input_id}: {e}", flush=True)
 
     async def _send_log(self, job_id: str, stream: str, data: str) -> None:
         try:
