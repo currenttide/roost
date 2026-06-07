@@ -63,6 +63,7 @@ the evidence gate before merging. If the rebase is non-trivial, mark the item
 | Backend behavior change | additionally: live smoke against a scratch control plane | "works" |
 | RoostKit / mobile pure logic | Linux Swift/Kotlin test harness green (see module READMEs) | "works" |
 | mac-app UI / iOS simulator | Roost job on the Mac node: build + test + `simctl` screenshot returned as artifact | "works" (artifact linked in PR) |
+| Android UI (emulator) | Roost job on the Mac node: AVD `Pixel_8` boot + gradle build/install + `adb shell input` drive + `adb exec-out screencap` artifact *(path proven 2026-06-07 user-testing sweep)* | "works" (artifact linked in PR) |
 | mac-app, Mac unreachable | Linux type-check of RoostKit only | "compiles, needs-mac-verify" — item stays open |
 
 ## Honesty rules

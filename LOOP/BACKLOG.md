@@ -253,6 +253,158 @@ Surface: backend/robustness. A1 hunt #8 (PR #82). `_kill_active_job` (worker.py 
 Repro: `LOOP/repro-a1-hunt8.py` — 2 tests (unit + run_job integration) FAIL ×3 on master (~20s real hang each).
 Done-when: both teardown waits bounded (`asyncio.wait_for` + kill the stuck CLI process on expiry — match the proven fix shape; pick the timeout consistent with the docker-info probe's 20s and justify); the failure is loud (log line: daemon unresponsive, container may still be running — operator must intervene); repros promoted into tests/, repro file deleted; pytest green (820 base).
 
+---
+
+## User-testing sweep 2026-06-07 (human-directed)
+
+Four parallel agents real-user-tested every surface against the live fleet:
+backend/CLI/panel (Playwright, desktop + iPhone 14 + Pixel 7), Android (Pixel_8 AVD
+on mac-mini-m4, adb-driven), iOS (iPhone 17 Pro sim), mac-app (built + run on the
+Mac node). Evidence pack: `/workspace/yang/agent_fleet/user-testing/` (SUMMARY.md +
+per-surface report.md + 42 inspected screenshots). The items below are human-promoted;
+bug items still require a failing repro/test in-PR per A1 before the fix lands (UI
+items: evidence-table artifact instead). Fleet-ops findings (live CP container rebuild,
+oracle creds, stale Mac clone) are NOT loop items — parked for the human in Proposed.
+
+### R73. mac-app master does not compile (Swift 6.2 ternary type mismatch) — `open`
+Surface: mac-app/correctness. User-test BLOCKER. `mac-app` `PublishView.swift:181`
+`.foregroundStyle(PublishSlug.isValid(pub.name) ? .secondary : .red)` mixes
+`HierarchicalShapeStyle` and `Color`; Swift 6.2 rejects it — nobody can build current
+master (proven one-line fix: `? Color.secondary : Color.red`). The Linux RoostKit gate
+did not catch it because the app target isn't compiled on Linux.
+Done-when: master builds on the Mac node (evidence-table mac path: build + test +
+artifact); additionally close the gate-hole honestly — either the Linux gate type-checks
+the app target too, or mac-app-touching PRs are documented as requiring the Mac-node
+build (pick what's real, journal the choice); pytest green.
+
+### R74. Android dashboard TopAppBar never renders — Publish/Notifications/Schedules unreachable — `open`
+Surface: mobile/Android/correctness. User-test BLOCKER (user-testing/android/03,04).
+`uiautomator` dump shows zero app-bar nodes — no title, no ⋮ overflow, the ONLY entry
+point to Publish/Notifications/Schedules (DashboardScreen.kt:84-86, 326-336): a third of
+the app is unreachable. `MainActivity.onCreate` calls `enableEdgeToEdge()` with no inset
+handling; the dashboard's `topBar` slot collapses (content is `VerdictBar` +
+`LazyColumn(fillMaxSize())`) while SessionScreen's same pattern renders (content uses
+`weight(1f)`). Same root cause, milder: Session back-arrow crowds the status bar.
+Done-when: TopAppBar (title + overflow) renders on the dashboard and all three sheets
+open; insets fixed app-wide (Session back-arrow too); UI verified via the now-PROVEN
+Android evidence path — Roost job on mac-mini-m4: AVD `Pixel_8` (exists), Homebrew
+gradle 9.4.1 + `gradle wrapper` (JAR not committed) `assembleDebug`, `adb install` +
+`adb shell input` drive + `adb exec-out screencap` artifact in the PR; pytest green
+(server untouched).
+
+### R75. Android offline staleness pill never fires (StateFlow dedupe freezes the clock) — `open`
+Surface: mobile/Android/correctness. User-test major (android/11 — 35s confirmed outage,
+no pill). `DashboardViewModel.refreshOnce()` sets `_state.copy(error=…)` keeping the same
+`derived` ref → consecutive failures produce `equals` states → `MutableStateFlow` dedupes
+→ no recomposition → `val nowMs = System.currentTimeMillis()` in DashboardScreen stays
+frozen at the first-failure instant → `ageSec > 10` never true. Exactly the DESIGN.md §2
+case it exists for.
+Done-when: staleness driven by a 1s ticker or an explicit last-success timestamp in state
+(pick, justify); failing Linux-harness test first (simulated failed polls → pill state
+asserted), fix makes it pass; emulator screenshot of the pill during an induced outage
+per the R74 evidence path; pytest green.
+
+### R76. Session follow-up composer missing on mobile (DESIGN §3.2 / API §4) — `open`
+Surface: mobile/feature. User-test major. Server + CLI landed with R38
+(`POST /jobs/{id}/input`, `roost send`); Android SessionScreen.kt's bottom bar is
+Cancel + Tree only — the headline "react fast: follow up" capability is absent. iOS's
+session screen was tap-gated during testing (not live-verified) — audit it first;
+implement the composer on whichever clients lack it.
+Done-when: composer per DESIGN §3.2 on both platforms (text at minimum; voice only if
+the design's slice is Linux-testable); send → input lands queued/delivered via the real
+endpoint (fixtures additive if needed); pure logic Linux-tested on both harnesses;
+Android emulator screenshot per R74 path, iOS per evidence-table mac path; pytest green.
+
+### R77. `roost schedule --list` dumps a raw httpx traceback on non-2xx — `open`
+Surface: CLI/correctness. User-test major (verbatim: `httpx.HTTPStatusError: Client error
+'404 Not Found' for url 'http://127.0.0.1:8787/schedules'`). `cli.py:1564
+_print_schedules` calls `r.raise_for_status()` bare; the create path handles 404 cleanly,
+`--list` doesn't.
+Done-when: failing test first (stubbed 404 + 500 → friendly one-line error, parity with
+the create path); fix; audit the other schedule subverbs for the same bare pattern;
+pytest green.
+
+### R78. `roost publish` fails opaquely against older control planes — `open`
+Surface: CLI/robustness. User-test major. Against the deployed 0.1.0 CP the one-shot
+raw-tar POST gets HTTP 500 (old server requires JSON `{blob_id}`) and the CLI's blob-flow
+fallback (`cli.py:1524`) only triggers on 422 → user sees `publish failed: HTTP 500:
+Internal Server Error` with no recourse. Redeploying the CP is ops; the CLI should still
+degrade gracefully across versions.
+Done-when: compat contract decided + documented (broaden the fallback to any non-2xx from
+the one-shot attempt, or preflight the server version via healthz — pick, justify);
+failing test first (stubbed old-CP responses); clear error text when no path works;
+pytest green.
+
+### R79. Job-id prefix lookup: `history` prints 8 chars, every lookup verb needs 12 — `open`
+Surface: backend/CLI/DX. User-test minor. `roost history` prints truncated ids
+(cli.py:316) but `logs`/`status`/`tree` do exact `WHERE id = ?` — pasting an id straight
+from history → terse "job not found".
+Done-when: unambiguous-prefix lookup server-side (≥6 chars; ambiguous → 409 listing
+candidates) OR history prints full ids — pick the better UX, justify; tests for
+match/ambiguous/too-short; docs additively updated if the contract changes; pytest green.
+
+### R80. Blob `name` accepts unbounded length — `open`
+Surface: backend/robustness. User-test minor: a 32,000-char `name` was accepted and
+stored (HTTP 200). Every other fuzz case returned clean 4xx — this is the one hole.
+Done-when: sane cap (match existing field-cap precedent in server.py) returning 422;
+boundary tests at/over the cap; existing clients unaffected; pytest green.
+
+### R81. mac-app Schedules pane: contradictory double error against a 404 CP — `open`
+Surface: mac-app/UX. User-test minor (mac-app/mainwindow-schedules.png): against a CP
+without `/schedules` the pane stacks a red "Not found: Not Found" banner ON TOP of the
+"No schedules" empty state — error and empty-state contradict each other.
+Done-when: 404 → a single clear "schedules not available on this control plane (older
+server)" state, no contradiction; RoostKit logic Linux-tested; render verified via the
+Mac-node path or capped honestly; pytest green (server untouched).
+
+### R82. mac-app Transfers shows "expires 0s from now" for every staged blob — `open`
+Surface: mac-app/correctness. User-test minor (mainwindow-transfers.png): `Format.timeAgo`
+is past-tense only; the call site string-swaps "ago"→"from now" and any future timestamp
+renders "0s from now" (hours of TTL remain).
+Done-when: a real signed/future-relative formatter with Linux swift tests covering past +
+future values; Transfers and any other future-time call sites migrated; pytest green.
+
+### R83. iOS pairing to a dead host: silent un-cancellable ~30s spinner — `open`
+Surface: mobile/iOS/UX. User-test minor (ios/07,08): `timeoutIntervalForRequest = 30` in
+`AppState.makeClient`; no caption, no cancel until the (excellent) error finally appears.
+Done-when: short healthz probe timeout (~5s, justify), a "Contacting <host>…" caption,
+and a cancel affordance; RoostKit-layer logic Linux-tested; simulator screenshot per the
+evidence-table mac path; pytest green.
+
+### R84. iOS XCUITest smoke suite — close the tap-gap — `open` `feature`
+Surface: mobile/iOS/tests. User testing could not live-verify any tap-gated iOS screen
+(New-session, Session, Tree, Notifications, Schedules, swipe actions, Unpair): no
+XCUITest target exists, no idb, and the Mac worker has no AX/window-server session.
+Android's adb-driveable testing is exactly where its blocker was found — parity matters.
+Done-when: XCUITest target with smoke flows (launch-arg pairing → dashboard renders live
+data → New-session sheet → open a Session → Notifications/Schedules sheets), runnable
+headless via `xcodebuild test` on mac-mini-m4 (Roost job) with the result bundle +
+screenshots as artifacts; documented in ios/README; flake-free twice consecutively;
+pytest green.
+
+### R85. Mobile session subtitle hardcodes "claude" for every job kind — `open`
+Surface: mobile/correctness. User-test minor (android/05,08): a `command` job renders
+"… · claude · succeeded" (Android `sessionSubtitle` + DashboardScreen `subtitle`; audit
+iOS for the same).
+Done-when: subtitle reflects the job's actual kind on both platforms; Linux-harness tests
+with command/claude/docker fixtures; pytest green.
+
+### R86. Long raw shell-command goals make verdict bars unreadable (all surfaces) — `open`
+Surface: cross-surface/UX. User-test minor, observed independently on Android (03,10),
+iOS rows, and the mac popover: `command` jobs put the full shell text where a glanceable
+goal belongs.
+Done-when: seam decided (server-side display summary for command kinds in
+`_goal_text`/`_derive_run` — additive field preferred — vs per-client truncation rules),
+justified, applied consistently to panel + mac-app + both mobiles; fixtures additive;
+tests; pytest green.
+
+### R87. Docs: `roost pair --url` ordering wrong in mobile READMEs — `open`
+Surface: docs. User-test confirmed drift: `mobile-app/README.md` and
+`mobile-app/ios/README.md` show `roost pair --url http://<LAN>:8787`, but `--url` is a
+global option — `pair` rejects it; correct form is `roost --url … pair`.
+Done-when: both corrected (plus a grep for the same inverted pattern across docs/skills);
+docs-drift ratchet stays 0; pytest green.
+
 ### R21. Make presigned blob PUT single-use and race-safe — `done` *(2026-06-07, PR #30)* `self-promoted`
 Surface: backend/security. A1 hunt #2 reproduced that a presigned `put_url`
 remains valid after the first upload finalizes the blob: replaying the same URL
@@ -372,11 +524,11 @@ first iteration on that ratchet measures and records it here (no code changes).
 
 ## Proposed (loop appends here; only humans promote)
 
-<<<<<<< Updated upstream
-=======
->>>>>>> Stashed changes
 - **A6 (cycle #4, unblocked from Proposed):** Version drift — `pyproject.toml` says `0.1.0`, server self-reports `0.2.0`; single-source via `importlib.metadata`
 - Drop `cred_hash` on worker revoke — make revocation total *(security-session — credential lifecycle belongs in the dedicated session)*
 - Tests for `triage.py` prompt rendering and `config.py` TOML/perms
 - Mac app follow-ups (the native SwiftPM app lands with I1; webview wrapper is the deleted PoC — never resurrect it)
 - Mac-app verb expansion (A6 survey #2): menu bar covers Runs/Workers/Console/Transfers but none of publish/schedules/send/backup/history — which belong in a menu-bar scope is a product call (2026-06-07)
+- **User-testing sweep 2026-06-07 — polish notes (not promoted):** panel bad-token banner says "control plane unreachable — HTTP 401" (it's an auth failure; reachability is fine); `roost token --scope agent` mints `rst-mob-`-prefixed secrets (cosmetic; scope is correct); Android pairing screen is bottom-heavy with large empty margins (android/01); Android `model/Parsers.kt:21` `optString(key, null)` compiler warning.
+- **Commit the headless SwiftUI render harness** from the mac-app user test as a supported test utility *(product call)*: `RenderShots.swift` + 1-line `App.swift` hook gated on `ROOST_RENDER_DIR`, renders real views with live `GET /derived` data via `NSHostingView.cacheDisplay` — the only screenshot path on a TCC-less worker (mac-mini-m4 has no Screen Recording/Automation permission, ungrantable non-interactively).
+- **Fleet ops (human — NOT loop work), from the 2026-06-07 sweep:** (a) live CP container (`docker-ec7c1cae…`) runs roost 0.1.0 (installed Jun 5) — rebuild from master to unbreak `backup`/`schedule`/`/metrics`/one-shot publish against the live fleet; (b) oracle is unhealthy for agent jobs — Claude cred 401 + a broken SessionStart Node hook; (c) mac-mini-m4's `~/roost-r50` clone is a stale single-branch checkout (origin lacks a master ref) — re-clone or fix the remote; (d) consider granting Screen Recording TCC on the Mac for real-window capture.
