@@ -316,14 +316,46 @@ a per-kind default cap applies (`command` 120 min, `claude`/`auto` 240 min, `doc
 |---|---|
 | `roost jobs` | recent jobs |
 | `roost history [--failed]` | recent finished runs with outcome, worker & cost; `--failed` shows only runs that failed or weren't verified ("what went wrong this week") |
-| `roost status <id>` | one job's state |
+| `roost status <id>` | one job's state (incl. queued/delivered/dropped input counts) |
 | `roost logs <id> [--follow]` | job output |
+| `roost send <id> <text> [--wait]` | send a follow-up message to a **running** job (see *Interactive follow-up* below) |
 | `roost exec <worker> -- <cmd>` | run a command on one specific node — no SSH, via the job channel (great for a node whose SSH is unreachable) |
 | `roost tree <root> --health` | a dispatch's whole job tree + per-job liveness |
 | `roost cancel <id> [--tree]` | cancel a job (or its lineage) |
 | `roost workers` | the live fleet |
 | `roost prune-workers [--days N]` | (admin) delete ghost worker rows not seen in N days (default 7); never touches live or running nodes |
 | `roost capabilities` | what the fleet can do, in plain language |
+
+### Interactive follow-up (send input to a running job)
+
+`roost send <job-id> "<message>"` queues a message for a **running** job; the worker
+running it delivers it to the live process. This is a back-channel over the same pull
+model everything else uses — the message lands in a durable queue, the owning worker
+fetches it on its next heartbeat, delivers it, and acks the outcome.
+
+**Delivery depends on the job kind — and Roost is honest about what it can do:**
+
+| Kind | Live delivery? | How |
+|------|----------------|-----|
+| **`command`** | **yes** | written to the process's **stdin** (newline-terminated). The process must actually read stdin (e.g. `read line`, a REPL, a prompt). |
+| `claude` / `auto` / `codex` | **no** | agent jobs run `claude -p` **one-shot with stdin closed** (an open stdin with no TTY hangs the CLI), so there's no live channel to write to. |
+| `docker` | **no** | the container runs without an interactive stdin (`docker run`, no `-i`). |
+
+Every input ends in one of three states, never silently lost:
+
+- **queued** — accepted, waiting for the owning worker to pull it.
+- **delivered** — the worker wrote it to the live process (command jobs).
+- **dropped** — undeliverable: a kind that can't take mid-run stdin, or the process
+  already exited. The reason is recorded and shown by `roost status` / `roost send --wait`.
+
+Sending to a **terminal** job is rejected immediately (`409`) rather than dropped later.
+`roost status <id>` shows `inputs: N queued · N delivered · N dropped`; `roost send --wait`
+blocks until your message is delivered or dropped and tells you which.
+
+> **Steering an agent job** is a deliberate non-goal of this slice: `claude -p` can't accept
+> mid-run input. The faithful pattern today is a *follow-up job* that carries the parent's
+> context (what `roost history` goal-memory and the mobile app's terminal-state composer
+> already do). True agent stdin-steering waits on an interactive agent-runner mode.
 
 ---
 

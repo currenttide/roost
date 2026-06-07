@@ -668,3 +668,73 @@ def test_tree_mixed_plan_only_annotates_jobs_with_reason(monkeypatch):
     assert res.exit_code == 0, res.output
     assert res.output.count("why:") == 1
     assert "↳ why: the annotated one" in res.output
+
+
+# ---------- roost send: interactive follow-up (R38) ----------
+
+
+def _send_client(calls, *, post_status=200, inputs_state="delivered",
+                 inputs_detail="written to process stdin"):
+    """Fake `_client(url, token)` for the send flow: records the POST /input body
+    and serves GET /inputs with a scripted terminal state for --wait."""
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+
+        def post(self, path, json):
+            calls.append(("POST", path, json))
+            return _ExecResp({"input_id": "i-123", "job_id": "j1",
+                              "state": "queued"}, status_code=post_status)
+
+        def get(self, path, **k):
+            calls.append(("GET", path))
+            return _ExecResp({"job_id": "j1", "state": "running", "inputs": [
+                {"id": "i-123", "state": inputs_state, "detail": inputs_detail}]})
+    return _C()
+
+
+def test_send_queues_input(monkeypatch):
+    calls: list = []
+    monkeypatch.setattr(roost_cli, "_resolve", lambda ctx: ("http://cp", "tok", None))
+    monkeypatch.setattr(roost_cli, "_client", lambda url, token: _send_client(calls))
+    res = CliRunner().invoke(roost_cli.send, ["j1", "hello", "there"])
+    assert res.exit_code == 0, res.output
+    assert "queued input i-123 for job j1" in res.output
+    # Words are joined into one message.
+    post = [c for c in calls if c[0] == "POST"][0]
+    assert post[1] == "/jobs/j1/input"
+    assert post[2] == {"text": "hello there"}
+
+
+def test_send_wait_reports_delivered(monkeypatch):
+    calls: list = []
+    monkeypatch.setattr(roost_cli, "_resolve", lambda ctx: ("http://cp", "tok", None))
+    monkeypatch.setattr(roost_cli, "_client",
+                        lambda url, token: _send_client(calls, inputs_state="delivered"))
+    monkeypatch.setattr(roost_cli.time, "sleep", lambda *_a: None)  # no real wait
+    res = CliRunner().invoke(roost_cli.send, ["j1", "hi", "--wait"])
+    assert res.exit_code == 0, res.output
+    assert "delivered" in res.output
+
+
+def test_send_wait_reports_dropped_as_error(monkeypatch):
+    calls: list = []
+    monkeypatch.setattr(roost_cli, "_resolve", lambda ctx: ("http://cp", "tok", None))
+    monkeypatch.setattr(
+        roost_cli, "_client",
+        lambda url, token: _send_client(calls, inputs_state="dropped",
+                                        inputs_detail="kind cannot take stdin"))
+    monkeypatch.setattr(roost_cli.time, "sleep", lambda *_a: None)
+    res = CliRunner().invoke(roost_cli.send, ["j1", "hi", "--wait"])
+    assert res.exit_code != 0
+    assert "dropped" in res.output and "kind cannot take stdin" in res.output
+
+
+def test_send_terminal_job_errors(monkeypatch):
+    calls: list = []
+    monkeypatch.setattr(roost_cli, "_resolve", lambda ctx: ("http://cp", "tok", None))
+    monkeypatch.setattr(roost_cli, "_client",
+                        lambda url, token: _send_client(calls, post_status=409))
+    res = CliRunner().invoke(roost_cli.send, ["j1", "too late"])
+    assert res.exit_code != 0
+    assert "terminal" in res.output.lower()

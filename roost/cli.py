@@ -248,6 +248,14 @@ def _print_job(job: dict, verbose: bool = False) -> None:
         click.echo(f"queued:   {job['queued_sec']}s")
     if job.get("capable_workers") is not None:
         click.echo(f"capable:  {job['capable_workers']} online worker(s) satisfy requires")
+    # Interactive follow-up (R38): queued/delivered/dropped input counts, present
+    # only when the job has received any input.
+    inputs = job.get("inputs")
+    if isinstance(inputs, dict) and any(inputs.values()):
+        click.echo(
+            f"inputs:   {inputs.get('queued', 0)} queued · "
+            f"{inputs.get('delivered', 0)} delivered · "
+            f"{inputs.get('dropped', 0)} dropped")
     if job.get("exit_code") is not None:
         click.echo(f"exit:     {job['exit_code']}")
     if job.get("error"):
@@ -1931,6 +1939,63 @@ def cancel(ctx: click.Context, job_id: str, as_tree: bool) -> None:
         r.raise_for_status()
         count = r.json().get("cancelled", 1)
         click.echo(f"cancelled {count} job(s)" if as_tree else "cancelled")
+
+
+@cli.command()
+@click.argument("job_id")
+@click.argument("text", nargs=-1, required=True)
+@click.option("--wait", is_flag=True,
+              help="Poll until the input is delivered or dropped, then report which.")
+@click.pass_context
+def send(ctx: click.Context, job_id: str, text: tuple[str, ...], wait: bool) -> None:
+    """Send a follow-up message to a RUNNING job (interactive input, R38).
+
+    The message is queued on the control plane; the worker running the job delivers
+    it to the live process. DELIVERY DEPENDS ON THE JOB KIND:
+
+    \b
+      • command jobs  — delivered to the process's stdin (it must read stdin).
+      • claude/auto/codex/docker — NOT delivered live (the agent runs one-shot with
+        stdin closed; docker has no interactive stdin). The input is recorded as
+        `dropped` with a reason rather than silently lost.
+
+    A terminal job is rejected. Use `roost status <id>` (or --wait) to see the
+    queued/delivered/dropped outcome.
+    """
+    message = " ".join(text)
+    with _ctx_client(ctx) as c:
+        r = c.post(f"/jobs/{job_id}/input", json={"text": message})
+        if r.status_code == 404:
+            raise click.ClickException("job not found")
+        if r.status_code == 409:
+            raise click.ClickException(
+                "job is terminal (succeeded/failed/cancelled); cannot accept input")
+        if r.status_code == 413:
+            raise click.ClickException("message too large")
+        r.raise_for_status()
+        input_id = r.json().get("input_id")
+        click.echo(f"queued input {input_id} for job {job_id}")
+        if not wait:
+            return
+        # Poll the inputs list until this one leaves the queue (delivered/dropped).
+        deadline = time.time() + 30.0
+        while time.time() < deadline:
+            time.sleep(1.0)
+            ir = c.get(f"/jobs/{job_id}/inputs")
+            if ir.status_code != 200:
+                break
+            for item in ir.json().get("inputs", []):
+                if item.get("id") != input_id:
+                    continue
+                state = item.get("state")
+                if state == "delivered":
+                    click.echo(f"delivered ✓ ({item.get('detail') or 'to process'})")
+                    return
+                if state == "dropped":
+                    raise click.ClickException(
+                        f"dropped — {item.get('detail') or 'undeliverable'}")
+        click.echo("still queued (no worker has delivered it yet); "
+                   "check `roost status` later")
 
 
 @cli.command("jobs")

@@ -29,7 +29,7 @@ Every request: `Authorization: Bearer <token>`. The token is **mobile-scoped**:
 
 | Allowed | Denied (403) |
 |---|---|
-| All reads below, `POST /jobs`, `DELETE /jobs/{id}`, `POST /blobs`, `POST /publish`, `GET /publish` (§6) | enroll-token mint, pair-token mint/list/revoke, worker delete/prune/register, `/claude-creds`, worker lease plane, job finalize, `DELETE /publish/{slug}`, `DELETE /blobs/{id}` |
+| All reads below, `POST /jobs`, `POST /jobs/{id}/input`, `DELETE /jobs/{id}`, `POST /blobs`, `POST /publish`, `GET /publish` (§6) | enroll-token mint, pair-token mint/list/revoke, worker delete/prune/register, `/claude-creds`, worker lease plane, job finalize, `DELETE /publish/{slug}`, `DELETE /blobs/{id}` |
 
 Scope note (pinned by `tests/test_publish.py::test_mobile_scope_publishes_end_to_end`):
 `mobile` and `agent` scopes share ONE client permission set — the scope is an
@@ -121,6 +121,18 @@ Response = full job object; navigate to its `id` immediately. Job objects contai
 - Children: `GET /jobs/{id}/tree` (fixture `job_tree.json`).
 - Cancel: `DELETE /jobs/{id}` → `{"cancelled": <n>}`; `?tree=true` cascades.
 - Retry (client-side): re-`POST /jobs` with the failed job's `spec` fields from §3.
+- Follow-up input (R38): `POST /jobs/{id}/input` with `{"text": "<message>"}` →
+  `{"input_id", "job_id", "state": "queued"}`. A **terminal** job is rejected `409`;
+  empty text `400`; over **64 KiB** `413`. Poll `GET /jobs/{id}/inputs` →
+  `{"job_id", "state", "inputs": [{"id", "state": "queued"|"delivered"|"dropped",
+  "detail", "created_at", "delivered_at", "created_by"}]}` for the outcome (the same
+  counts ride `GET /jobs/{id}` as an optional `inputs: {queued, delivered, dropped}`
+  object, present only when the job has received input). **Delivery is honest about
+  kind:** only `command` jobs receive it live (written to the process stdin); agent
+  (`claude`/`auto`/`codex`) and `docker` jobs run with stdin closed, so their input is
+  marked `dropped` with a reason — show that, don't pretend it landed. (This is the
+  minimal v2 steering slice; a finished-session "follow up" is still a new job with
+  the parent's context per the mobile DESIGN.md §3.2 composer.)
 
 ### Log rendering
 
