@@ -985,6 +985,57 @@ def test_native_sandbox_flag_preferred_over_bwrap(monkeypatch):
     assert "bwrap" not in argv
 
 
+def test_oneshot_agent_keeps_bwrap_argv_intact_with_system_prompt(monkeypatch):
+    """[R30] _oneshot_agent must splice --append-system-prompt after `claude -p
+    <intent>`, NOT at a fixed argv[:3]. Under worker policy sandbox=bwrap with a
+    claude lacking --sandbox, _build_claude_argv returns a bwrap-wrapped argv
+    (`bwrap --ro-bind / / ... -- claude -p <intent> ...`); a fixed index 3 would
+    splice the flag into the middle of bwrap's own options and corrupt the jail."""
+    import roost.worker as wm
+
+    w = Worker("http://127.0.0.1:9", "tok", "w1", self_test=False)
+    w.policy = {"sandbox": "bwrap"}
+    # Force the bwrap branch: pretend the installed claude has no --sandbox flag.
+    monkeypatch.setattr(wm, "_claude_supports_sandbox", lambda: False)
+    monkeypatch.setattr(wm.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    captured: dict = {}
+
+    async def _capture(*argv, **kwargs):
+        captured["argv"] = list(argv)
+        # Bail out of _oneshot_agent cleanly: it catches FileNotFoundError around
+        # the spawn and returns early.
+        raise FileNotFoundError("stub — argv captured")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _capture)
+
+    asyncio.run(
+        w._oneshot_agent(
+            "job-A", "do the thing", system_prompt="SYS PROMPT", label="verify",
+            timeout_s=1.0,
+        )
+    )
+    asyncio.run(w.close())
+
+    argv = captured["argv"]
+    assert argv and argv[0] == "bwrap", f"expected a bwrap-wrapped argv, got {argv!r}"
+    # bwrap's own leading options must be untouched: `--ro-bind / /` intact.
+    assert argv[1:4] == ["--ro-bind", "/", "/"], (
+        "bwrap options corrupted — --append-system-prompt was spliced into the "
+        f"middle of bwrap's flags: {argv[1:6]!r}"
+    )
+    # The flag + value must sit AFTER `claude -p <intent>`, inside the jailed
+    # command (after bwrap's `--`), so claude actually receives the system prompt.
+    sep = argv.index("--")
+    ci = argv.index("claude")
+    assert ci > sep, "claude must appear after bwrap's `--` separator"
+    assert argv[ci:ci + 3] == ["claude", "-p", "do the thing"]
+    assert argv[ci + 3:ci + 5] == ["--append-system-prompt", "SYS PROMPT"], (
+        "--append-system-prompt must be inserted right after `claude -p <intent>`, "
+        f"not elsewhere: {argv[ci:ci + 6]!r}"
+    )
+
+
 def test_run_job_oversized_line_does_not_kill_relay():
     """[R11] One >64 KiB stdout line must not crash the relay task (pre-fix it
     raised ValueError out of stream.readline() and silently lost every
