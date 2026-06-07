@@ -65,6 +65,24 @@ final class TransferManager {
     private let store: FleetStore
     private(set) var transfers: [Transfer] = []
     private(set) var staged: [Blob] = []
+    private(set) var loadingStaged = false
+    private(set) var hasLoadedStaged = false
+    /// Classified failure from the last staged-blob load. A 404 (older CP without
+    /// `/blobs`) classifies as `.endpointMissing`, NOT a generic error — see
+    /// `stagedState`. Surfacing this is the point of R93: the old
+    /// `try? refreshStaged()` swallowed every load failure silently.
+    private(set) var stagedError: TransfersLoadError?
+
+    /// The single state for the staged-blob list. The decision (404 ⇒ unavailable,
+    /// transport ⇒ retryable error, never a silent empty) lives in RoostKit so it's
+    /// Linux-tested and the view is a dumb renderer.
+    var stagedState: TransfersListState {
+        TransfersListState.decide(
+            blobCount: staged.count,
+            loadError: stagedError,
+            loading: loadingStaged,
+            hasLoaded: hasLoadedStaged)
+    }
 
     struct PendingSend: Identifiable {
         let id = UUID()
@@ -219,9 +237,29 @@ final class TransferManager {
 
     // MARK: staged blobs (the fleet clipboard)
 
+    /// Reload the staged list, propagating failures to internal callers
+    /// (send/fetch want to know). State (`stagedError`, `hasLoadedStaged`) is
+    /// recorded on every outcome so the pane's `stagedState` can never go silent.
     func refreshStaged() async throws {
         guard let client = store.client else { return }
-        staged = try await client.listBlobs()
+        loadingStaged = true
+        defer { loadingStaged = false }
+        do {
+            staged = try await client.listBlobs()
+            stagedError = nil
+        } catch {
+            stagedError = TransfersLoadError.from(error)
+            hasLoadedStaged = true
+            throw error
+        }
+        hasLoadedStaged = true
+    }
+
+    /// Non-throwing reload for the pane's `.task`/Retry: failures are captured into
+    /// `stagedState` (loading/list/empty/unavailable/error) instead of being
+    /// swallowed by a bare `try?`.
+    func loadStaged() async {
+        try? await refreshStaged()
     }
 
     func stageFile(_ fileURL: URL) async {

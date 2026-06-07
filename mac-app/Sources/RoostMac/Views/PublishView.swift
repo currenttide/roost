@@ -24,8 +24,25 @@ final class PublishModel {
 
     private(set) var sites: [Site] = []
     private(set) var loadingSites = false
+    private(set) var hasLoadedSites = false
+    /// Classified failure from the last sites() load. A 404 (older CP without
+    /// `/publish`) classifies as `.endpointMissing`, NOT a generic error — see
+    /// `sitesState`. Surfacing this is the whole point of R93: the old
+    /// `(try? client.sites()) ?? sites` swallowed every failure silently.
+    private(set) var sitesError: PublishLoadError?
 
     init(store: FleetStore) { self.store = store }
+
+    /// The single state for the published-sites list. The decision (404 ⇒
+    /// unavailable, transport ⇒ retryable error, never a silent empty) lives in
+    /// RoostKit so it's Linux-tested and the view is a dumb renderer.
+    var sitesState: PublishListState {
+        PublishListState.decide(
+            siteCount: sites.count,
+            loadError: sitesError,
+            loading: loadingSites,
+            hasLoaded: hasLoadedSites)
+    }
 
     /// The slug the server will store, previewed live from `name`.
     var slugPreview: String { PublishSlug.normalize(name) }
@@ -88,7 +105,13 @@ final class PublishModel {
         guard let client = store.client else { return }
         loadingSites = true
         defer { loadingSites = false }
-        sites = (try? await client.sites()) ?? sites
+        do {
+            sites = try await client.sites()
+            sitesError = nil
+        } catch {
+            sitesError = PublishLoadError.from(error)
+        }
+        hasLoadedSites = true
     }
 
     func reset() {
@@ -234,9 +257,30 @@ struct PublishPane: View {
                 .buttonStyle(.link)
                 .font(.caption)
         }
-        if pub.sites.isEmpty {
+        // One state, one screen — the RoostKit decision guarantees a load failure
+        // (404 or transport) is surfaced rather than swallowed into "No sites yet."
+        switch pub.sitesState {
+        case .loading:
+            HStack { ProgressView().controlSize(.small); Text("Loading sites…").font(.caption).foregroundStyle(.secondary) }
+        case .unavailable:
+            Text("Publishing isn't available on this control plane (older server). Update the control plane to list and ship sites from here.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        case .error(let message):
+            VStack(alignment: .leading, spacing: 6) {
+                Label("Couldn't load published sites", systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                Text(message).font(.caption2).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Retry") { Task { await pub.refreshSites() } }
+                    .buttonStyle(.link)
+                    .font(.caption)
+            }
+        case .empty:
             Text("No sites yet.").font(.caption).foregroundStyle(.secondary)
-        } else {
+        case .list:
             ForEach(pub.sites) { site in
                 HStack(spacing: 8) {
                     Image(systemName: "globe").foregroundStyle(.secondary)
