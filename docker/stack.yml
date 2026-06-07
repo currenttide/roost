@@ -32,6 +32,20 @@ services:
       # an ntfy.sh topic or UnifiedPush webhook, the CP fire-and-forget POSTs a
       # notification as each job ends. Empty = no notifications.
       ROOST_NOTIFY_URL: ${ROOST_NOTIFY_URL:-}
+      # Per-model cost pricing (see docs/DEPLOY.md). JSON object mapping a model
+      # name/substring to {base_usd, per_mtok_usd}, layered over the built-in
+      # rate. Empty/malformed = today's single built-in rate (no change).
+      ROOST_PRICING: ${ROOST_PRICING:-}
+      # Agentic per-job narration in the panel story. Set to 1 to enable (adds a
+      # billed agent call per active job per tick). Empty = off.
+      ROOST_NARRATE: ${ROOST_NARRATE:-}
+      # Min seconds between re-narrations of one job (default 20, floored at 5).
+      # Only matters when ROOST_NARRATE=1. Empty = default.
+      ROOST_NARRATE_INTERVAL: ${ROOST_NARRATE_INTERVAL:-}
+      # Package source baked into the worker installer that GET /install.sh
+      # serves. Override to install workers from your fork. Empty = known-good
+      # default (git+https://github.com/roost-sh/roost@main).
+      ROOST_INSTALL_SOURCE: ${ROOST_INSTALL_SOURCE:-}
     ports:
       - "8787:8787"
     volumes:

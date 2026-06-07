@@ -39,6 +39,33 @@ curl -s http://127.0.0.1:8787/healthz                     # {"ok":true,...}
 The DB is a host-mounted volume, so it survives the rebuild — no data loss, workers stay
 enrolled.
 
+## Control-plane configuration reference
+
+Everything the control plane reads from the environment, with its default and effect.
+All are **optional** except `ROOST_TOKEN` (and even that only warns when unset). Each is
+read once at `roost serve` startup, so change one → recreate the CP container (the
+`docker compose … up -d` above) for it to take effect. The Docker deploy passes the
+optional toggles through `docker/stack.yml` (export the matching variable before
+`up`); `ROOST_DB` is wired via `--db` + the `ROOST_DATA_DIR` volume instead. For the
+in-depth recipe behind a row, follow its link.
+
+| Env var | Default | Effect when set |
+|---------|---------|-----------------|
+| `ROOST_TOKEN` | _(empty → no auth; logs a warning)_ | Shared admin bearer token. Also accepted via `--token`. See the auth notes in [`README.md`](../README.md). |
+| `ROOST_DB` | `~/.roost/roost.db` | SQLite path for all fleet state. `--db` overrides it; the Docker deploy sets `--db /data/roost.db` and host-mounts it via `ROOST_DATA_DIR`. |
+| `ROOST_PUBLISH_DOMAIN` | _(unset → LAN-only)_ | Public domain for published sites (e.g. `roost.pub`); turns on the host router + public-edge guard. `--publish-domain` overrides. → [Public publishing edge](#public-publishing-edge-roostpub) |
+| `ROOST_NOTIFY_URL` | _(unset → no notifications)_ | ntfy.sh topic / UnifiedPush webhook the CP fire-and-forget POSTs on every terminal job. `--notify-url` overrides. → [Mobile push notifications](#mobile-push-notifications-opt-in) |
+| `ROOST_PRICING` | _(unset → built-in single rate: `$0.018` base + `$6.00/Mtok`)_ | JSON object mapping model name/substring → `{base_usd, per_mtok_usd}`, layered over the default. Unset/blank/malformed → the built-in rate (no behavior change). → [Cost estimation pricing](#cost-estimation-pricing-per-model-optional) |
+| `ROOST_NARRATE` | _(unset → off; only the literal `1` enables)_ | Turn on agentic per-job narration in the panel/`/derived` story. Adds one billed agent call per active job per narration tick. |
+| `ROOST_NARRATE_INTERVAL` | `20` (seconds) | Minimum seconds between re-narrations of one active job. Clamped up to a `5`s floor (the sweep cadence); blank/garbage/NaN → `20`. No effect unless `ROOST_NARRATE=1`. |
+| `ROOST_INSTALL_SOURCE` | `git+https://github.com/roost-sh/roost@main` | Package source baked into the worker installer that `GET /install.sh` serves. Override to install workers from your own fork/branch. A per-run `--source` on the installer wins over this. |
+
+> **Admin-only endpoints** (require the `ROOST_TOKEN` bearer; a worker/scoped token gets
+> `403`, no token `401`): `GET /admin/backup` streams a consistent online DB snapshot
+> (see [Backup &amp; restore](#backup--restore-the-fleet-state)) and `GET /metrics`
+> serves Prometheus text exposition (see the Metrics section in
+> [`README.md`](../README.md#metrics-prometheus)).
+
 ## Verify deployed == repo (drift check)
 
 ```bash
