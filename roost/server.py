@@ -1463,6 +1463,189 @@ def _sweep(db_path: Path) -> dict[str, int]:
     return counts
 
 
+# ---------- Metrics (Prometheus text exposition, R35) ----------
+
+# Process-local counters for quantities the DB cannot reconstruct after a restart.
+# These reset to 0 when the control plane process restarts (documented in the
+# /metrics HELP text and the README ops note). Everything else below is derived
+# straight from the DB so values survive CP restarts.
+_PROCESS_COUNTERS: dict[str, float] = {
+    "schedule_beats_total": 0.0,  # sweep-loop schedule ticks since this process started
+}
+
+# All job states we always emit a series for, so a scraper sees a stable set of
+# label values (0 when none) rather than series appearing/disappearing.
+_JOB_STATES = ("queued", "assigned", "running", "succeeded", "failed", "cancelled")
+
+
+def _escape_label_value(value: str) -> str:
+    """Escape a Prometheus label value per the text exposition format: backslash,
+    double-quote, and newline. (Our label values are simple state strings, but we
+    escape defensively so a future label can't produce malformed output.)"""
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+
+def _collect_metrics(db_path: Path) -> dict[str, Any]:
+    """Gather all metric values in a single DB pass (plus process counters).
+
+    Returns a plain dict the renderer turns into text — split out so tests can
+    assert exact numbers against a seeded DB without parsing text."""
+    now = time.time()
+    with _connect(db_path) as conn:
+        job_states = {s: 0 for s in _JOB_STATES}
+        for r in conn.execute("SELECT state, COUNT(*) AS n FROM jobs GROUP BY state"):
+            # Unknown/legacy states (shouldn't happen) are surfaced too, so the
+            # total is honest rather than silently dropped.
+            job_states[r["state"]] = int(r["n"])
+        workers_total = int(
+            conn.execute("SELECT COUNT(*) AS n FROM workers").fetchone()["n"]
+        )
+        # "Online" mirrors placement's own liveness test (_online_capable_ids):
+        # not revoked, not marked offline, and seen within STALE_AFTER.
+        workers_online = int(
+            conn.execute(
+                "SELECT COUNT(*) AS n FROM workers "
+                "WHERE revoked=0 AND status != 'offline' AND last_seen >= ?",
+                (now - STALE_AFTER,),
+            ).fetchone()["n"]
+        )
+        brow = conn.execute(
+            "SELECT COUNT(*) AS n, COALESCE(SUM(size), 0) AS bytes FROM blobs"
+        ).fetchone()
+        blobs_count = int(brow["n"])
+        blobs_bytes = int(brow["bytes"])
+        sites_count = int(
+            conn.execute("SELECT COUNT(*) AS n FROM sites").fetchone()["n"]
+        )
+        schedules_count = int(
+            conn.execute("SELECT COUNT(*) AS n FROM schedules").fetchone()["n"]
+        )
+        schedules_enabled = int(
+            conn.execute(
+                "SELECT COUNT(*) AS n FROM schedules WHERE enabled=1"
+            ).fetchone()["n"]
+        )
+        # Lease expirations are derivable from the lifecycle events the sweeper
+        # writes to job_logs. This survives a CP restart but is NOT strictly
+        # monotonic forever: job_logs are pruned after LOG_MAX_AGE_SEC, so very
+        # old expirations age out. Documented in the HELP text below.
+        lease_expirations = int(
+            conn.execute(
+                "SELECT COUNT(*) AS n FROM job_logs "
+                "WHERE stream='event' AND data LIKE '%\"lease_expired\"%'"
+            ).fetchone()["n"]
+        )
+    return {
+        "job_states": job_states,
+        "queue_depth": job_states.get("queued", 0),
+        "workers_total": workers_total,
+        "workers_online": workers_online,
+        "blobs_count": blobs_count,
+        "blobs_bytes": blobs_bytes,
+        "sites_count": sites_count,
+        "schedules_count": schedules_count,
+        "schedules_enabled": schedules_enabled,
+        "lease_expirations_total": lease_expirations,
+        "schedule_beats_total": int(_PROCESS_COUNTERS["schedule_beats_total"]),
+    }
+
+
+def _render_metrics(m: dict[str, Any]) -> str:
+    """Render gathered metrics as Prometheus text exposition (version 0.0.4).
+
+    Every series gets a ``# HELP`` and ``# TYPE`` line; the body ends with a
+    trailing newline (scrapers reject output without one)."""
+    out: list[str] = []
+
+    def block(name: str, mtype: str, help_text: str, samples: list[tuple[str, float]]):
+        out.append(f"# HELP {name} {help_text}")
+        out.append(f"# TYPE {name} {mtype}")
+        for labels, value in samples:
+            metric = f"{name}{{{labels}}}" if labels else name
+            # Integers render without a trailing .0; gauges/counters here are all
+            # whole numbers, but format defensively for any future float.
+            v = int(value) if float(value).is_integer() else value
+            out.append(f"{metric} {v}")
+
+    block(
+        "roost_jobs",
+        "gauge",
+        "Number of jobs by state (derived from the jobs table).",
+        [
+            (f'state="{_escape_label_value(s)}"', m["job_states"][s])
+            for s in _JOB_STATES
+        ],
+    )
+    block(
+        "roost_queue_depth",
+        "gauge",
+        "Jobs currently waiting to be placed (state=queued).",
+        [("", m["queue_depth"])],
+    )
+    block(
+        "roost_workers_online",
+        "gauge",
+        "Workers seen within the staleness window and not revoked/offline.",
+        [("", m["workers_online"])],
+    )
+    block(
+        "roost_workers_total",
+        "gauge",
+        "Total worker rows known to the control plane (any state).",
+        [("", m["workers_total"])],
+    )
+    block(
+        "roost_blobs_count",
+        "gauge",
+        "Staged blobs (any state) in the blob store.",
+        [("", m["blobs_count"])],
+    )
+    block(
+        "roost_blobs_bytes",
+        "gauge",
+        "Total size in bytes of staged blobs.",
+        [("", m["blobs_bytes"])],
+    )
+    block(
+        "roost_sites_count",
+        "gauge",
+        "Published sites.",
+        [("", m["sites_count"])],
+    )
+    block(
+        "roost_schedules_count",
+        "gauge",
+        "Interval schedules defined (enabled or not).",
+        [("", m["schedules_count"])],
+    )
+    block(
+        "roost_schedules_enabled",
+        "gauge",
+        "Interval schedules currently enabled.",
+        [("", m["schedules_enabled"])],
+    )
+    block(
+        "roost_lease_expirations_total",
+        "counter",
+        "Job lease expirations recorded in job_logs. DB-derived (survives "
+        "restart) but not monotonic forever: log rows are pruned after ~24h.",
+        [("", m["lease_expirations_total"])],
+    )
+    block(
+        "roost_schedule_beats_total",
+        "counter",
+        "Schedule sweep ticks since this process started (process-local; "
+        "resets on control-plane restart).",
+        [("", m["schedule_beats_total"])],
+    )
+    return "\n".join(out) + "\n"
+
+
+def _metrics_text(db_path: Path) -> str:
+    """Convenience: collect + render in one call (used by the route and tests)."""
+    return _render_metrics(_collect_metrics(db_path))
+
+
 # ---------- Enrollment ----------
 
 
@@ -2126,6 +2309,18 @@ def create_app(
             raise HTTPException(404, "job not found")
         job = (await asyncio.to_thread(_annotate_liveness, db, [job]))[0]
         return _derive_run(job)
+
+    @app.get("/metrics", dependencies=[Depends(require_admin)])
+    async def metrics_endpoint():
+        """Prometheus text exposition (R35) — scrapeable fleet metrics, hand-rolled
+        (no prometheus_client dependency). Admin-only, like the other janitorial
+        routes. Values are derived from the DB so they survive a CP restart;
+        process-local counters are labelled as such in their HELP text."""
+        body = await asyncio.to_thread(_metrics_text, db)
+        # Prometheus' canonical content type for the 0.0.4 text format.
+        return PlainTextResponse(
+            body, media_type="text/plain; version=0.0.4; charset=utf-8"
+        )
 
     @app.get("/jobs/{job_id}", dependencies=[Depends(require_any)])
     async def get_job_endpoint(job_id: str):
@@ -2812,6 +3007,9 @@ async def _sweep_loop(db_path: Path) -> None:
         # Schedule tick: enqueue jobs for due interval schedules (R8).
         try:
             await asyncio.to_thread(_tick_schedules, db_path)
+            # Process-local beat counter for /metrics (resets on restart; the DB
+            # has no monotonic tick record). One increment per sweep tick.
+            _PROCESS_COUNTERS["schedule_beats_total"] += 1
         except Exception as e:  # noqa: BLE001
             print(f"[roost] schedule tick error: {e}", flush=True)
         if narrate:

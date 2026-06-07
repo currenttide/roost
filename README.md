@@ -205,6 +205,39 @@ The panel, the terminal dashboard (`scripts/fleet`), and the MCP inbox all rende
 single `GET /derived` model, so they never disagree. Set `ROOST_NARRATE=1` on the control
 plane to add agentic per-job narration to the story.
 
+### Metrics (Prometheus)
+
+The control plane exposes `GET /metrics` in Prometheus text exposition format
+(`text/plain; version=0.0.4`) — no extra dependency, hand-rolled. It's **admin-only**:
+send the admin token as a bearer header (a worker or scoped client token gets `403`; no
+token gets `401`).
+
+```
+curl -H "Authorization: Bearer <admin-token>" http://<control-plane-host>:8787/metrics
+```
+
+Series include `roost_jobs{state="…"}` (queued/assigned/running/succeeded/failed/cancelled),
+`roost_queue_depth`, `roost_workers_online`, `roost_workers_total`, `roost_blobs_count`,
+`roost_blobs_bytes`, `roost_sites_count`, `roost_schedules_count`/`roost_schedules_enabled`,
+`roost_lease_expirations_total`, and `roost_schedule_beats_total`. All values are derived
+from the DB so they survive a control-plane restart — except `roost_schedule_beats_total`,
+which is a process-local counter that resets on restart (the DB keeps no monotonic tick
+record); `roost_lease_expirations_total` is DB-derived but ages out with log retention
+(~24h). Each metric's `# HELP` line spells this out.
+
+A minimal scrape config (Prometheus passes the bearer via `authorization`):
+
+```yaml
+scrape_configs:
+  - job_name: roost
+    metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials: <admin-token>
+    static_configs:
+      - targets: ["control-plane-host:8787"]
+```
+
 ---
 
 ## Talk to your fleet (MCP)

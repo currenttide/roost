@@ -1593,3 +1593,156 @@ def test_publish_middleware_passthrough_and_routing(tmp_path: Path):
         assert c.get("/", headers={"host": "nope.roost.pub"}).status_code == 404
         # A non-publish host still reaches the API (auth-gated, not routed to publish).
         assert c.get("/healthz", headers={"host": "192.168.1.193:8787"}).status_code == 200
+
+
+# ---------- /metrics (Prometheus text exposition, R35) ----------
+
+
+def _parse_prometheus(text: str) -> dict[str, dict]:
+    """Tiny exposition parser for assertions: returns
+    {metric_name: {"help": str, "type": str, "samples": {labels_str: float}}}.
+    Validates that every sample line belongs to a series that already declared
+    HELP and TYPE, and that no metric declares HELP/TYPE more than once."""
+    import re
+
+    metrics: dict[str, dict] = {}
+    sample_re = re.compile(r"^(?P<name>[a-zA-Z_:][a-zA-Z0-9_:]*)(?P<labels>\{.*\})? (?P<value>.+)$")
+    for line in text.split("\n"):
+        if line == "":
+            continue
+        if line.startswith("# HELP "):
+            _, _, rest = line.partition("# HELP ")
+            name, _, help_text = rest.partition(" ")
+            assert name not in metrics, f"duplicate HELP for {name}"
+            metrics[name] = {"help": help_text, "type": None, "samples": {}}
+        elif line.startswith("# TYPE "):
+            _, _, rest = line.partition("# TYPE ")
+            name, _, mtype = rest.partition(" ")
+            assert name in metrics, f"TYPE before HELP for {name}"
+            assert metrics[name]["type"] is None, f"duplicate TYPE for {name}"
+            metrics[name]["type"] = mtype
+        elif line.startswith("#"):
+            raise AssertionError(f"unexpected comment line: {line!r}")
+        else:
+            m = sample_re.match(line)
+            assert m, f"unparseable sample line: {line!r}"
+            name = m.group("name")
+            # The series (possibly a labelled child of a family) must trace back
+            # to a declared family name.
+            assert name in metrics, f"sample for undeclared metric: {name!r}"
+            assert metrics[name]["type"] is not None, f"sample before TYPE for {name}"
+            labels = m.group("labels") or ""
+            metrics[name]["samples"][labels] = float(m.group("value"))
+    return metrics
+
+
+def test_metrics_format_valid(client: TestClient):
+    """[R35] /metrics returns valid Prometheus 0.0.4 text exposition: correct
+    content type, HELP+TYPE per series, a trailing newline, and >=8 series."""
+    r = client.get("/metrics")
+    assert r.status_code == 200, r.text
+    assert r.headers["content-type"].startswith("text/plain")
+    assert "version=0.0.4" in r.headers["content-type"]
+    body = r.text
+    assert body.endswith("\n"), "exposition must end with a trailing newline"
+
+    metrics = _parse_prometheus(body)
+    # Every declared metric has both HELP and TYPE.
+    for name, meta in metrics.items():
+        assert meta["help"], f"{name} missing HELP text"
+        assert meta["type"] in ("gauge", "counter"), f"{name} bad TYPE {meta['type']!r}"
+    # The core series we promised are present.
+    expected = {
+        "roost_jobs", "roost_queue_depth", "roost_workers_online",
+        "roost_workers_total", "roost_blobs_count", "roost_blobs_bytes",
+        "roost_sites_count", "roost_lease_expirations_total",
+        "roost_schedule_beats_total",
+    }
+    assert expected <= set(metrics), f"missing series: {expected - set(metrics)}"
+    assert len(metrics) >= 8
+    # roost_jobs is a labelled family with one sample per state.
+    job_samples = metrics["roost_jobs"]["samples"]
+    assert any('state="queued"' in lbl for lbl in job_samples)
+    assert len(job_samples) == 6  # all six states always emitted
+
+
+def test_metrics_values_match_seeded_db(client: TestClient):
+    """[R35] seed jobs/workers/blobs/sites/schedules in known states and assert
+    /metrics reports the exact numbers (DB-derived)."""
+    now = time.time()
+    with server._connect(client.app.state.db_path) as conn:
+        for st, n in [("queued", 3), ("running", 2), ("succeeded", 5),
+                      ("failed", 1)]:
+            for i in range(n):
+                conn.execute(
+                    "INSERT INTO jobs(id, spec, requires, state, created_at) "
+                    "VALUES (?,?,?,?,?)",
+                    (f"{st}-{i}", "{}", "{}", st, now),
+                )
+        # 2 online, 1 stale (old last_seen), 1 revoked → only 2 count online,
+        # but all 4 count toward total.
+        conn.execute("INSERT INTO workers(id,name,capabilities,registered_at,"
+                     "last_seen,status) VALUES ('w1','w1','{}',?,?,'idle')", (now, now))
+        conn.execute("INSERT INTO workers(id,name,capabilities,registered_at,"
+                     "last_seen,status) VALUES ('w2','w2','{}',?,?,'busy')", (now, now))
+        conn.execute("INSERT INTO workers(id,name,capabilities,registered_at,"
+                     "last_seen,status) VALUES ('w3','w3','{}',?,?,'idle')",
+                     (now, now - 999))
+        conn.execute("INSERT INTO workers(id,name,capabilities,registered_at,"
+                     "last_seen,status,revoked) VALUES ('w4','w4','{}',?,?,'idle',1)",
+                     (now, now))
+        conn.execute("INSERT INTO blobs(id,name,size,created_at,expires_at) "
+                     "VALUES ('b1','f',100,?,?)", (now, now + 999))
+        conn.execute("INSERT INTO blobs(id,name,size,created_at,expires_at) "
+                     "VALUES ('b2','g',250,?,?)", (now, now + 999))
+        conn.execute("INSERT INTO sites(slug,created_at,updated_at) "
+                     "VALUES ('s1',?,?)", (now, now))
+        conn.execute("INSERT INTO schedules(id,spec,interval_sec,enabled,"
+                     "next_run_at,created_at) VALUES ('sc1','{}',60,1,?,?)", (now, now))
+        conn.execute("INSERT INTO schedules(id,spec,interval_sec,enabled,"
+                     "next_run_at,created_at) VALUES ('sc2','{}',60,0,?,?)", (now, now))
+        # Two lease-expired lifecycle events (what the sweeper writes).
+        conn.execute("INSERT INTO job_logs(job_id,seq,stream,data,ts) VALUES "
+                     "('queued-0',1,'event',?,?)",
+                     (json.dumps({"type": "lease_expired", "attempt": 0}), now))
+        conn.execute("INSERT INTO job_logs(job_id,seq,stream,data,ts) VALUES "
+                     "('queued-0',2,'event',?,?)",
+                     (json.dumps({"type": "lease_expired", "attempt": 1}), now))
+
+    metrics = _parse_prometheus(client.get("/metrics").text)
+
+    def sample(name, labels=""):
+        key = "{" + labels + "}" if labels else ""
+        return metrics[name]["samples"][key]
+
+    assert sample("roost_jobs", 'state="queued"') == 3
+    assert sample("roost_jobs", 'state="running"') == 2
+    assert sample("roost_jobs", 'state="succeeded"') == 5
+    assert sample("roost_jobs", 'state="failed"') == 1
+    assert sample("roost_jobs", 'state="cancelled"') == 0
+    assert sample("roost_queue_depth") == 3
+    assert sample("roost_workers_total") == 4
+    assert sample("roost_workers_online") == 2
+    assert sample("roost_blobs_count") == 2
+    assert sample("roost_blobs_bytes") == 350
+    assert sample("roost_sites_count") == 1
+    assert sample("roost_schedules_count") == 2
+    assert sample("roost_schedules_enabled") == 1
+    assert sample("roost_lease_expirations_total") == 2
+
+
+def test_metrics_requires_admin(client: TestClient):
+    """[R35] /metrics is admin-only: a worker credential is rejected (403) and a
+    missing/invalid bearer is rejected (401)."""
+    _, cred = _enroll_worker(client, {"tools": ["python3"]})
+    # Worker credential → 403 (matches require_admin on other janitorial routes).
+    r = client.get("/metrics", headers={"Authorization": f"Bearer {cred}"})
+    assert r.status_code == 403, r.text
+    # Missing bearer → 401.
+    r = client.get("/metrics", headers={"Authorization": ""})
+    assert r.status_code == 401, r.text
+    # Invalid bearer → 401.
+    r = client.get("/metrics", headers={"Authorization": "Bearer nope"})
+    assert r.status_code == 401, r.text
+    # Admin (default fixture headers) → 200.
+    assert client.get("/metrics").status_code == 200
