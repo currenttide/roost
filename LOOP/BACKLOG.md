@@ -99,7 +99,7 @@ Done-when: API.md §6 documents the one-shot path; `record_fixtures.py` records 
 Surface: backend/feature. North star #2: a production fleet needs scrapeable metrics; today the only visibility is CLI polling. Hand-rolled Prometheus text exposition (no client library — dependency-light rule).
 Done-when: `GET /metrics` (admin auth) returns valid Prometheus text with ≥8 meaningful series (jobs by state, queue depth, workers online/total, lease expirations, schedule beats, blob count/bytes); values read from DB so they survive CP restarts; README ops section documents it; format + seeded-value tests; pytest green.
 
-### R36. Published-site listing pagination — `open` `self-promoted` `feature`
+### R36. Published-site listing pagination — `done` *(2026-06-06, PR #47)* `self-promoted` `feature`
 Surface: backend/robustness. North star #2 (bounded resources): `/publish` list is unbounded (server.py ~2150) — a fleet that publishes for months returns megabytes per list call.
 Done-when: list accepts `limit`/`offset` with a sane default cap; response shape stays additive (existing clients keep working); CLI passes the flags through; boundary tests; mobile contract unaffected or additively extended; pytest green.
 

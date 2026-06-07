@@ -1099,3 +1099,26 @@ Entries are written by the loop; humans read, never need to edit.
   Iteration #5 dispatched next: R36 pagination, R37 push notifications, R38
   interactive follow-up — the last three Ranked items; Ranked will be dry of
   non-security items after this wave → replenishment cycle #7 follows.
+
+## 2026-06-06 ~23:45 UTC — R36: published-site listing pagination
+- Verdict: shipped
+- Branch/PR: loop/r36-publish-list-pagination / https://github.com/currenttide/roost/pull/47 (merged a29d9a2)
+- What changed: GET /publish paginates — limit (default 100, max 500, 422 beyond)
+  + offset at the SQL layer (publish.py list_sites/count_sites); CLI --list gains
+  --limit/--offset with a "showing N of TOTAL" hint. SHAPE DECISION (documented):
+  bare JSON array kept + additive X-Total-Count header — every caller audited first
+  (CLI r.json(), API.md §6c "Array of Site", record_fixtures, iOS/Android [Site]
+  decoders; MCP doesn't touch /publish); wrapping would have broken all of them.
+  API.md §6c additively documents params + header.
+- Evidence:
+  - `python -m pytest -q` → 574 passed (+8 boundary tests: empty, exactly-limit,
+    7→3+3+1 paging, offset-past-end, 501→422/500→200, invalid params, ordering)
+  - fixture-drift guard 24/24; publish_list.json shape unchanged
+- Judge: approve (2 rounds, both approve) — re-ran pytest, audited all callers incl.
+  both mobile clients, validated every boundary
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only).
+  Two judge-side slips logged by the implementer: fenced MODEL line omitted both
+  rounds; one summary line misclaimed LOOP/ files changed (git status disproved —
+  diff is exactly 5 files). Implementer corrections of judge narration are working
+  as designed.
+- Notes: iteration #5 slot 1. R37 (push) + R38 (interactive input) still in flight.
