@@ -770,16 +770,24 @@ def _goal_display(job: dict) -> str:
     # Agent goals are already glanceable — pass through unchanged (== goal).
     if spec.get("task") or spec.get("intent"):
         return _goal_text(job)
-    text = _goal_text(job)  # str-safe; command coerced (join for argv, str() else)
-    if not text:
-        return text
+    full = _goal_text(job)  # str-safe; command coerced (join for argv, str() else)
+    if not full:
+        return full
     # Peel `cd …` then any run of leading `NAME=value` assignments off the front.
+    text = full
     prev = None
     while prev != text:
         prev = text
         text = _GOAL_CD_PREFIX.sub("", text, count=1)
         text = _GOAL_ASSIGN_PREFIX.sub("", text, count=1)
     text = text.strip()
+    # R89: a setup-only / copy-paste goal can be ENTIRELY strippable prefixes
+    # (`cd ~/x && `, `A=1 B=2 `, `A=1 && B=2 && `) — the peel loop then empties
+    # the string. Blanking the verdict bar for a non-empty `goal` violates the
+    # R86 contract ("never return empty when goal is non-empty") and renders
+    # worse than just showing the raw text. Fall back to the un-peeled goal.
+    if not text:
+        text = full
     if len(text) > GOAL_DISPLAY_MAX:
         text = text[: GOAL_DISPLAY_MAX - 1].rstrip() + "…"  # … ellipsis
     return text

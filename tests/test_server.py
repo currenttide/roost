@@ -1194,6 +1194,57 @@ def test_goal_display_on_empty_spec_is_str():
     assert isinstance(server._goal_display({"spec": None}), str)
 
 
+@pytest.mark.parametrize("command", [
+    "cd ~/roost-oss && ",          # setup-only / trailing separator
+    "cd /tmp && cd /var && ",      # chained cd, trailing separator
+    "A=1 B=2 ",                    # only env assignments + trailing ws
+    "A=1 && B=2 && ",              # chained assignments, trailing sep
+])
+def test_goal_display_blank_for_nonempty_goal(command):
+    """R89: a setup-only / copy-paste goal made ENTIRELY of strippable prefixes
+    (`cd …`/env assignments) used to peel down to "" — blanking the verdict bar
+    while `goal` is non-empty, violating R86's "never return empty when goal is
+    non-empty" contract. The peel result, when empty, falls back to the raw goal
+    text (72-char-capped) so the bar always shows *something* for a real job."""
+    job = {"spec": {"kind": "command", "command": command}}
+    goal = server._goal_text(job)          # the non-empty underlying goal
+    disp = server._goal_display(job)
+    assert goal != "", "precondition: the goal itself is non-empty"
+    assert disp != "", (
+        f"goal_display blanked a non-empty goal {command!r}: {disp!r}")
+    # The fallback is the un-peeled goal text, not some synthetic placeholder.
+    assert disp == goal
+
+
+def test_goal_display_all_prefix_fallback_is_72_capped():
+    """R89: the all-strippable fallback still respects the verdict-bar budget — a
+    very long copy-paste of only assignments truncates to 72 chars with the
+    ellipsis, exactly like a normal long summary (no uncapped blow-out)."""
+    long_all_prefix = "A=1 && " * 20  # 140 chars, all peelable
+    out = server._goal_display({"spec": {"command": long_all_prefix}})
+    assert out != ""
+    assert len(out) == server.GOAL_DISPLAY_MAX and out.endswith("…")
+
+
+@pytest.mark.parametrize("command", [
+    "cd ~/x && ",                  # peel-everything cd
+    "A=1 && B=2 && ",              # peel-everything chained assignments
+    "  cd /a && cd /b &&  ",       # surrounding whitespace + chained cd
+])
+def test_goal_display_peel_empties_dict_spec_never_blanks(command):
+    """R89: the real (dict-wrapped) peel-everything shape — the only shape that
+    can actually carry a non-empty goal — must never blank the verdict bar. The
+    fallback shows the raw goal text (the un-peeled command). A non-dict / drifted
+    at-rest spec is the empty-goal case owned by the `_goal_text`/`_job_kind`
+    isinstance hardening (R88); `_goal_display` already pre-filters the spec with
+    isinstance for the agent-passthrough branch, so it does not regress that."""
+    job = {"spec": {"command": command}}
+    disp = server._goal_display(job)
+    assert disp != "", f"blanked a non-empty peel-everything goal {command!r}"
+    # The fallback shows the raw goal text (72-char-capped), not a placeholder.
+    assert disp == server._goal_text(job)
+
+
 def test_derive_run_includes_goal_display(client: TestClient):
     """The additive field appears on /derived rows, glanceable for a command job
     while `goal` stays the full text (contract preserved)."""
