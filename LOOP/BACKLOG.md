@@ -74,7 +74,7 @@ Done-when: `kind` enum includes `"auto"` with description; INTEGRATIONS.md updat
 Surface: docs. A6 survey cycle #4 (judge-approved, fast-tracked per protocol). `docs/INTEGRATIONS.md` tool table lists 9 tools; `roost/mcp.py` TOOL_IMPL defines 16. Missing: `stage_file`, `send_file`, `fetch_file`, `list_staged`, `roost_schedule`, `roost_wait` (collapsed into another row). File transfer and scheduling are invisible to new MCP users.
 Done-when: tool table contains every tool in TOOL_IMPL with one-line descriptions matching their mcp.py docstrings; re-verify against current master (R27 already touched the roost_submit row); pytest green (docs-drift ratchet stays 0).
 
-### R29. `roost history` and `roost prune-workers` undocumented — `open` `self-promoted`
+### R29. `roost history` and `roost prune-workers` undocumented — `done` *(2026-06-06, PR #38)* `self-promoted`
 Surface: docs. A6 survey cycle #4 (judge-approved, fast-tracked per protocol). Both commands fully implemented (cli.py:1916, cli.py:1029) but absent from README.md's "Inspect & control runs" table and docs/INTEGRATIONS.md. `roost history --failed` is the natural "what went wrong this week" entry point and no user can discover it.
 Done-when: README.md inspect/control table includes `roost history [--failed]` and `roost prune-workers`; INTEGRATIONS.md CLI section mentions `roost history`; pytest green (docs-drift ratchet stays 0).
 

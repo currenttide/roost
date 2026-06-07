@@ -876,3 +876,20 @@ Entries are written by the loop; humans read, never need to edit.
   DEVIATION (logged): the worktree env had no Task tool, so the judge ran as an
   independent `claude -p --model sonnet` process (read-only, re-ran pytest
   itself) — functionally equivalent, dispatch mechanism differed.
+
+## 2026-06-06 ~22:15 UTC — R29: document roost history + prune-workers
+- Verdict: shipped
+- Branch/PR: loop/r29-history-prune-docs / https://github.com/currenttide/roost/pull/38 (merged 90b73fe)
+- What changed: docs-only. README.md "Inspect & control runs" table gains
+  `roost history [--failed]` and `roost prune-workers [--days N]`;
+  docs/INTEGRATIONS.md CLI/cron section gains a `roost history --failed`
+  one-liner. All claims truth-checked against cli.py implementations
+  (defaults --limit 20 / --days 7, admin-only noted).
+- Evidence:
+  - `python -m pytest -q` → 541 passed (docs-only)
+- Judge: approve (round 1) — re-ran pytest, truth-checked every flag/default
+  against cli.py
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6
+- Notes: iteration #2, slot 2 of 3. Single-line INTEGRATIONS.md edit inside the
+  CLI block avoided conflict with R28's concurrent tool-table edit — merged
+  clean, no rebase. Replenish-prep (slot 3) still in flight.
