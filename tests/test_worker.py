@@ -2497,6 +2497,398 @@ def test_r72_run_job_docker_timeout_teardown_completes_when_daemon_wedged(
 
 
 # ---------------------------------------------------------------------------
+# [R99] Process-safety branch coverage for the kill paths (worker.py 1205-1310):
+#   _kill_aux_procs (sync) — the two-level SIGKILL fallback (os.killpg, then
+#     proc.kill() on ProcessLookupError/PermissionError/OSError), the early
+#     return when no aux procs are tracked, and the already-exited skip.
+#   _kill_active_job (sync seams) — the early return for an unknown/finished
+#     job_id, and the main-process killpg→proc.kill() fallback.
+#   _kill_active_job (async seam) — the docker spawn-FAILURE path (the outer
+#     `except Exception`, distinct from R72's wedged-daemon TIMEOUT path).
+# R72's docker-timeout tests above are the adjacent precedent; these add the
+# sync fallbacks and the spawn-failure arm. Each stubs the os.killpg / proc.kill
+# seams and asserts WHICH calls fired in WHICH order — not just that we returned.
+
+
+class _R99FakeProc:
+    """A fake child process with a real-ish pid so the os.killpg branch runs.
+
+    Records kill() calls. `returncode` defaults to None (alive) so the kill path
+    is taken; set it to an int to model an already-exited proc that must be
+    SKIPPED. kill() optionally raises to exercise the inner fallback's own except."""
+
+    def __init__(self, *, pid: int = 555001, returncode=None, kill_raises=None):
+        self.pid = pid
+        self.returncode = returncode
+        self.kill_raises = kill_raises
+        self.kill_calls = 0
+
+    def kill(self):
+        self.kill_calls += 1
+        if self.kill_raises is not None:
+            raise self.kill_raises
+
+
+@pytest.fixture()
+def _r99_killpg(monkeypatch):
+    """Stub os.killpg/os.getpgid on the worker module so no real signal is sent.
+
+    Returns a recorder. By default os.killpg SUCCEEDS (records the call). A test
+    can install `recorder.raise_with = <exc instance>` to make every os.killpg
+    raise that exception (driving the proc.kill() fallback). os.getpgid is stubbed
+    to echo the pid so the killpg argument is the pid we can assert on."""
+
+    class _Rec:
+        def __init__(self):
+            self.killpg_pids: list[int] = []
+            self.raise_with = None
+
+    rec = _Rec()
+
+    def fake_getpgid(pid):
+        return pid
+
+    def fake_killpg(pgid, sig):
+        rec.killpg_pids.append(pgid)
+        if rec.raise_with is not None:
+            raise rec.raise_with
+
+    monkeypatch.setattr(wmod_R72.os, "getpgid", fake_getpgid)
+    monkeypatch.setattr(wmod_R72.os, "killpg", fake_killpg)
+    return rec
+
+
+def _r99_worker():
+    return Worker("http://127.0.0.1:9", "tok", "w1", self_test=False)
+
+
+# ---- _kill_aux_procs: sync wins first ----
+
+
+def test_r99_kill_aux_procs_no_procs_is_noop(_r99_killpg):
+    """Early return when nothing is tracked for the job: no killpg, no error."""
+    w = _r99_worker()
+    # job with no entry at all, and a job with an empty set — both early-return.
+    w._kill_aux_procs("absent", "cancelled")
+    w._aux_procs["empty"] = set()
+    w._kill_aux_procs("empty", "cancelled")
+    assert _r99_killpg.killpg_pids == []
+
+
+def test_r99_kill_aux_procs_killpg_path_for_live_proc(_r99_killpg):
+    """A live aux proc is SIGKILLed via its process group (os.killpg succeeds);
+    proc.kill() is NOT the fallback when killpg works."""
+    w = _r99_worker()
+    p = _R99FakeProc(pid=600100, returncode=None)
+    w._aux_procs["j1"] = {p}
+    w._kill_aux_procs("j1", "cancelled")
+    assert _r99_killpg.killpg_pids == [600100]  # killpg fired on the proc's pid
+    assert p.kill_calls == 0                     # fallback NOT taken on success
+
+
+def test_r99_kill_aux_procs_skips_already_exited_proc(_r99_killpg):
+    """An aux proc that already exited (returncode set) is left alone — neither
+    os.killpg nor proc.kill() is called for it. Guards the `returncode is None`
+    branch (mutation: dropping the guard would killpg a dead proc)."""
+    w = _r99_worker()
+    dead = _R99FakeProc(pid=600200, returncode=0)
+    w._aux_procs["j2"] = {dead}
+    w._kill_aux_procs("j2", "cancelled")
+    assert _r99_killpg.killpg_pids == []
+    assert dead.kill_calls == 0
+
+
+@pytest.mark.parametrize(
+    "exc", [ProcessLookupError(), PermissionError(), OSError("boom")]
+)
+def test_r99_kill_aux_procs_falls_back_to_proc_kill_when_killpg_raises(
+    _r99_killpg, exc
+):
+    """When os.killpg raises ProcessLookupError/PermissionError/OSError, the code
+    falls back to proc.kill(). Asserts the killpg was ATTEMPTED first, then the
+    fallback fired (mutation: removing the except arm would let the exc escape)."""
+    w = _r99_worker()
+    _r99_killpg.raise_with = exc
+    p = _R99FakeProc(pid=600300, returncode=None)
+    w._aux_procs["j3"] = {p}
+    w._kill_aux_procs("j3", "cancelled")  # must not raise
+    assert _r99_killpg.killpg_pids == [600300]  # killpg tried first
+    assert p.kill_calls == 1                     # then the fallback
+
+
+def test_r99_kill_aux_procs_swallows_proc_kill_errors(_r99_killpg):
+    """If the fallback proc.kill() ALSO raises (ProcessLookupError/OSError), it is
+    swallowed — best-effort teardown never propagates. Guards the inner except."""
+    w = _r99_worker()
+    _r99_killpg.raise_with = PermissionError()
+    p = _R99FakeProc(pid=600400, returncode=None,
+                     kill_raises=ProcessLookupError())
+    w._aux_procs["j4"] = {p}
+    w._kill_aux_procs("j4", "cancelled")  # must not raise despite both raising
+    assert _r99_killpg.killpg_pids == [600400]
+    assert p.kill_calls == 1
+
+
+# ---- _kill_active_job: sync seams ----
+
+
+def test_r99_kill_active_job_unknown_id_early_returns(_r99_killpg):
+    """No _active entry → return after the unconditional _kill_aux_procs (which is
+    also a no-op here). Nothing is killed. Guards the `if not entry` branch."""
+    async def go():
+        w = _r99_worker()
+        await w._kill_active_job("nope", "cancelled")  # no entry, no aux
+        await w.close()
+        assert _r99_killpg.killpg_pids == []
+    asyncio.run(go())
+
+
+def test_r99_kill_active_job_skips_already_finished_process(_r99_killpg):
+    """An _active entry whose process already exited (returncode set) is marked
+    cancelled but NOT killed (the `returncode is None` guard). Non-docker, so no
+    container teardown either."""
+    async def go():
+        w = _r99_worker()
+        dead = _R99FakeProc(pid=601000, returncode=0)
+        w._active["jf"] = {"process": dead, "is_docker": False, "cancelled": None}
+        await w._kill_active_job("jf", "cancelled")
+        await w.close()
+        assert w._active["jf"]["cancelled"] == "cancelled"  # reason recorded
+        assert _r99_killpg.killpg_pids == []                # not killed
+        assert dead.kill_calls == 0
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("exc", [ProcessLookupError(), PermissionError()])
+def test_r99_kill_active_job_main_proc_killpg_fallback(_r99_killpg, exc):
+    """When os.killpg on the main process raises ProcessLookupError/PermissionError,
+    _kill_active_job falls back to proc.kill(). The reason is recorded regardless.
+    (mutation: removing the except arm makes killpg's exc escape the coroutine.)"""
+    async def go():
+        w = _r99_worker()
+        _r99_killpg.raise_with = exc
+        p = _R99FakeProc(pid=601100, returncode=None)
+        w._active["jk"] = {"process": p, "is_docker": False, "cancelled": None}
+        await w._kill_active_job("jk", "cancelled")  # must not raise
+        await w.close()
+        assert _r99_killpg.killpg_pids == [601100]  # killpg tried first
+        assert p.kill_calls == 1                     # then proc.kill() fallback
+        assert w._active["jk"]["cancelled"] == "cancelled"
+    asyncio.run(go())
+
+
+def test_r99_kill_active_job_swallows_proc_kill_lookup_error(_r99_killpg):
+    """The main-process fallback proc.kill() may itself race a ProcessLookupError
+    (the child exited between killpg and kill); that is swallowed. Guards the inner
+    `except ProcessLookupError` at the proc.kill() site (line 1229-1230)."""
+    async def go():
+        w = _r99_worker()
+        _r99_killpg.raise_with = ProcessLookupError()
+        p = _R99FakeProc(pid=601200, returncode=None,
+                         kill_raises=ProcessLookupError())
+        w._active["jr"] = {"process": p, "is_docker": False, "cancelled": None}
+        await w._kill_active_job("jr", "cancelled")  # must not raise
+        await w.close()
+        assert _r99_killpg.killpg_pids == [601200]
+        assert p.kill_calls == 1
+    asyncio.run(go())
+
+
+def test_r99_kill_active_job_also_kills_tracked_aux_procs(_r99_killpg):
+    """_kill_active_job ALWAYS tears down aux verify/fix procs first (the [H5]
+    contract), even for a job whose main process already finished — a job mid
+    verify/self-heal has no live main proc but aux procs burning tokens."""
+    async def go():
+        w = _r99_worker()
+        aux = _R99FakeProc(pid=602000, returncode=None)
+        w._aux_procs["jA"] = {aux}
+        # main process already exited; only the aux proc should be killed.
+        w._active["jA"] = {"process": _R99FakeProc(pid=602001, returncode=0),
+                           "is_docker": False, "cancelled": None}
+        await w._kill_active_job("jA", "cancelled")
+        await w.close()
+        assert 602000 in _r99_killpg.killpg_pids  # aux proc was SIGKILLed
+        assert aux.kill_calls == 0                 # killpg succeeded, no fallback
+    asyncio.run(go())
+
+
+# ---- _kill_active_job: docker spawn-FAILURE async seam (distinct from R72) ----
+
+
+def test_r99_kill_active_job_docker_spawn_failure_is_swallowed(monkeypatch):
+    """If spawning `docker kill` itself FAILS (docker CLI missing, fork-limit, …),
+    the outer `except Exception` swallows it and teardown moves on to `docker rm
+    -f` — the failure must not escape or wedge. This is the spawn-failure arm,
+    distinct from R72's wedged-daemon timeout arm. Asserts both teardown commands
+    were ATTEMPTED despite the first spawn raising."""
+    attempted: list[list[str]] = []
+
+    async def boom_exec(*argv, **kw):
+        attempted.append(list(argv))
+        raise FileNotFoundError("docker: command not found")
+
+    monkeypatch.setattr(wmod_R72.asyncio, "create_subprocess_exec", boom_exec)
+
+    async def go():
+        w = _r99_worker()
+        # Client already exited; container teardown is what remains.
+        w._active["jD"] = {"process": _R72DeadClient(), "is_docker": True,
+                           "cancelled": None}
+        # Must complete (not raise, not hang) despite the spawn failures.
+        await asyncio.wait_for(
+            w._kill_active_job("jD", "timeout"), timeout=5.0)
+        await w.close()
+        # BOTH commands attempted: the first spawn failure did not skip the second.
+        cmds = [a[:3] for a in attempted]
+        assert ["docker", "kill", "roost-job-jD"] in cmds, attempted
+        assert ["docker", "rm", "-f"] in [a[:3] for a in attempted], attempted
+        assert w._active["jD"]["cancelled"] == "timeout"
+    asyncio.run(go())
+
+
+def test_r99_kill_active_job_docker_spawn_failure_best_effort_kills_half_started(
+    monkeypatch,
+):
+    """When create_subprocess_exec returns a proc but a LATER step raises, the
+    outer except's best-effort `k.kill()` fires (the `if k is not None` arm,
+    line 1278-1282). We force the later failure by making wait_for raise."""
+    spawned: list[_R72WedgedProc] = []
+
+    async def half_exec(*argv, **kw):
+        p = _R72WedgedProc()
+        spawned.append(p)
+        return p
+
+    async def boom_wait_for(aw=None, *a, **kw):
+        # Close the awaitable we were handed (k.wait()) so it isn't left
+        # un-awaited, then fail to simulate a post-spawn teardown error.
+        if aw is not None and hasattr(aw, "close"):
+            aw.close()
+        raise RuntimeError("simulated post-spawn failure")
+
+    monkeypatch.setattr(wmod_R72.asyncio, "create_subprocess_exec", half_exec)
+    monkeypatch.setattr(wmod_R72.asyncio, "wait_for", boom_wait_for)
+
+    async def go():
+        w = _r99_worker()
+        w._active["jH"] = {"process": _R72DeadClient(), "is_docker": True,
+                           "cancelled": None}
+        # No outer asyncio.wait_for here: it is monkeypatched to raise. The except
+        # path itself terminates the half-started procs, so there is nothing to
+        # hang on — boom_wait_for forces the post-spawn failure synchronously.
+        await w._kill_active_job("jH", "timeout")
+        await w.close()
+        # Each half-started proc was best-effort killed by the outer except.
+        assert spawned and all(p.kill_calls >= 1 for p in spawned), spawned
+        assert w._active["jH"]["cancelled"] == "timeout"
+    asyncio.run(go())
+
+
+def test_r99_kill_active_job_spawn_failure_swallows_best_effort_kill_error(
+    monkeypatch,
+):
+    """The spawn-failure best-effort `k.kill()` may ITSELF raise (the proc is in a
+    bad state); that is swallowed too (line 1281-1282 `except (ProcessLookupError,
+    OSError)`). Force it: spawn returns a proc whose kill() raises OSError, then a
+    post-spawn failure drives the outer except. Teardown still completes."""
+
+    class _KillRaiser:
+        def __init__(self):
+            self.returncode = None
+            self.pid = 777001
+            self.kill_calls = 0
+
+        def kill(self):
+            self.kill_calls += 1
+            raise OSError("kill failed")
+
+    spawned: list = []
+
+    async def half_exec(*argv, **kw):
+        p = _KillRaiser()
+        spawned.append(p)
+        return p
+
+    async def boom_wait_for(aw=None, *a, **kw):
+        if aw is not None and hasattr(aw, "close"):
+            aw.close()
+        raise RuntimeError("simulated post-spawn failure")
+
+    monkeypatch.setattr(wmod_R72.asyncio, "create_subprocess_exec", half_exec)
+    monkeypatch.setattr(wmod_R72.asyncio, "wait_for", boom_wait_for)
+
+    async def go():
+        w = _r99_worker()
+        w._active["jE"] = {"process": _R72DeadClient(), "is_docker": True,
+                           "cancelled": None}
+        await w._kill_active_job("jE", "timeout")  # must not raise
+        await w.close()
+        # kill() was attempted on each spawned proc despite itself raising.
+        assert spawned and all(p.kill_calls >= 1 for p in spawned), spawned
+        assert w._active["jE"]["cancelled"] == "timeout"
+    asyncio.run(go())
+
+
+def test_r99_kill_active_job_timeout_kill_and_reap_errors_swallowed(monkeypatch):
+    """The wedged-daemon TIMEOUT arm's own kill()/reap may raise: `k.kill()` on
+    expiry raising (line 1257-1258 `except (ProcessLookupError, OSError)`) and the
+    follow-up reap `await k.wait()` raising (line 1262-1263 `except Exception`).
+    Both swallowed; teardown still emits its LOUD operator message and completes."""
+
+    class _ReapRaiser:
+        """A `docker kill` proc that times out; kill() raises OSError and the
+        follow-up wait() raises, exercising both inner excepts on the expiry path."""
+
+        def __init__(self):
+            self.returncode = None
+            self.pid = 778001
+            self.kill_calls = 0
+
+        def kill(self):
+            self.kill_calls += 1
+            raise OSError("kill raced")
+
+        async def wait(self):
+            raise RuntimeError("reap failed")
+
+    spawned: list = []
+
+    async def fake_exec(*argv, **kw):
+        p = _ReapRaiser()
+        spawned.append(p)
+        return p
+
+    # Force the wait_for to TIMEOUT (the expiry branch) without parking real time.
+    async def timeout_wait_for(aw=None, *a, **kw):
+        if aw is not None and hasattr(aw, "close"):
+            aw.close()
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr(wmod_R72.asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(wmod_R72.asyncio, "wait_for", timeout_wait_for)
+
+    async def go():
+        w = _r99_worker()
+        logs: list[tuple[str, str, str]] = []
+
+        async def fake_send_log(job_id, stream, data):
+            logs.append((job_id, stream, data))
+
+        w._send_log = fake_send_log  # type: ignore[assignment]
+        w._active["jT"] = {"process": _R72DeadClient(), "is_docker": True,
+                           "cancelled": None}
+        await w._kill_active_job("jT", "timeout")  # must not raise
+        await w.close()
+        # kill() attempted on each timed-out CLI even though it raised.
+        assert spawned and all(p.kill_calls >= 1 for p in spawned), spawned
+        # LOUD message still emitted despite kill/reap raising.
+        events = [d for (_j, s, d) in logs if s == "event"]
+        assert any("unresponsive" in d and "roost-job-jT" in d for d in events), events
+        assert w._active["jT"]["cancelled"] == "timeout"
+    asyncio.run(go())
+
+
+# ---------------------------------------------------------------------------
 # [R96] Pure argv-builder coverage: _build_auto_argv + _build_codex_argv.
 # These exercise the bare-worker triage builder and the codex builder directly,
 # asserting EXACT argv shape (positions matter — a fixed-index splice is the R30
