@@ -47,6 +47,31 @@ feat/mac-app) — verify it after the merge.
 
 ## Ranked
 
+### R21. Make presigned blob PUT single-use and race-safe — `open` `self-promoted`
+Surface: backend/security. A1 hunt #2 reproduced that a presigned `put_url`
+remains valid after the first upload finalizes the blob: replaying the same URL
+returns 200 and overwrites both the finalized bytes and their size/hash metadata.
+Done-when: only a pending blob can accept a PUT; claiming/finalizing is atomic
+enough that concurrent PUTs cannot both win; finalized content and metadata stay
+immutable; replay + concurrency regression tests; pytest green.
+
+### R22. Roll back failed direct blob uploads — `open` `self-promoted`
+Surface: backend/security/robustness. A1 hunt #2 reproduced that `POST /blobs`
+inserts a durable `state=ready` row before streaming the body; a 413 rejection
+deletes the partial file but leaves a listed ready row with a signed download URL.
+Done-when: incomplete uploads are never exposed as ready; any stream or finalize
+failure removes both file and row; tests cover oversized rejection and an
+injected failure; pytest green.
+
+### R23. Count every publish archive entry against the extraction cap — `open` `self-promoted`
+Surface: publish/security. A1 hunt #2 reproduced that `SITE_MAX_FILES` counts
+only regular tar members, so arbitrarily many directories/links bypass the
+pre-extraction cap and can consume filesystem inodes/CPU.
+Done-when: every extracted filesystem entry (regular file, directory, link)
+counts toward one clearly named cap before extraction; existing byte and
+traversal protections stay intact; non-regular bypass + normal mixed-archive
+tests; pytest green.
+
 ### R1. Harden docker argv assembly against flag injection — `done` *(2026-06-06)*
 Surface: backend/security. *(Re-scoped 2026-06-05: verified no shell injection — `_build_docker_argv` builds an argv list with `_validate_container` mount/network guards and `_sanitize_env`.)* Residual: `argv.append(str(image))` lands after the option flags (roost/worker.py:~640), so a leading-dash `image`, `volumes`, `network`, or `workdir` value (e.g. `image: "--privileged"`) is parsed by `docker run` as a flag, not an argument.
 Done-when: leading-dash (and empty) values rejected for all spec-sourced argv positions; malicious-spec tests added; pytest green.
