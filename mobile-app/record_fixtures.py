@@ -9,7 +9,10 @@ Re-run after any server change that touches these shapes:
     python mobile-app/record_fixtures.py
 
 Both app test suites parse these files; if a shape drifts, regenerate and the
-app-side decode tests tell you exactly what broke.
+app-side decode tests tell you exactly what broke. The drift GUARD
+(tests/test_fixture_drift.py) imports ``capture()`` below and compares a live
+run's shapes against the committed goldens on every pytest run — additive-only
+(API.md §8): the server may add fields, but a removed/renamed field fails CI.
 """
 from __future__ import annotations
 
@@ -18,6 +21,7 @@ import json
 import sys
 import tarfile
 from pathlib import Path
+from typing import Any
 
 from fastapi.testclient import TestClient
 
@@ -28,19 +32,16 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures"
 TOKEN = "fixture-admin-token"
 
 
-def _dump(name: str, obj) -> None:
-    (FIXTURES / name).write_text(json.dumps(obj, indent=2, sort_keys=True) + "\n")
-    print(f"  wrote fixtures/{name}")
+def capture(db_path: Path) -> dict[str, Any]:
+    """Drive the canonical fixture scenario; return {fixture_name: payload}.
 
-
-def main() -> None:
-    FIXTURES.mkdir(exist_ok=True)
-    app = server.create_app(db_path=Path("/tmp/roost-fixtures.db.tmp"), token=TOKEN,
-                            run_sweeper=False)
-    # Fresh DB every run.
-    Path("/tmp/roost-fixtures.db.tmp").unlink(missing_ok=True)
-    app = server.create_app(db_path=Path("/tmp/roost-fixtures.db.tmp"), token=TOKEN,
-                            run_sweeper=False)
+    JSON fixtures map to their decoded objects; the SSE transcript maps to its
+    raw text. This is the single source of the scenario — ``main()`` writes
+    the goldens from it, the drift guard replays it for live comparison.
+    """
+    db_path.unlink(missing_ok=True)
+    app = server.create_app(db_path=db_path, token=TOKEN, run_sweeper=False)
+    out: dict[str, Any] = {}
 
     with TestClient(app) as c:
         c.headers.update({"Authorization": f"Bearer {TOKEN}"})
@@ -48,7 +49,7 @@ def main() -> None:
         # -- pairing ------------------------------------------------------
         r = c.post("/pair-tokens", json={"label": "fixture-phone"})
         pair = r.json()
-        _dump("pair_token_response.json", pair)
+        out["pair_token_response.json"] = pair
         mh = {"Authorization": f"Bearer {pair['token']}"}
 
         # -- a worker -----------------------------------------------------
@@ -70,7 +71,7 @@ def main() -> None:
         })
         job_submit_resp = r.json()
         done_id = job_submit_resp["id"]
-        _dump("job_submit_response.json", job_submit_resp)
+        out["job_submit_response.json"] = job_submit_resp
 
         a = c.get(f"/workers/{wid}/poll", params={"timeout": 0}, headers=wh).json()
         c.post(f"/workers/{wid}/jobs/{done_id}/event",
@@ -108,29 +109,28 @@ def main() -> None:
         queued_id = r.json()["id"]
 
         # -- snapshots the apps render -------------------------------------
-        _dump("derived.json", c.get("/derived", headers=mh).json())
-        _dump("jobs_list.json", c.get("/jobs", headers=mh).json())
-        _dump("job_detail_succeeded.json", c.get(f"/jobs/{done_id}", headers=mh).json())
-        _dump("job_detail_running.json", c.get(f"/jobs/{running_id}", headers=mh).json())
-        _dump("job_detail_queued.json", c.get(f"/jobs/{queued_id}", headers=mh).json())
-        _dump("job_logs.json", c.get(f"/jobs/{done_id}/logs", headers=mh).json())
-        _dump("job_logs_since_2.json",
-              c.get(f"/jobs/{done_id}/logs", params={"since": 2}, headers=mh).json())
-        _dump("job_tree.json", c.get(f"/jobs/{done_id}/tree", headers=mh).json())
-        _dump("job_derived_running.json",
-              c.get(f"/jobs/{running_id}/derived", headers=mh).json())
-        _dump("workers.json", c.get("/workers", headers=mh).json())
-        _dump("healthz.json", c.get("/healthz").json())
+        out["derived.json"] = c.get("/derived", headers=mh).json()
+        out["jobs_list.json"] = c.get("/jobs", headers=mh).json()
+        out["job_detail_succeeded.json"] = c.get(f"/jobs/{done_id}", headers=mh).json()
+        out["job_detail_running.json"] = c.get(f"/jobs/{running_id}", headers=mh).json()
+        out["job_detail_queued.json"] = c.get(f"/jobs/{queued_id}", headers=mh).json()
+        out["job_logs.json"] = c.get(f"/jobs/{done_id}/logs", headers=mh).json()
+        out["job_logs_since_2.json"] = c.get(
+            f"/jobs/{done_id}/logs", params={"since": 2}, headers=mh).json()
+        out["job_tree.json"] = c.get(f"/jobs/{done_id}/tree", headers=mh).json()
+        out["job_derived_running.json"] = c.get(
+            f"/jobs/{running_id}/derived", headers=mh).json()
+        out["workers.json"] = c.get("/workers", headers=mh).json()
+        out["healthz.json"] = c.get("/healthz").json()
 
         # SSE transcript of a finished job (terminates at event: done).
         with c.stream("GET", f"/jobs/{done_id}/stream", headers=mh) as resp:
-            sse = "".join(chunk for chunk in resp.iter_text())
-        (FIXTURES / "stream_succeeded.sse.txt").write_text(sse)
-        print("  wrote fixtures/stream_succeeded.sse.txt")
+            out["stream_succeeded.sse.txt"] = "".join(
+                chunk for chunk in resp.iter_text())
 
         # Cancel response (cancel the queued one, as mobile).
-        _dump("job_cancel_response.json",
-              c.delete(f"/jobs/{queued_id}", headers=mh).json())
+        out["job_cancel_response.json"] = c.delete(
+            f"/jobs/{queued_id}", headers=mh).json()
 
         # -- publish (API.md §6) — entirely AS the mobile token ------------
         buf = io.BytesIO()
@@ -142,20 +142,31 @@ def main() -> None:
         r = c.post("/blobs", params={"name": "phone-site.tar.gz"},
                    content=buf.getvalue(), headers=mh)
         blob = r.json()
-        _dump("blob_upload_response.json", blob)
-        _dump("publish_response.json",
-              c.post("/publish", json={"blob_id": blob["id"]},
-                     headers=mh).json())
-        _dump("publish_list.json", c.get("/publish", headers=mh).json())
+        out["blob_upload_response.json"] = blob
+        out["publish_response.json"] = c.post(
+            "/publish", json={"blob_id": blob["id"]}, headers=mh).json()
+        out["publish_list.json"] = c.get("/publish", headers=mh).json()
 
         # Error shapes the apps must handle.
-        _dump("error_401.json",
-              c.get("/jobs", headers={"Authorization": "Bearer nope"}).json())
-        _dump("error_403_admin_endpoint.json",
-              c.get("/pair-tokens", headers=mh).json())
-        _dump("error_404_job.json", c.get("/jobs/nope", headers=mh).json())
+        out["error_401.json"] = c.get(
+            "/jobs", headers={"Authorization": "Bearer nope"}).json()
+        out["error_403_admin_endpoint.json"] = c.get("/pair-tokens", headers=mh).json()
+        out["error_404_job.json"] = c.get("/jobs/nope", headers=mh).json()
 
-    Path("/tmp/roost-fixtures.db.tmp").unlink(missing_ok=True)
+    db_path.unlink(missing_ok=True)
+    return out
+
+
+def main() -> None:
+    FIXTURES.mkdir(exist_ok=True)
+    captured = capture(Path("/tmp/roost-fixtures.db.tmp"))
+    for name, obj in captured.items():
+        if name.endswith(".json"):
+            (FIXTURES / name).write_text(
+                json.dumps(obj, indent=2, sort_keys=True) + "\n")
+        else:
+            (FIXTURES / name).write_text(obj)
+        print(f"  wrote fixtures/{name}")
     print("done.")
 
 
