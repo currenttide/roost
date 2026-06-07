@@ -1432,3 +1432,27 @@ Entries are written by the loop; humans read, never need to edit.
 - Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only,
   fenced MODEL line)
 - Notes: iteration #9 slot 2. R47+R48 (health-seam fixes, sequential) still in flight.
+
+## 2026-06-07 ~04:30 UTC — R47+R48: health-seam fixes (hunt #4 consumed)
+- Verdict: shipped ×2
+- Branch/PR: loop/r47-stuck-detection-anchor / https://github.com/currenttide/roost/pull/59;
+  loop/r48-target-unplaceable / https://github.com/currenttide/roost/pull/61 (sequential)
+- What changed: (R47) _job_phase anchors on the worker's exact emoji markers
+  (VERIFY_PHASE_PREFIX "🔎 ", SELF_HEAL_PHASE_PREFIX "🔧 ", startswith) — a stuck
+  job saying "verifying build artifacts" is now flagged stuck?, real phases still
+  report. (R48) _annotate_liveness counts capable_workers only for workers
+  satisfying requires AND the target pin via _worker_satisfies_target — exact
+  parity with _try_assign_one (id OR name per R20, offline-name excluded);
+  ghost/offline pin → unplaceable. Both repros promoted into tests/test_server.py
+  (+ a positive-parity test); LOOP/repro-a1-hunt4.py DELETED in #61.
+- Evidence:
+  - suite 644→645 (R47) → 647 (R48); origin/master green at 652 with R49's
+    concurrent merge
+- Judge: approve ×2 (round 1 each) — re-ran promoted repros + phase/placement
+  test groups + full suite; R48's judge confirmed predicate parity with
+  _try_assign_one's gate
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only)
+- Notes: iteration #9 COMPLETE — R47 #59, R48 #61, R49 #60; master 652. Hunt #4
+  fully consumed. Cycle #11 slate: R50 iOS publish UI (Mac-node evidence path,
+  honest cap if unreachable), R51 verify.py e2e (trust-loop coverage), R52
+  lease-expiry grace analog (repro-or-clear, closes R19's filed question).
