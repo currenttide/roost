@@ -169,7 +169,7 @@ Done-when: e2e tests drive run_job's verify/self-heal phase with stubbed subproc
 Surface: backend/design-question. R19 restarted the placement-grace window for declines only and filed the analog question: should a SWEEPER requeue (lease expiry — a real failure) also restart it? Investigate the actual competitive-placement behavior after a lease-expiry requeue on current code; decide with evidence (R43 pattern): if the current behavior produces a concrete bad outcome (e.g. anti-starvation override permanently armed after one expiry, starving competitive placement), repro it and fix; if the current behavior is defensible, document the rationale in code and close `invalid` with the analysis.
 Done-when: either repro+fix+tests+pytest green, or a judge-verified refutation documented in a code comment at the requeue site; the Proposed question closes either way.
 
-### R53. Android publish UI parity — `open` `self-promoted` `feature`
+### R53. Android publish UI parity — `done` *(2026-06-07, PR #65 — UI render honestly capped, no emulator in fleet)* `self-promoted` `feature`
 Surface: mobile/Android/feature. North star #3. R50 landed the iOS publish screen (PR #63); Android has the decode layers (R34) but no screen. Mirror the iOS UX in the Compose app: pick tar.gz (SAF document picker) → name with slug preview → one-shot publish → show site URL with share intent.
 Done-when: Compose screen wired following the app's existing screen/viewmodel patterns; ALL slug/intent/state logic in a Linux-testable layer (kotlinc+JUnitCore harness) with tests mirroring iOS PublishTests; UI-render claims capped honestly per the evidence table (no Android emulator in the fleet — say so in the PR); pytest green (server untouched).
 

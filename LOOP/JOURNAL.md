@@ -1535,3 +1535,28 @@ Entries are written by the loop; humans read, never need to edit.
 - Notes: iteration #10 COMPLETE — R50 #63 (Mac-verified iOS publish UI), R51 #64,
   R52 #62 (cleared). Master 664. Cycle #12: R53 Android publish parity, R54
   ratchet re-measure + cli.py lift, R55 push client wiring (Linux-testable slice).
+
+## 2026-06-07 ~07:20 UTC — R53: Android publish UI parity
+- Verdict: shipped
+- Branch/PR: loop/r53-android-publish-ui / https://github.com/currenttide/roost/pull/65 (merged 1a8188b)
+- What changed: Compose publish sheet mirroring R50's iOS UX — SAF OpenDocument
+  picker → live /pub/<slug>/ preview → ONE-SHOT publishBundle → result card with
+  ACTION_SEND share + open-in-browser. Pure android-free logic layer
+  (model/Publish.kt): PublishSlug normalize/isValid/suggestion, gzip sniff,
+  PublishSizeGuard (256 MiB mirroring SITE_MAX_BYTES), PublishError.map
+  (401→pairing unpair / 403 / 413 / 400). ViewModel delegates every decision to
+  the pure layer. Dashboard wire-in one-line-additive (sibling-conflict aware).
+  18 tests mirroring iOS PublishTests.
+- Evidence:
+  - Linux harness (kotlinc+JUnitCore): 51 green (33 + 18 new); AGP
+    :app:compileDebugKotlin BUILD SUCCESSFUL + :app:testDebugUnitTest 18/0/0
+  - slug grammar byte-identical across publish.py / Publish.swift / Publish.kt
+    (judge diff-compared all three)
+  - rendered UI honestly CAPPED as unverified (no emulator in fleet) — in PR body
+    AND inline comment
+  - `python -m pytest -q` → 664 (server untouched)
+- Judge: approve (round 1) — re-ran harness + AGP build + pytest, verified parity,
+  claims-cap language, and the 401→unpair path
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only)
+- Notes: iteration #11 slot 1. Publish now reachable from every client surface
+  (CLI, MCP, iOS, Android — north star #3 closed for this verb). R54 + R55 in flight.
