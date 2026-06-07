@@ -357,21 +357,21 @@ Done-when: 404 → a single clear "schedules not available on this control plane
 server)" state, no contradiction; RoostKit logic Linux-tested; render verified via the
 Mac-node path or capped honestly; pytest green (server untouched).
 
-### R82. mac-app Transfers shows "expires 0s from now" for every staged blob — `open`
+### R82. mac-app Transfers shows "expires 0s from now" for every staged blob — `done` *(2026-06-07, PR #93 — signed RelativeTime in RoostKit; timeAgo delegates)*
 Surface: mac-app/correctness. User-test minor (mainwindow-transfers.png): `Format.timeAgo`
 is past-tense only; the call site string-swaps "ago"→"from now" and any future timestamp
 renders "0s from now" (hours of TTL remain).
 Done-when: a real signed/future-relative formatter with Linux swift tests covering past +
 future values; Transfers and any other future-time call sites migrated; pytest green.
 
-### R83. iOS pairing to a dead host: silent un-cancellable ~30s spinner — `open`
+### R83. iOS pairing to a dead host: silent un-cancellable ~30s spinner — `done` *(2026-06-07, PR #94 — 5s probe + caption + real cancel; measured 30s→~5s)*
 Surface: mobile/iOS/UX. User-test minor (ios/07,08): `timeoutIntervalForRequest = 30` in
 `AppState.makeClient`; no caption, no cancel until the (excellent) error finally appears.
 Done-when: short healthz probe timeout (~5s, justify), a "Contacting <host>…" caption,
 and a cancel affordance; RoostKit-layer logic Linux-tested; simulator screenshot per the
 evidence-table mac path; pytest green.
 
-### R84. iOS XCUITest smoke suite — close the tap-gap — `open` `feature`
+### R84. iOS XCUITest smoke suite — close the tap-gap — `done` *(2026-06-07, PR #95 — runs HEADLESS on the fleet Mac; 4 flows flake-free ×2; .xctestrun env-injection gotcha documented)* `feature`
 Surface: mobile/iOS/tests. User testing could not live-verify any tap-gated iOS screen
 (New-session, Session, Tree, Notifications, Schedules, swipe actions, Unpair): no
 XCUITest target exists, no idb, and the Mac worker has no AX/window-server session.

@@ -2271,3 +2271,71 @@ Entries are written by the loop; humans read, never need to edit.
 - Models: implementer claude-opus-4-8[1m] / judge claude-sonnet-4-6
 - Notes: iteration #25 totals: 3/3 shipped (PRs #90 #91 #92), tests 836 → 853,
   all judges round 1. Remaining Ranked: R82-R87.
+
+## 2026-06-07 ~19:46 UTC — R82: signed RelativeTime formatter (iteration #26)
+- Verdict: shipped
+- Branch/PR: loop/r82-transfers-expiry / https://github.com/currenttide/roost/pull/93 (merged 6376729)
+- What changed: root cause was `Format.timeAgo` clamping to `max(0, now-epoch)` —
+  ANY future timestamp collapsed to 0s before TransfersView's "ago"→"from now"
+  string-swap even ran. New pure signed `RoostKit.RelativeTime` (injectable
+  `now`; future → "in Xh", past → "Xh ago"); TransfersView migrated, string-swap
+  deleted; `timeAgo` now delegates (single source; "0s ago"→"now" is the only
+  sub-second output change, intentional). Skipped deliberately: schedule
+  next-run uses its own already-correct `ScheduleInterval.relative` — grep
+  confirmed Transfers was the only buggy future-time site.
+- Evidence: failing-first (14 RelativeTimeTests → 15 failures on the pre-fix
+  clamp); Linux RoostKit 82 (68+14); pytest 853 (mac-app-only diff); Mac node
+  full RoostMac build + 82/82
+- Judge: approve (round 1) — re-ran gate; sole finding (doc-comment
+  overstatement) fixed comment-only
+- Models: implementer claude-opus-4-8[1m] / judge claude-sonnet-4-6
+
+## 2026-06-07 ~19:46 UTC — R83: iOS pairing fail-fast probe (iteration #26)
+- Verdict: shipped
+- Branch/PR: loop/r83-pairing-spinner / https://github.com/currenttide/roost/pull/94 (merged ad9259e)
+- What changed: dead-host pairing 30s silent spinner → ~5s with feedback.
+  New pure `PairingState` machine (idle/contacting/failed/cancelled/paired,
+  Linux-tested ×10); `ApiClient.makePairingProbeSession` with
+  `pairingProbeTimeout = 5` used ONLY by the pairing probe — the 30s/∞ SSE
+  client untouched; PairingStore holds the in-flight Task and `cancel()` truly
+  cancels (isBusy guards against late-result clobber); PairingView shows
+  "Contacting <host>…" + Cancel.
+- Evidence: measured on the sim against an unreachable host — error at
+  t4.7–5.6s (was ~30s), screenshots r83-a/b/c/d (contacting → error →
+  re-paired dashboard); pytest 853; iOS Linux pure-layer 69/69; Mac
+  xcodebuild test 90/90. Honest cap: no live tap-Cancel screenshot (no tap
+  path pre-R84); affordance shown live, cancel logic unit-tested.
+- Judge: approve (round 1) — cloned the branch, re-ran everything, verified all
+  CAUTION clauses by inspection; commit-message test-count nit fixed pre-merge
+- Models: implementer claude-opus-4-8[1m] / judge claude-sonnet-4-6
+- Notes: the Mac xcodebuild gate caught a real type error the Linux harness
+  can't see (PairingStore isn't pure-layer) — the R73 lesson paying off.
+
+## 2026-06-07 ~19:46 UTC — R84: iOS XCUITest smoke suite — tap-gap CLOSED (iteration #26)
+- Verdict: shipped
+- Branch/PR: loop/r84-xcuitest-smoke / https://github.com/currenttide/roost/pull/95 (merged 577fa3c)
+- What changed: new RoostUITests target (XcodeGen) + SmokeTests.swift, 4 flows:
+  pairing→live dashboard; New-session sheet; Session (header/Tree/R76 composer);
+  Notifications+Schedules via overflow. ~25 accessibility identifiers added
+  additively across the views. XCTSkip-when-no-CP keeps local runs green.
+  ios/README documents fleet + local invocation.
+- KEY FEASIBILITY FINDING: XCUITest RUNS HEADLESS on the launchd Mac worker
+  (TEST EXECUTE SUCCEEDED from a Roost job) — the sim's automation bridge is
+  independent of the host window server, unlike screencapture/cliclick. The
+  iOS/Android verification-parity gap from the user-test sweep is closed.
+  HONEST SUB-FINDING (in README): Xcode 26.2 silently drops both `env` and
+  `TEST_RUNNER_*` injection — flows skip deceptively green; the working path is
+  patching the generated `.xctestrun` (EnvironmentVariables +=
+  ROOST_PAIR_URI/ROOST_OPEN_SESSION, UserAttachmentLifetime=keepAlways) then
+  `xcodebuild test-without-building -xctestrun`.
+- Evidence: pytest 853 (8 iOS files, +379, additive); own sim iPhone-17-Pro-R84
+  + scratch 0.2.0 CP w/ seeded jobs (never production); pre-rebase UI 4/4 +
+  4/4 (46.8s/42.8s); post-rebase over R83: unit 90/90, UI 4/4 + 4/4 — flake-free
+  twice, through R83's new probe; 5 screenshots + both .xcresult bundles staged
+  as blobs, all inspected
+- Judge: revise → approve (2 rounds) — round-1 catch was real: README documented
+  the broken injection path without the .xctestrun workaround; fixed
+- Models: implementer claude-opus-4-8[1m] / judge claude-sonnet-4-6
+- Notes: iteration #26 totals: 3/3 shipped (PRs #93 #94 #95), RoostKit 68→82,
+  iOS unit 80→90 + 4 UI flows, pytest steady at 853. Remaining Ranked from the
+  sweep: R85 R86 R87 (final iteration #27).
