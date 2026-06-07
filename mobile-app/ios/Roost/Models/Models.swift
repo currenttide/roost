@@ -332,6 +332,62 @@ struct Site: Codable, Equatable, Identifiable {
     }
 }
 
+// MARK: - Schedules (API.md §7)
+
+/// An interval schedule — `POST /schedules` / `GET /schedules` rows
+/// (`schedule_create_response.json`, `schedules_list.json`). The CP re-submits
+/// `spec` every `intervalSec`; we render the clock and toggle `enabled`.
+struct Schedule: Codable, Equatable, Identifiable {
+    let id: String
+    let name: String?
+    let spec: JobSpec?
+    let intervalSec: Double
+    let enabled: Bool
+    let nextRunAt: Double?
+    let lastRunAt: Double?
+    let lastJobId: String?
+    let createdAt: Double
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, spec, enabled
+        case intervalSec = "interval_sec"
+        case nextRunAt = "next_run_at"
+        case lastRunAt = "last_run_at"
+        case lastJobId = "last_job_id"
+        case createdAt = "created_at"
+    }
+}
+
+/// `POST /schedules` request body (API.md §7a). `every` is seconds or
+/// "<N>[smhd]"; `spec` is the §3 submit shape carried as a free-form map.
+struct ScheduleCreate: Encodable, Equatable {
+    let spec: [String: JSONValue]
+    let every: String
+    let name: String?
+    let enabled: Bool
+
+    enum CodingKeys: String, CodingKey { case spec, every, name, enabled }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(spec, forKey: .spec)
+        try c.encode(every, forKey: .every)
+        try c.encode(enabled, forKey: .enabled)
+        try c.encodeIfPresent(name, forKey: .name)
+    }
+}
+
+/// `PATCH /schedules/{id}` body — enable/disable (API.md §7c).
+struct SchedulePatch: Encodable, Equatable {
+    let enabled: Bool
+}
+
+/// `DELETE /schedules/{id}` response (API.md §7d).
+struct ScheduleDeleteResponse: Codable, Equatable {
+    let deleted: Bool
+    let id: String
+}
+
 // MARK: - Error envelope (API.md §1)
 
 struct ErrorEnvelope: Codable, Equatable {

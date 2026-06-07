@@ -270,6 +270,25 @@ object Parsers {
 
     fun parseSites(json: String): List<Site> = JSONArray(json).objs().map(::parseSite)
 
+    // ---- schedules (API.md §7) -----------------------------------------------------
+
+    fun parseSchedule(o: JSONObject): Schedule = Schedule(
+        id = o.str("id") ?: "",
+        name = o.str("name"),
+        spec = o.optJSONObject("spec")?.toMap() ?: emptyMap(),
+        intervalSec = o.dbl("interval_sec") ?: 0.0,
+        enabled = o.boolOrNull("enabled") ?: false,
+        nextRunAt = o.dbl("next_run_at"),
+        lastRunAt = o.dbl("last_run_at"),
+        lastJobId = o.str("last_job_id"),
+        createdAt = o.dbl("created_at") ?: 0.0,
+    )
+
+    fun parseSchedule(json: String): Schedule = parseSchedule(JSONObject(json))
+
+    fun parseSchedules(json: String): List<Schedule> =
+        JSONArray(json).objs().map(::parseSchedule)
+
     // ---- SSE event payloads (data: line already extracted) -----------------------
 
     /**

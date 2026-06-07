@@ -57,7 +57,8 @@ enum Fixtures {
         "job_detail_succeeded.json", "job_logs.json", "job_logs_since_2.json",
         "jobs_list.json", "job_submit_response.json", "job_tree.json",
         "pair_token_response.json", "publish_list.json",
-        "publish_oneshot_response.json", "publish_response.json", "workers.json",
+        "publish_oneshot_response.json", "publish_response.json",
+        "schedule_create_response.json", "schedules_list.json", "workers.json",
     ]
 }
 

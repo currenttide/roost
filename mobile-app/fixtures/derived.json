@@ -3,7 +3,7 @@
     "level": "alert",
     "summary": "1 need attention \u2014 unplaceable: train on the gpu box"
   },
-  "generated_at": 1780810381.7177289,
+  "generated_at": 1780813813.4995832,
   "runs": [
     {
       "capable_workers": 0,
@@ -11,7 +11,7 @@
         "cost_est_usd": 0.0,
         "tokens_used": 0
       },
-      "created_at": 1780810381.7077296,
+      "created_at": 1780813813.4893975,
       "decline_count": 0,
       "diagnosis": null,
       "eta_sec": null,
@@ -29,8 +29,8 @@
       "progress": null,
       "queued_sec": 0.0,
       "result": "",
-      "root_job_id": "c78f6c86d3d3",
-      "run_id": "c78f6c86d3d3",
+      "root_job_id": "ea595640d003",
+      "run_id": "ea595640d003",
       "state": "queued",
       "verified": null,
       "worker": null
@@ -41,7 +41,7 @@
         "cost_est_usd": 0.0,
         "tokens_used": 0
       },
-      "created_at": 1780810381.677879,
+      "created_at": 1780813813.459862,
       "decline_count": 0,
       "diagnosis": null,
       "eta_sec": null,
@@ -59,11 +59,11 @@
       "progress": null,
       "queued_sec": null,
       "result": "",
-      "root_job_id": "5c01b333e54e",
-      "run_id": "5c01b333e54e",
+      "root_job_id": "91fed0f985e3",
+      "run_id": "91fed0f985e3",
       "state": "running",
       "verified": null,
-      "worker": "a7c24b411c74"
+      "worker": "579323595a6f"
     },
     {
       "capable_workers": null,
@@ -71,12 +71,12 @@
         "cost_est_usd": 0.3073,
         "tokens_used": 48213
       },
-      "created_at": 1780810381.624933,
+      "created_at": 1780813813.4113638,
       "decline_count": 0,
       "diagnosis": null,
       "eta_sec": null,
       "evidence": "pytest -q: 255 passed",
-      "finished_at": 1780810381.6700246,
+      "finished_at": 1780813813.4522336,
       "goal": "fix the flaky auth test in roost-oss",
       "health": {
         "reason": "pytest -q: 255 passed",
@@ -89,11 +89,11 @@
       "progress": null,
       "queued_sec": null,
       "result": "fixed: tests green",
-      "root_job_id": "2c880e6c5666",
-      "run_id": "2c880e6c5666",
+      "root_job_id": "6fd490e4c777",
+      "run_id": "6fd490e4c777",
       "state": "succeeded",
       "verified": true,
-      "worker": "a7c24b411c74"
+      "worker": "579323595a6f"
     }
   ],
   "workers": [
@@ -105,13 +105,13 @@
         ]
       },
       "capacity": 1,
-      "enroll_id": "a9a5e15c2b1dd8a26eae3da93b3d610743b65eb990f9bfc76edd391a45bc9062",
-      "id": "a7c24b411c74",
-      "last_assigned_at": 1780810381.6849117,
-      "last_seen": 1780810381.7015774,
+      "enroll_id": "d3e00cb1eb07597a04593fa328804ae5c74288e67dc46dad43fc8458b142ffe3",
+      "id": "579323595a6f",
+      "last_assigned_at": 1780813813.467095,
+      "last_seen": 1780813813.483449,
       "name": "fixture-node",
       "policy": {},
-      "registered_at": 1780810381.616515,
+      "registered_at": 1780813813.403759,
       "revoked": 0,
       "running": 1,
       "status": "busy"

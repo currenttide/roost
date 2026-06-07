@@ -158,6 +158,45 @@ def test_client_token_can_manage_worker_cannot(client: TestClient):
     assert r.status_code == 401
 
 
+def test_mobile_scope_manages_schedules_end_to_end(client: TestClient):
+    # [R40] The mobile-app contract (mobile-app/API.md §7) pins this: a
+    # mobile-scoped pair token manages schedules through the SAME client
+    # permission set as agent scope — scope is an audit label, not a privilege
+    # boundary (see the scope→verbs matrix in server.py; R6 settled the same
+    # question for publish). Phone front doors schedule recurring work.
+    tok = client.post("/pair-tokens", json={"label": "phone"}).json()
+    assert tok["scope"] == "mobile"  # the default scope
+    mh = {"Authorization": f"Bearer {tok['token']}"}
+
+    # create AS the phone (not as admin)
+    r = client.post("/schedules", json={
+        "spec": {"intent": "tidy the repo", "kind": "claude",
+                 "requires": {}, "hierarchy": {"can_dispatch": True}},
+        "every": "30m", "name": "nightly-tidy"}, headers=mh)
+    assert r.status_code == 200, r.text
+    sched = r.json()
+    assert sched["enabled"] is True
+    assert sched["interval_sec"] == 1800
+    assert sched["last_job_id"] is None
+    sid = sched["id"]
+
+    # list AS the phone — the schedule shows up
+    r = client.get("/schedules", headers=mh)
+    assert r.status_code == 200
+    assert [s["id"] for s in r.json()] == [sid]
+
+    # disable then re-enable AS the phone
+    r = client.patch(f"/schedules/{sid}", json={"enabled": False}, headers=mh)
+    assert r.status_code == 200 and r.json()["enabled"] is False
+    r = client.patch(f"/schedules/{sid}", json={"enabled": True}, headers=mh)
+    assert r.status_code == 200 and r.json()["enabled"] is True
+
+    # delete AS the phone
+    r = client.delete(f"/schedules/{sid}", headers=mh)
+    assert r.status_code == 200 and r.json()["deleted"] is True
+    assert client.get("/schedules", headers=mh).json() == []
+
+
 # ---------- the tick ----------
 
 

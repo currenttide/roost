@@ -1,0 +1,22 @@
+{
+  "created_at": 1780813813.621949,
+  "enabled": true,
+  "id": "a37e5a189ca0",
+  "interval_sec": 21600.0,
+  "last_job_id": null,
+  "last_run_at": null,
+  "name": "nightly-tidy",
+  "next_run_at": 1780835413.621949,
+  "spec": {
+    "hierarchy": {
+      "can_dispatch": true
+    },
+    "intent": "nightly: tidy the repo and run the tests",
+    "kind": "claude",
+    "requires": {
+      "tools": [
+        "python3"
+      ]
+    }
+  }
+}

@@ -183,3 +183,23 @@ data class Site(
     /** Best link to offer the user: internet-facing when available. */
     val shareUrl: String get() = publicUrl ?: url
 }
+
+/**
+ * An interval schedule — POST /schedules / GET /schedules rows (API.md §7). The
+ * CP re-submits `spec` every `intervalSec`; the UI renders the clock and toggles
+ * `enabled`. `spec` is carried as a free-form map (the §3 submit shape).
+ */
+data class Schedule(
+    val id: String,
+    val name: String?,
+    val spec: Map<String, Any?>,
+    val intervalSec: Double,
+    val enabled: Boolean,
+    val nextRunAt: Double?,
+    val lastRunAt: Double?,
+    val lastJobId: String?,
+    val createdAt: Double,
+) {
+    /** Kind of the stored job spec, for a "next: <kind> job" subtitle. */
+    val specKind: String? get() = spec["kind"] as? String
+}

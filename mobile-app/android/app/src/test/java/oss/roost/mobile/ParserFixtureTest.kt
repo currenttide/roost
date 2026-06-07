@@ -161,4 +161,24 @@ class ParserFixtureTest {
         val sites = Parsers.parseSites(Fixtures.read("publish_list.json"))
         assertEquals(listOf("phone-oneshot", "phone-site"), sites.map { it.slug }.sorted())
     }
+
+    @Test fun schedules() {
+        // Created interval schedule (API.md §7a).
+        val sched = Parsers.parseSchedule(Fixtures.read("schedule_create_response.json"))
+        assertTrue(sched.id.isNotEmpty())
+        assertEquals("nightly-tidy", sched.name)
+        assertEquals(21600.0, sched.intervalSec, 0.0)   // "6h"
+        assertTrue(sched.enabled)
+        assertNull(sched.lastJobId)                      // not yet fired
+        assertNull(sched.lastRunAt)
+        assertNotNull(sched.nextRunAt)
+        // The stored spec round-trips (the §3 submit shape).
+        assertEquals("claude", sched.specKind)
+        assertEquals("nightly: tidy the repo and run the tests", sched.spec["intent"])
+
+        // List shape (API.md §7b).
+        val list = Parsers.parseSchedules(Fixtures.read("schedules_list.json"))
+        assertEquals(1, list.size)
+        assertEquals(sched.id, list.first().id)
+    }
 }
