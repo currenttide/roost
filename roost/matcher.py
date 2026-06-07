@@ -133,9 +133,13 @@ def placement_score(
 
     score = 0.0
 
-    if isinstance(prefer, dict) and prefer.get("worker") == worker.get("id"):
-        score += _W_PREFER
-    elif isinstance(prefer, str) and prefer == worker.get("id"):
+    # `prefer` resolves a worker id OR name — parity with the hard `target`
+    # pin, which has always accepted both (R20: prefer-by-name used to
+    # silently no-op, so the job went to the first poller instead).
+    preferred = prefer.get("worker") if isinstance(prefer, dict) else (
+        prefer if isinstance(prefer, str) else None)
+    if preferred is not None and preferred in (worker.get("id"),
+                                               worker.get("name")):
         score += _W_PREFER
 
     running = load.get("running")

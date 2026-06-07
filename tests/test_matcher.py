@@ -246,3 +246,25 @@ def test_non_finite_sentinels_rejected():
     assert matches({"gpu_vram_gb": "nan"}, {"gpu_vram_gb": "!=0"}) is False
     assert matches({"gpu_vram_gb": "inf"}, {"gpu_vram_gb": ">=24"}) is False
     assert matches({"gpu_vram_gb": float("nan")}, {"gpu_vram_gb": "!=0"}) is False
+
+
+# ---------- [R20] prefer-by-name parity with target ----------
+
+
+def test_prefer_resolves_name_like_id():
+    import pytest
+    import time as _t
+    from roost.matcher import placement_score
+    now = _t.time()
+    w = {"id": "abc123", "name": "gpu-node", "status": "idle",
+         "capabilities": {"cpus": 8}, "capacity": 1}
+    base = placement_score(w, {}, now=now)
+    by_id = placement_score(w, {"prefer": {"worker": "abc123"}}, now=now)
+    by_name = placement_score(w, {"prefer": {"worker": "gpu-node"}}, now=now)
+    by_str = placement_score(w, {"prefer": "gpu-node"}, now=now)
+    assert by_id - base == pytest.approx(1000.0)
+    assert by_name == by_id          # name gets the same preference bonus
+    assert by_str == by_id           # bare-string prefer too
+    # A non-matching prefer gives no bonus.
+    other = placement_score(w, {"prefer": {"worker": "someone-else"}}, now=now)
+    assert other == base
