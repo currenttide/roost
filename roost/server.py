@@ -686,7 +686,12 @@ def _resolve_rate(
 
 
 def _goal_text(job: dict) -> str:
-    spec = job.get("spec") or {}
+    # `or {}` only substitutes a FALSY spec (None/{}/""); a TRUTHY non-dict
+    # spec (a JSON string/array/number from a legacy or drifted at-rest row in
+    # `_row_to_job`) would survive and 500 /derived (polled every 2s) on the
+    # `.get()` below. Coerce to {} (R88), matching the isinstance guard the
+    # siblings already use (`_goal_display`, `_job_health`, `_annotate_liveness`).
+    spec = job.get("spec") if isinstance(job.get("spec"), dict) else {}
     g = spec.get("task") or spec.get("intent") or spec.get("command") or ""
     # Serializer defense (R70): the §2 run row documents `goal` as a STRING, and
     # /derived is polled by mobile every 2s — a single un-renderable row 500s the
@@ -718,7 +723,9 @@ def _job_kind(job: dict) -> str:
       4. an explicit `kind` (claude/codex/captain/…) → that value
       5. nothing named  → claude  (the worker's own default)
     """
-    spec = job.get("spec") or {}
+    # R88: same at-rest-row hazard as `_goal_text` — a TRUTHY non-dict spec
+    # survives `or {}` and would 500 /derived on `.get()`. Coerce via isinstance.
+    spec = job.get("spec") if isinstance(job.get("spec"), dict) else {}
     kind = (spec.get("kind") or "").lower()
     if kind == "auto":
         return "auto"
