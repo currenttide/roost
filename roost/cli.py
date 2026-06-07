@@ -266,6 +266,27 @@ def _print_job(job: dict, verbose: bool = False) -> None:
         click.echo(json.dumps(job.get("spec", {}), indent=2, sort_keys=True))
 
 
+def _lookup_error(r) -> Optional[click.ClickException]:
+    """Friendly error for a job-id lookup on a READ verb (status/logs/tree), or
+    None if the response is fine (2xx). Surfaces the control plane's own actionable
+    `detail` text for the R79 prefix-lookup outcomes — 400 (prefix too short) and
+    409 (ambiguous prefix; the body lists the colliding ids) — instead of letting
+    `raise_for_status()` dump a raw httpx traceback. A 404 stays the terse, familiar
+    'job not found'. `roost history` prints 8-char id prefixes; pasting one into a
+    read verb now resolves server-side, so these are the only new shapes to handle."""
+    if r.status_code < 400:
+        return None
+    if r.status_code == 404:
+        return click.ClickException("job not found")
+    try:
+        detail = r.json().get("detail")
+    except Exception:
+        detail = None
+    if isinstance(detail, str) and detail:
+        return click.ClickException(detail)
+    return click.ClickException(f"lookup failed: HTTP {r.status_code}: {r.text}")
+
+
 # ---------- history / discovery (pure formatting helpers) ----------
 
 _TERMINAL_STATES = ("succeeded", "failed", "cancelled")
@@ -1868,12 +1889,12 @@ def exec_(ctx: click.Context, worker: str, command: tuple, timeout_min: float,
 @click.option("--verbose", "-v", is_flag=True)
 @click.pass_context
 def status(ctx: click.Context, job_id: str, verbose: bool) -> None:
-    """Show job details."""
+    """Show job details. `job_id` may be an unambiguous id prefix (≥6 chars; the
+    8-char ids `roost history` prints work as-is)."""
     with _ctx_client(ctx) as c:
         r = c.get(f"/jobs/{job_id}")
-        if r.status_code == 404:
-            raise click.ClickException("job not found")
-        r.raise_for_status()
+        if err := _lookup_error(r):
+            raise err
         _print_job(r.json(), verbose=verbose)
 
 
@@ -1899,14 +1920,15 @@ def _plan_reason(job: dict) -> Optional[str]:
 def tree(ctx: click.Context, job_id: str, as_json: bool, health: bool) -> None:
     """Show a job's lineage tree (root → children → ...).
 
-    When the captain recorded a plan, each sub-job shows a one-line `why` (its
-    `spec.reason`) so an operator can read the captain's intent, not just state.
+    `job_id` may be an unambiguous id prefix (≥6 chars; the 8-char ids
+    `roost history` prints work as-is). When the captain recorded a plan, each
+    sub-job shows a one-line `why` (its `spec.reason`) so an operator can read the
+    captain's intent, not just state.
     """
     with _ctx_client(ctx) as c:
         r = c.get(f"/jobs/{job_id}/tree")
-        if r.status_code == 404:
-            raise click.ClickException("job not found")
-        r.raise_for_status()
+        if err := _lookup_error(r):
+            raise err
         jobs = r.json()
     if as_json:
         click.echo(json.dumps(jobs, indent=2))
@@ -1968,16 +1990,16 @@ def tree(ctx: click.Context, job_id: str, as_json: bool, health: bool) -> None:
 @click.option("--since", default=0, type=int, help="Start from this seq (exclusive).")
 @click.pass_context
 def logs(ctx: click.Context, job_id: str, follow: bool, since: int) -> None:
-    """Dump (or follow) job logs."""
+    """Dump (or follow) job logs. `job_id` may be an unambiguous id prefix
+    (≥6 chars; the 8-char ids `roost history` prints work as-is)."""
     url, token, _ = _resolve(ctx)
     if follow:
         rc = _stream(url, token, job_id, since=since)
         sys.exit(rc)
     with _client(url, token) as c:
         r = c.get(f"/jobs/{job_id}/logs", params={"since": since})
-        if r.status_code == 404:
-            raise click.ClickException("job not found")
-        r.raise_for_status()
+        if err := _lookup_error(r):
+            raise err
         payload = r.json()
         for log in payload.get("logs", []):
             click.echo(f"[{log['seq']:>4} {log['stream']}] {log['data']}")

@@ -111,6 +111,16 @@ NOTIFY_TIMEOUT_SEC = 5.0  # whole-request budget; a hung endpoint must not pile 
 # the log path uses (see LOG_APPEND_MAX_BYTES below) so the wire contract is uniform.
 JOB_INPUT_MAX_BYTES = 64 * 1024
 
+# Job-id prefix lookup (R79). `roost history` prints 8-char id prefixes; the read
+# verbs (status/logs/tree/derived/inputs/stream) resolve any UNAMBIGUOUS prefix of
+# this length or longer so a copy-paste from history Just Works. A full 12-char id
+# is itself an unambiguous prefix, so existing clients (CLI, MCP, mobile) are
+# unaffected — this is purely additive. Shorter prefixes are refused (400) to avoid
+# accidental wide matches; an ambiguous prefix yields 409 listing the candidates.
+# WRITE paths (cancel/send) deliberately do NOT prefix-resolve — see _resolve_read.
+JOB_ID_MIN_PREFIX = 6
+JOB_ID_LEN = 12
+
 
 # ---------- DB helpers ----------
 
@@ -449,6 +459,72 @@ def _get_job(db_path: Path, job_id: str) -> Optional[dict]:
     with _connect(db_path) as conn:
         row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
     return _row_to_job(row)
+
+
+def _resolve_job_id(db_path: Path, raw: str) -> tuple[Optional[str], Optional[tuple[int, str]]]:
+    """Resolve a job-id argument that may be a PREFIX into a canonical job id (R79).
+
+    Returns ``(job_id, None)`` on success or ``(None, (status, detail))`` describing
+    the HTTP error a route should surface. The rules, in order:
+
+    - An exact 12-char id that exists resolves to itself (the common path —
+      existing clients are unaffected). An exact-length id that does NOT exist is a
+      plain 404; we never prefix-scan a full-length id (it can only ever match
+      itself, so this also short-circuits the scan for the common case).
+    - A shorter string is treated as a prefix. Below ``JOB_ID_MIN_PREFIX`` chars
+      it is refused (400) — too vague to be safe. At/above the floor we scan for
+      ids that start with it: exactly one → resolve; zero → 404; more than one →
+      409 with the colliding candidate ids so the caller can disambiguate.
+
+    Read-only routes use this; write routes (cancel/send) intentionally do not —
+    resolving a fuzzy prefix to the wrong RUNNING job and then cancelling or
+    steering it is a footgun, so those stay exact-id only.
+    """
+    # Fast path / exact id: only a real, full-length id resolves directly. This
+    # keeps the common case a single indexed point-lookup and means a full id is
+    # never ambiguous against a longer one (ids are fixed-length).
+    if len(raw) >= JOB_ID_LEN:
+        job = _get_job(db_path, raw)
+        return (job["id"], None) if job else (None, (404, "job not found"))
+    if len(raw) < JOB_ID_MIN_PREFIX:
+        return None, (
+            400,
+            f"job id prefix too short: need at least {JOB_ID_MIN_PREFIX} chars "
+            f"(got {len(raw)!r}); paste more of the id",
+        )
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT id FROM jobs WHERE id LIKE ? ESCAPE '\\' ORDER BY id LIMIT 11",
+            (_like_prefix(raw),),
+        ).fetchall()
+    matches = [r["id"] for r in rows]
+    if not matches:
+        return None, (404, "job not found")
+    if len(matches) == 1:
+        return matches[0], None
+    # We fetch at most 11 (LIMIT 11) so we can say "10+" without counting the
+    # whole table; show up to 10 candidate ids and an honest "and N more" / "10+".
+    shown = matches[:10]
+    listed = ", ".join(shown)
+    if len(matches) <= 10:
+        count = f"{len(matches)} jobs"
+        more = ""
+    else:
+        count = "10+ jobs"
+        more = " (and more)"
+    return None, (
+        409,
+        f"job id prefix {raw!r} is ambiguous — matches {count}: "
+        f"{listed}{more}. Use more characters.",
+    )
+
+
+def _like_prefix(prefix: str) -> str:
+    """SQL-LIKE pattern matching ids that START WITH ``prefix``, with LIKE's
+    wildcards (% _ and the \\ escape) escaped so a literal prefix is matched
+    literally (ids are hex, but be defensive)."""
+    escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return escaped + "%"
 
 
 def _get_tree(db_path: Path, root_id: str) -> list[dict]:
@@ -2751,6 +2827,15 @@ def create_app(
             raise HTTPException(403, "worker credential does not match the path worker_id")
         return principal
 
+    async def _resolve_read(job_id: str) -> str:
+        """Resolve a (possibly prefix) job id for a READ route, raising the right
+        HTTPException (400 too-short / 404 unknown / 409 ambiguous) on failure
+        (R79). Read paths only — write paths (cancel/send) stay exact-id."""
+        resolved, err = await asyncio.to_thread(_resolve_job_id, db, job_id)
+        if err is not None:
+            raise HTTPException(err[0], err[1])
+        return resolved
+
     # ---- public health + installer ----
 
     @app.get("/healthz")
@@ -2993,6 +3078,7 @@ def create_app(
 
     @app.get("/jobs/{job_id}/derived", dependencies=[Depends(require_any)])
     async def derived_job_endpoint(job_id: str):
+        job_id = await _resolve_read(job_id)
         job = await asyncio.to_thread(_get_job, db, job_id)
         if not job:
             raise HTTPException(404, "job not found")
@@ -3056,6 +3142,7 @@ def create_app(
 
     @app.get("/jobs/{job_id}", dependencies=[Depends(require_any)])
     async def get_job_endpoint(job_id: str):
+        job_id = await _resolve_read(job_id)
         job = await asyncio.to_thread(_get_job, db, job_id)
         if not job:
             raise HTTPException(404, "job not found")
@@ -3070,6 +3157,7 @@ def create_app(
 
     @app.get("/jobs/{job_id}/tree", dependencies=[Depends(require_any)])
     async def get_tree(job_id: str):
+        job_id = await _resolve_read(job_id)
         job = await asyncio.to_thread(_get_job, db, job_id)
         if not job:
             raise HTTPException(404, "job not found")
@@ -3132,6 +3220,7 @@ def create_app(
     async def list_job_inputs_endpoint(job_id: str):
         """The follow-up inputs queued for a job and their delivery state
         (queued / delivered / dropped) — drives `roost status` visibility."""
+        job_id = await _resolve_read(job_id)
         job = await asyncio.to_thread(_get_job, db, job_id)
         if not job:
             raise HTTPException(404, "job not found")
@@ -3140,6 +3229,7 @@ def create_app(
 
     @app.get("/jobs/{job_id}/logs", dependencies=[Depends(require_any)])
     async def get_logs_endpoint(job_id: str, since: int = 0, limit: int = 1000):
+        job_id = await _resolve_read(job_id)
         job = await asyncio.to_thread(_get_job, db, job_id)
         if not job:
             raise HTTPException(404, "job not found")
@@ -3148,6 +3238,12 @@ def create_app(
 
     @app.get("/jobs/{job_id}/stream", dependencies=[Depends(require_any)])
     async def stream_job(job_id: str, since: int = 0):
+        # Resolve a prefix BEFORE the stream opens so too-short/ambiguous prefixes
+        # surface as a normal 400/409 (the stream body is a 200; an in-band error
+        # event can't carry a status). An unknown prefix is a 404 here too; the
+        # in-stream "job not found" event remains for a job that vanishes mid-run.
+        job_id = await _resolve_read(job_id)
+
         async def gen() -> AsyncIterator[bytes]:
             last = since
             terminal = False

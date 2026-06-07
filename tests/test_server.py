@@ -2305,3 +2305,145 @@ def test_backup_temp_file_cleaned_up_on_client_disconnect(
         # the server-side generator (GeneratorExit → finally → unlink).
     after = set(Path(tempfile.gettempdir()).glob("roost-backup-*.db"))
     assert after <= before
+
+
+# ---------- R79: unambiguous job-id PREFIX lookup on read paths ----------
+#
+# `roost history` prints 8-char ids (cli.py); every lookup verb used exact
+# `WHERE id = ?`. These pin the new contract: read paths resolve an
+# unambiguous prefix (>= JOB_ID_MIN_PREFIX chars), ambiguous -> 409 listing
+# candidates, too-short -> 400. WRITE paths (cancel/send) stay exact-only.
+
+
+def _submit_command(client: TestClient, cmd: str = "echo hi") -> str:
+    r = client.post("/jobs", json={"command": cmd})
+    assert r.status_code == 200, r.text
+    return r.json()["id"]
+
+
+def test_prefix_lookup_resolves_unambiguous_read_paths(client: TestClient):
+    job_id = _submit_command(client)
+    assert len(job_id) == 12
+    prefix = job_id[:8]  # what `roost history` actually prints
+
+    # GET /jobs/{id} — status
+    r = client.get(f"/jobs/{prefix}")
+    assert r.status_code == 200, r.text
+    assert r.json()["id"] == job_id
+
+    # GET /jobs/{id}/logs
+    r = client.get(f"/jobs/{prefix}/logs")
+    assert r.status_code == 200, r.text
+    assert r.json()["job_id"] == job_id
+
+    # GET /jobs/{id}/tree
+    r = client.get(f"/jobs/{prefix}/tree")
+    assert r.status_code == 200, r.text
+    assert any(n["id"] == job_id for n in r.json())
+
+    # GET /jobs/{id}/derived
+    r = client.get(f"/jobs/{prefix}/derived")
+    assert r.status_code == 200, r.text
+    assert r.json()["run_id"] == job_id or r.json()["id"] == job_id
+
+    # GET /jobs/{id}/inputs
+    r = client.get(f"/jobs/{prefix}/inputs")
+    assert r.status_code == 200, r.text
+    assert r.json()["job_id"] == job_id
+
+
+def test_prefix_lookup_full_id_still_exact(client: TestClient):
+    """Additive: a full 12-char id resolves to itself, unchanged."""
+    job_id = _submit_command(client)
+    r = client.get(f"/jobs/{job_id}")
+    assert r.status_code == 200, r.text
+    assert r.json()["id"] == job_id
+
+
+def test_prefix_lookup_ambiguous_returns_409_with_candidates(
+    tmp_path: Path, monkeypatch
+):
+    """Two ids sharing a prefix -> 409 listing the colliding candidates."""
+    db = tmp_path / "roost.db"
+    app = server.create_app(db_path=db, token=TOKEN, run_sweeper=False)
+
+    # Force a deterministic prefix collision by stubbing the id generator.
+    ids = iter(["abcdef000001", "abcdef000002"])
+    monkeypatch.setattr(server.uuid, "uuid4",
+                        lambda: type("U", (), {"hex": next(ids)})())
+
+    with TestClient(app) as c:
+        c.headers.update({"Authorization": f"Bearer {TOKEN}"})
+        id1 = _submit_command(c)
+        id2 = _submit_command(c)
+        assert {id1, id2} == {"abcdef000001", "abcdef000002"}
+
+        r = c.get("/jobs/abcdef")  # 6-char prefix, both match
+        assert r.status_code == 409, r.text
+        detail = r.json()["detail"]
+        # The error must list the colliding candidate ids so the user can disambiguate,
+        # and state the exact count (2) — not a capped "10+".
+        body = detail if isinstance(detail, str) else json.dumps(detail)
+        assert id1 in body and id2 in body
+        assert "2 jobs" in body
+
+
+def test_prefix_lookup_too_short_returns_400(client: TestClient):
+    job_id = _submit_command(client)
+    r = client.get(f"/jobs/{job_id[:3]}")  # below the min-prefix floor
+    assert r.status_code == 400, r.text
+
+
+def test_prefix_lookup_unknown_still_404(client: TestClient):
+    # A long-enough but matching-nothing prefix is an honest 404.
+    r = client.get("/jobs/deadbeefcafe")
+    assert r.status_code == 404, r.text
+
+
+def test_write_paths_stay_exact_id_only(client: TestClient):
+    """Cancel/send are destructive/steering — they must NOT resolve a prefix
+    (a fuzzy match to the wrong running job is a footgun). An 8-char prefix of a
+    real job is a 404 on these write paths, while the full id works."""
+    r = client.post("/jobs", json={"command": "sleep 1",
+                                   "requires": {"tools": ["python3"]}})
+    job_id = r.json()["id"]
+    prefix = job_id[:8]
+
+    # send (POST input) by prefix -> 404 (not resolved)
+    r = client.post(f"/jobs/{prefix}/input", json={"text": "hello"})
+    assert r.status_code == 404, r.text
+
+    # cancel (DELETE) by prefix -> 409 "not found or already terminal"
+    r = client.delete(f"/jobs/{prefix}")
+    assert r.status_code == 409, r.text
+
+    # The full id still works on the write paths (cancel a real queued job).
+    r = client.delete(f"/jobs/{job_id}")
+    assert r.status_code == 200, r.text
+    assert r.json()["cancelled"] >= 1
+
+
+def test_prefix_lookup_stream_resolves_and_rejects(client: TestClient):
+    """SSE stream resolves an unambiguous prefix up front; a too-short prefix is a
+    400 before the stream opens (not a 200 stream carrying an error event)."""
+    # Drive a job to a terminal state so the stream closes after `done` (a
+    # never-assigned job streams forever waiting for terminal).
+    worker_id, cred = _enroll_worker(client, {"tools": ["python3"], "cpus": 4})
+    wh = {"Authorization": f"Bearer {cred}"}
+    r = client.post("/jobs", json={"command": "echo hi",
+                                   "requires": {"tools": ["python3"]}})
+    job_id = r.json()["id"]
+    r = client.get(f"/workers/{worker_id}/poll", params={"timeout": 0}, headers=wh)
+    attempt = r.json()["attempt"]
+    client.post(f"/workers/{worker_id}/jobs/{job_id}/event",
+                json={"type": "succeeded", "attempt": attempt, "exit_code": 0},
+                headers=wh)
+
+    # Unambiguous 8-char prefix opens the stream and runs to `done`.
+    with client.stream("GET", f"/jobs/{job_id[:8]}/stream") as resp:
+        assert resp.status_code == 200
+        body = resp.read().decode()
+    assert "event: state" in body and "event: done" in body
+    # Too-short prefix -> 400 before streaming.
+    r = client.get(f"/jobs/{job_id[:3]}/stream")
+    assert r.status_code == 400, r.text

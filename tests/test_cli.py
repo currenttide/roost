@@ -788,6 +788,59 @@ def test_send_terminal_job_errors(monkeypatch):
     assert "terminal" in res.output.lower()
 
 
+# ---------- `roost status` job-id prefix lookup (R79) ----------
+
+
+def _status_via_mock(monkeypatch, status_code: int, body: dict):
+    """Invoke `roost status <id>` with the CP `GET /jobs/{id}` response stubbed."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status_code, json=body)
+
+    monkeypatch.setattr(
+        roost_cli, "_ctx_client",
+        lambda _ctx: httpx.Client(base_url="http://cp",
+                                  transport=httpx.MockTransport(handler)),
+    )
+    return CliRunner().invoke(roost_cli.status, ["abc123"], obj={})
+
+
+def test_status_prefix_resolves(monkeypatch):
+    """A prefix that the server resolves comes back 200 and renders the full id."""
+    res = _status_via_mock(
+        monkeypatch, 200, {"id": "abc123def456", "state": "running"})
+    assert res.exit_code == 0, res.output
+    assert "abc123def456" in res.output
+
+
+def test_status_ambiguous_prefix_shows_candidates(monkeypatch):
+    """A 409 from the server (ambiguous prefix) surfaces the actionable detail
+    text — the colliding ids — not a raw httpx traceback."""
+    res = _status_via_mock(monkeypatch, 409, {
+        "detail": "job id prefix 'abc123' is ambiguous — matches 2 jobs: "
+                  "abc123000001, abc123000002. Use more characters."})
+    assert res.exit_code != 0
+    assert "ambiguous" in res.output
+    assert "abc123000001" in res.output and "abc123000002" in res.output
+    # No raw exception class leaked.
+    assert "HTTPStatusError" not in res.output and "Traceback" not in res.output
+
+
+def test_status_too_short_prefix_shows_friendly_error(monkeypatch):
+    """A 400 (prefix below the floor) surfaces the server's guidance cleanly."""
+    res = _status_via_mock(monkeypatch, 400, {
+        "detail": "job id prefix too short: need at least 6 chars (got 3); "
+                  "paste more of the id"})
+    assert res.exit_code != 0
+    assert "too short" in res.output
+    assert "HTTPStatusError" not in res.output and "Traceback" not in res.output
+
+
+def test_status_unknown_stays_terse_job_not_found(monkeypatch):
+    res = _status_via_mock(monkeypatch, 404, {"detail": "job not found"})
+    assert res.exit_code != 0
+    assert "job not found" in res.output
+
+
 # ---------- `roost backup` (R39) ----------
 
 
