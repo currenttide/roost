@@ -1034,6 +1034,64 @@ def test_list_str_command_submits_and_renders_joined(client: TestClient):
     assert run["goal"] == "git clone repo"
 
 
+# ---------- R88: /derived never 500s on a TRUTHY non-dict spec row ----------
+#
+# Promoted from LOOP/repro-a1-hunt9.py (A1 hunt #9). `_goal_text` and `_job_kind`
+# used `spec = job.get("spec") or {}`, which only substitutes for a FALSY spec
+# (None/{}/""). A TRUTHY non-dict spec — a JSON string/array/number that
+# `json.loads` produced from a legacy or drifted at-rest row in `_row_to_job` —
+# survived and then `spec.get(...)` raised AttributeError, 500ing GET /derived
+# (polled every 2s by every client) on a single bad row. The properly guarded
+# siblings (`_goal_display`, `_job_health`, `_annotate_liveness`) already coerce
+# with isinstance(..., dict); R88 brings these two to parity.
+
+
+@pytest.mark.parametrize("bad_spec", [
+    "image: nginx",       # JSON string → str (json.loads('"..."'))
+    ["docker", "run"],    # JSON array → list
+    42,                   # JSON number → int
+])
+def test_goal_text_coerces_truthy_nonstr_spec(bad_spec):
+    """A TRUTHY non-dict spec must coerce to {} and yield a str, never raise —
+    `or {}` only caught FALSY specs, leaving this AttributeError path open."""
+    out = server._goal_text({"spec": bad_spec})
+    assert isinstance(out, str)
+
+
+@pytest.mark.parametrize("bad_spec", [
+    "image: nginx",       # JSON string → str
+    ["docker", "run"],    # JSON array → list
+    42,                   # JSON number → int
+])
+def test_job_kind_coerces_truthy_nonstr_spec(bad_spec):
+    """The co-offender: same `or {}` bug, called second in _derive_run. A
+    non-dict spec must coerce to {} and degrade to the 'claude' default, not raise."""
+    out = server._job_kind({"spec": bad_spec})
+    assert isinstance(out, str)
+
+
+def test_derived_survives_truthy_nonstr_spec_row_in_db(tmp_path: Path):
+    """End-to-end: a single at-rest row whose stored `spec` JSON decodes to a
+    non-dict (here a JSON string) must still render through /derived — it must
+    not 500 the whole dashboard (polled every 2s). Injected with a raw INSERT to
+    model a legacy/drifted row that bypasses the submit-side type check."""
+    db = tmp_path / "roost.db"
+    app = server.create_app(db_path=db, token=TOKEN, run_sweeper=False)
+    with TestClient(app) as c:
+        c.headers.update({"Authorization": f"Bearer {TOKEN}"})
+        assert c.get("/derived").status_code == 200  # healthy with no jobs
+        with server._connect(db) as conn:
+            conn.execute(
+                "INSERT INTO jobs(id, spec, requires, state, created_at) "
+                "VALUES(?,?,?,?,?)",
+                ("badspec00001", json.dumps("image: nginx"), "{}", "queued",
+                 time.time()),
+            )
+        r = c.get("/derived")
+        assert r.status_code == 200, (
+            f"/derived 500'd on one truthy non-dict spec row: {r.status_code} {r.text}")
+
+
 # ---------- R86: glanceable `goal_display` summary for command jobs ----------
 #
 # `command` jobs put the full raw shell text where a glanceable goal belongs, so
