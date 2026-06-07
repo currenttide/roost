@@ -1338,6 +1338,61 @@ def test_schedule_create_server_error(monkeypatch):
     assert "schedule failed: HTTP 400" in res.output
 
 
+# R77: non-2xx on the read/mutate subverbs must surface a friendly one-line
+# error (parity with the create path's wording) — never a raw httpx traceback.
+# The motivating case: --list against a control plane without /schedules.
+
+
+def _assert_clean_error(res, code: str) -> None:
+    # A friendly ClickException → non-zero exit, no leaked traceback class name.
+    assert res.exit_code != 0
+    assert f"schedule failed: HTTP {code}" in res.output
+    assert "Traceback" not in res.output
+    assert "HTTPStatusError" not in res.output
+
+
+def test_schedule_list_404_friendly_error(monkeypatch):
+    # The verbatim user-test case: old CP with no /schedules route → 404.
+    _mock_ctx(monkeypatch, {
+        "GET /schedules": httpx.Response(404, text="Not Found"),
+    })
+    res = CliRunner().invoke(roost_cli.schedule, ["--list"], obj={})
+    _assert_clean_error(res, "404")
+
+
+def test_schedule_list_500_friendly_error(monkeypatch):
+    _mock_ctx(monkeypatch, {
+        "GET /schedules": httpx.Response(500, text="boom"),
+    })
+    res = CliRunner().invoke(roost_cli.schedule, ["--list"], obj={})
+    _assert_clean_error(res, "500")
+
+
+def test_schedule_rm_500_friendly_error(monkeypatch):
+    # 404 stays the dedicated "schedule not found"; other non-2xx → friendly.
+    _mock_ctx(monkeypatch, {
+        "DELETE /schedules/sch-x": httpx.Response(500, text="boom"),
+    })
+    res = CliRunner().invoke(roost_cli.schedule, ["--rm", "sch-x"], obj={})
+    _assert_clean_error(res, "500")
+
+
+def test_schedule_enable_500_friendly_error(monkeypatch):
+    _mock_ctx(monkeypatch, {
+        "PATCH /schedules/sch-x": httpx.Response(500, text="boom"),
+    })
+    res = CliRunner().invoke(roost_cli.schedule, ["--enable", "sch-x"], obj={})
+    _assert_clean_error(res, "500")
+
+
+def test_schedule_disable_500_friendly_error(monkeypatch):
+    _mock_ctx(monkeypatch, {
+        "PATCH /schedules/sch-x": httpx.Response(500, text="boom"),
+    })
+    res = CliRunner().invoke(roost_cli.schedule, ["--disable", "sch-x"], obj={})
+    _assert_clean_error(res, "500")
+
+
 # ---------- `roost publish --list` (R-era pagination via X-Total-Count) ----------
 
 

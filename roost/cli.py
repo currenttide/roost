@@ -1559,9 +1559,19 @@ def _fmt_interval(sec: float) -> str:
     return f"{sec:.0f}s"
 
 
+def _schedule_http_error(r) -> click.ClickException:
+    """One-line friendly error for a non-2xx on a schedule call (parity with
+    the create path), instead of letting raise_for_status() dump a raw
+    httpx.HTTPStatusError traceback — e.g. --list against an old control
+    plane that has no /schedules route returns 404."""
+    return click.ClickException(
+        f"schedule failed: HTTP {r.status_code}: {r.text}")
+
+
 def _print_schedules(c) -> None:
     r = c.get("/schedules")
-    r.raise_for_status()
+    if r.status_code >= 400:
+        raise _schedule_http_error(r)
     rows = r.json()
     if not rows:
         click.echo("no schedules")
@@ -1615,7 +1625,8 @@ def schedule(ctx: click.Context, goal: Optional[str], every: Optional[str],
             r = c.delete(f"/schedules/{rm_id}")
             if r.status_code == 404:
                 raise click.ClickException("schedule not found")
-            r.raise_for_status()
+            if r.status_code >= 400:
+                raise _schedule_http_error(r)
             click.echo(f"deleted {rm_id}")
             return
         if enable_id or disable_id:
@@ -1623,7 +1634,8 @@ def schedule(ctx: click.Context, goal: Optional[str], every: Optional[str],
             r = c.patch(f"/schedules/{sid}", json={"enabled": bool(enable_id)})
             if r.status_code == 404:
                 raise click.ClickException("schedule not found")
-            r.raise_for_status()
+            if r.status_code >= 400:
+                raise _schedule_http_error(r)
             s = r.json()
             if s["enabled"]:
                 click.echo(f"{sid} enabled — next run in "
