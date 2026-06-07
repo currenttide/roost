@@ -1563,7 +1563,21 @@ def publish(ctx: click.Context, directory: Optional[str], name: Optional[str],
             raise _admin_403("publish")
         if r.status_code >= 400:
             oneshot_err = f"HTTP {r.status_code}: {r.text}"
-            up = c.post(f"/blobs?name={slug_name}.tar.gz", content=bundle)
+            # The two-step fallback can fail at the transport layer too — a
+            # connection refused / reset mid-publish raises (httpx.HTTPError)
+            # rather than returning a status. If we let that propagate raw the
+            # user loses the original one-shot diagnosis, contradicting the R78
+            # contract ("if both paths fail you see the original error"). So
+            # any transport error from either fallback POST is wrapped, still
+            # leading with oneshot_err; `raise … from e` preserves the
+            # underlying exception so a real bug stays debuggable.
+            try:
+                up = c.post(f"/blobs?name={slug_name}.tar.gz", content=bundle)
+            except httpx.HTTPError as e:
+                raise click.ClickException(
+                    f"publish failed: {oneshot_err}\n"
+                    f"  (also tried the two-step blob flow for older control "
+                    f"planes; that failed too: {type(e).__name__}: {e})") from e
             if up.status_code in (401, 403):
                 raise _admin_403("publish")
             if up.status_code >= 400:
@@ -1571,8 +1585,14 @@ def publish(ctx: click.Context, directory: Optional[str], name: Optional[str],
                     f"publish failed: {oneshot_err}\n"
                     f"  (also tried the two-step blob flow for older control "
                     f"planes; that failed too: HTTP {up.status_code}: {up.text})")
-            r = c.post("/publish",
-                       json={"name": slug_name, "blob_id": up.json()["id"]})
+            try:
+                r = c.post("/publish",
+                           json={"name": slug_name, "blob_id": up.json()["id"]})
+            except httpx.HTTPError as e:
+                raise click.ClickException(
+                    f"publish failed: {oneshot_err}\n"
+                    f"  (also tried the two-step blob flow for older control "
+                    f"planes; that failed too: {type(e).__name__}: {e})") from e
             if r.status_code in (401, 403):
                 raise _admin_403("publish")
             if r.status_code >= 400:
