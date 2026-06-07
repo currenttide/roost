@@ -66,9 +66,9 @@ Surface: backend/robustness. A1 hunt #3. The `except` clause around `asyncio.cre
 Repro: `tests/test_judge_r4_bugs.py::test_bug4_other_oserror_does_not_escape_run_job` — FAILS on master.
 Done-when: except broadened to `OSError`; spawn failures post `type="failed"` and decrement `_running`; repro test passes; pytest green.
 
-### R27. `roost_submit` MCP schema missing `kind: auto` — `done` *(2026-06-06, PR loop/r27-roost-submit-kind-auto)* `self-promoted`
+### R27. `roost_submit` MCP schema missing `kind: auto` — `done` *(2026-06-06, PR #33)* `self-promoted`
 Surface: MCP/correctness. `roost/mcp.py` defined `kind` enum as `["claude","codex","docker"]`; `"auto"` was absent. Captain agents calling `roost_submit` with `kind: auto` were rejected by MCP schema validation before reaching the server.
-Done-when: `kind` enum includes `"auto"` with description clarifying it is the self-selecting verified path; INTEGRATIONS.md updated; test added; pytest green.
+Done-when: `kind` enum includes `"auto"` with description; INTEGRATIONS.md updated; test added; pytest green.
 
 ### R21. Make presigned blob PUT single-use and race-safe — `done` *(2026-06-07, PR #30)* `self-promoted`
 Surface: backend/security. A1 hunt #2 reproduced that a presigned `put_url`
@@ -189,7 +189,9 @@ first iteration on that ratchet measures and records it here (no code changes).
 
 ## Proposed (loop appends here; only humans promote)
 
-- **A6 (cycle #4, judge-approved — promote without re-judging in cycle #5):** ~~`roost_submit` MCP schema missing `kind: auto` — captains using `roost_submit` always get unverified jobs~~ — **done as R27** *(2026-06-06, PR loop/r27-roost-submit-kind-auto)*
+<<<<<<< Updated upstream
+=======
+>>>>>>> Stashed changes
 - **A6 (cycle #4, judge-approved — promote without re-judging in cycle #5):** INTEGRATIONS.md tool table documents 9 of 16 MCP tools — `stage_file`, `send_file`, `fetch_file`, `list_staged`, `roost_schedule`, `roost_wait` are invisible to new users
 - **A6 (cycle #4, judge-approved — promote without re-judging in cycle #5):** `roost history` and `roost prune-workers` are implemented (cli.py:1916, :1029) but absent from README.md and INTEGRATIONS.md
 - **A6 (cycle #4, unblocked from Proposed):** Mobile one-shot publish parity — server landed with R7 (PR #15); just needs API.md §6 + iOS/Android decode layers (no server changes)
