@@ -244,9 +244,14 @@ Surface: backend/robustness. A1 hunt #7 (PR #80). One root cause, two surfaces: 
 Repro: `LOOP/repro-a1-hunt7.py` — 2 tests FAIL ×3 on master (assert 500 == 200).
 Done-when: serializers never raise on any accepted payload (defensive str coercion at both spots — proven by the hunter); ADDITIONALLY tighten submit-side typing only as far as is provably non-breaking (investigate what command shapes are legitimately accepted/used today — a plain str-or-list[str] union validated at submit beats Any, but do NOT break a legitimate caller; document the decision); repros promoted into tests/; repro file deleted; pytest green (812 base).
 
-### R71. A1 hunt #8 — docker executor lens — `open` `self-promoted`
+### R71. A1 hunt #8 — docker executor lens — `done` *(2026-06-07, PR #82 — 1 confirmed, 7 cleared)* `self-promoted`
 Surface: hunt (deepening). The docker executor has never been hunted as a unit (R1 touched argv hardening only): container lifecycle (create/wait/kill/timeout interplay), GPU flag plumbing, mount/workdir semantics, exit-code propagation, log relay from container stdio, teardown when docker itself is slow/wedged. SKIP security-surface findings (mount escapes, privilege — security session); this lens is correctness/robustness for legitimate specs.
 Done-when: repros (LOOP/repro-a1-hunt8.py) merged after judge verification, or an honest all-clear (= deepening-clear #1 toward long-idle).
+
+### R72. Unbounded docker-kill wait hangs teardown on a wedged daemon — `open` `self-promoted`
+Surface: backend/robustness. A1 hunt #8 (PR #82). `_kill_active_job` (worker.py ~1226-1234) awaits `docker kill`/`docker rm -f` with a bare `await k.wait()` — the ONLY subprocess wait in worker.py without a timeout. A wedged dockerd (real GPU-box failure mode) hangs the wallclock-timeout path, the server-cancel path, AND graceful `_shutdown_jobs`; the hang sits inside run_job's try before the R25 finally, so no terminal event posts and `_running` leaks permanently.
+Repro: `LOOP/repro-a1-hunt8.py` — 2 tests (unit + run_job integration) FAIL ×3 on master (~20s real hang each).
+Done-when: both teardown waits bounded (`asyncio.wait_for` + kill the stuck CLI process on expiry — match the proven fix shape; pick the timeout consistent with the docker-info probe's 20s and justify); the failure is loud (log line: daemon unresponsive, container may still be running — operator must intervene); repros promoted into tests/, repro file deleted; pytest green (820 base).
 
 ### R21. Make presigned blob PUT single-use and race-safe — `done` *(2026-06-07, PR #30)* `self-promoted`
 Surface: backend/security. A1 hunt #2 reproduced that a presigned `put_url`

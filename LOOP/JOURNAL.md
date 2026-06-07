@@ -1962,3 +1962,25 @@ Entries are written by the loop; humans read, never need to edit.
   R19/R20 superseded-by-design assertions, journaled then); repro-a1-hunt2.py
   KEPT (R22/R23's security-session repros). Cycle #22 = R71, hunt #8 (docker
   executor — last never-hunted unit).
+
+## 2026-06-07 ~20:30 UTC — A1 hunt #8: docker executor (cycle #23 prep)
+- Verdict: shipped (repros merged; 1 confirmed, 7 cleared)
+- Branch/PR: loop/replenish-hunt8 / https://github.com/currenttide/roost/pull/82 (merged 41b063a; repro only, worker.py md5 pristine)
+- What changed: the last never-hunted unit. CONFIRMED: _kill_active_job's bare
+  `await k.wait()` on docker kill/rm — the only un-timeouted subprocess wait in
+  worker.py (the docker-info probe uses timeout=20; every other wait is wrapped).
+  Wedged dockerd → wallclock-kill, server-cancel, and _shutdown_jobs ALL hang;
+  inside run_job's try before the R25 finally → no terminal event, permanent
+  _running leak. Repro'd at the stubbed subprocess seam (faithful _WedgedProc),
+  no daemon needed; non-tautology proven (wait_for + kill-stuck-CLI → pass;
+  revert → fail; md5 cycle). CLEARED ×7: GPU flag plumbing (incl. verbatim
+  device=/MIG), 125/126/127 exit-code mapping (never success), 64KiB relay guard
+  under docker framing, container-name validity, stream-json misparse, stale
+  docker capability (placement concern, executor honest), kill-order vs --rm.
+  needs-live-docker: none — everything provable at the seam.
+- Evidence: repro 2 failed ×3 (~20s real hang); `python -m pytest -q` → 820
+- Judge: APPROVE (round 1) — both gates re-run, asymmetry verified from source,
+  all clears AGREE-CLEAR, no clear misclassified
+- Models: hunter claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only)
+- Notes: iteration #21 complete. Deepening yield holds (hunts #5-#8: 5 bugs).
+  Cycle #23 = R72 (bounded teardown). Long-idle counter stays 0.
