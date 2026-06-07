@@ -3,7 +3,13 @@
          theme (Theme.kt); this XML theme only needs to be a Material3 parent so
          the system bars and splash behave, with no action bar (Compose draws all UI). -->
     <style name="Theme.RoostMobile" parent="android:Theme.Material.NoActionBar">
+        <!-- enableEdgeToEdge() + Compose draws under both system bars; the Compose root
+             (RoostTheme) consumes the system-bar insets and paints the app background.
+             Keep both bars transparent so the app background shows through, and use a
+             neutral window background (not opaque black) so the splash→content handoff
+             doesn't flash a black bar behind the transparent status bar. -->
         <item name="android:statusBarColor">@android:color/transparent</item>
-        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowBackground">@android:color/white</item>
     </style>
 </resources>

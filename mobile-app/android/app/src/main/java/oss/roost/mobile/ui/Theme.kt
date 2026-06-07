@@ -1,10 +1,17 @@
 package oss.roost.mobile.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 
 // Roost palette: calm slate background, blue accent, semantic green/red/amber for verdicts.
@@ -39,5 +46,23 @@ object Semantic {
 @Composable
 fun RoostTheme(content: @Composable () -> Unit) {
     val colors = if (isSystemInDarkTheme()) DarkColors else LightColors
-    MaterialTheme(colorScheme = colors, content = content)
+    MaterialTheme(colorScheme = colors) {
+        // MainActivity calls enableEdgeToEdge(): the window draws under the status and
+        // navigation bars. Nothing else in the tree was consuming those insets, so on the
+        // dashboard the TopAppBar collapsed behind the (transparent) status bar — its only
+        // overflow menu (Publish/Notifications/Schedules) became unreachable — and on the
+        // session screen the back-arrow crowded the status-bar clock. Apply the system-bar
+        // insets ONCE at the app root: windowInsetsPadding both pads AND consumes them, so
+        // every screen sits below the status bar / above the nav bar and the per-screen
+        // TopAppBar default insets downstream resolve to zero (no double padding). One
+        // source of truth fixes the dashboard blocker and the session crowding together.
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(colors.background)
+                .windowInsetsPadding(WindowInsets.systemBars),
+        ) {
+            content()
+        }
+    }
 }
