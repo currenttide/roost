@@ -499,3 +499,35 @@ Entries are written by the loop; humans read, never need to edit.
   first-line model-ID block present)
 - Notes: Docs-drift ratchet honestly back to 0. Next: R16 (up-orchestration
   tests), then R17 (config/triage tests).
+
+## 2026-06-07 04:55 UTC — R16: Tests for the `roost up` orchestration
+- Verdict: shipped (judge round 2)
+- Branch/PR: loop/r16-up-tests / https://github.com/currenttide/roost/pull/23
+- What changed: tests-only — new tests/test_up.py (13 tests, no processes/
+  sockets; _spawn_detached records argv, service.install / enroll /
+  _smoke_test / _worker_already_running stubbed, bootstrap pollers patched,
+  HTTP via MockTransport, ROOST_CONFIG_DIR+ROOST_HOME → tmp). Covers the
+  fresh-CP full path (serve argv + minted token, detached worker when
+  isolated, enroll → config/env persistence incl. the real
+  enroll-replaces-credential behavior), reuse/skip paths, supervised-service
+  branch + detached fallback, and the failure paths (explicit-url
+  unreachable, CP never healthy, enroll 403, worker never registers, smoke
+  warns-but-exit-0), plus _roost_argv and _smoke_test units.
+- Evidence:
+  - `python -m pytest -q` → 495 passed in 16.04s (was 482; +13, none removed)
+  - coverage: cli.py 28% → 36% branch, TOTAL 63% → 65% (ratchet up)
+- Judge: revise (round 1) → approve (round 2). ROUND-1 CATCH (real, safety):
+  the two non-isolated service tests delenv'd ROOST_CONFIG_DIR without
+  pinning XDG_CONFIG_HOME, so the orchestration's config writes CLOBBERED
+  the operator's real ~/.config/roost/config.toml — the judge proved it
+  empirically. INCIDENT: my earlier local runs had already done exactly
+  that; the live fleet config was restored from ~/roost-fleet/admin_token
+  and re-verified (`roost workers` lists the fleet). Fix: _deisolate_config_dir
+  pins XDG_CONFIG_HOME→tmp BEFORE the delenv. Round 2 re-proved with sha256
+  before/after two runs (byte-identical) + a default_config_path() probe.
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (fenced
+  first-line model-ID block present, both rounds)
+- Notes: the judge gate caught a test-suite side effect the implementer ran
+  TWICE without noticing — exactly the failure mode the different-model
+  judge exists for. Real-config hygiene now has a reusable helper + loud
+  comment. Next: R17 (config/triage tests, last Ranked item).
