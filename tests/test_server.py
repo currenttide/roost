@@ -9,6 +9,8 @@ relies on.
 from __future__ import annotations
 
 import json
+import sqlite3
+import threading
 import time
 from pathlib import Path
 
@@ -1786,3 +1788,155 @@ def test_metrics_requires_admin(client: TestClient):
     assert r.status_code == 401, r.text
     # Admin (default fixture headers) → 200.
     assert client.get("/metrics").status_code == 200
+
+
+# ---------- Online backup (`roost backup` / GET /admin/backup, R39) ----------
+
+
+def _job_count(db: Path) -> int:
+    """Open a snapshot/DB file read-only-ish and count rows in `jobs`."""
+    conn = sqlite3.connect(db)
+    try:
+        return conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
+    finally:
+        conn.close()
+
+
+def test_backup_requires_admin(client: TestClient):
+    """[R39] /admin/backup is admin-only, like the other janitorial routes."""
+    _, cred = _enroll_worker(client, {"tools": ["python3"]})
+    # Worker credential → 403.
+    r = client.get("/admin/backup", headers={"Authorization": f"Bearer {cred}"})
+    assert r.status_code == 403, r.text
+    # Missing bearer → 401.
+    r = client.get("/admin/backup", headers={"Authorization": ""})
+    assert r.status_code == 401, r.text
+    # Invalid bearer → 401.
+    r = client.get("/admin/backup", headers={"Authorization": "Bearer nope"})
+    assert r.status_code == 401, r.text
+    # Admin (default fixture headers) → 200 with a non-empty body.
+    r = client.get("/admin/backup")
+    assert r.status_code == 200, r.text
+    assert len(r.content) > 0
+
+
+def test_backup_roundtrip_readable(client: TestClient, tmp_path: Path):
+    """[R39] A backup is a self-contained, valid SQLite DB that round-trips: it
+    passes integrity_check and a restored copy is readable with the same fleet
+    state (worker + jobs the running CP holds)."""
+    worker_id, _ = _enroll_worker(client, {"tools": ["python3"]})
+    for i in range(5):
+        assert client.post("/jobs", json={"command": f"echo {i}"}).status_code == 200
+
+    r = client.get("/admin/backup")
+    assert r.status_code == 200, r.text
+    # A sensible download name (version + .db) so archives are self-describing.
+    cd = r.headers.get("content-disposition", "")
+    assert "roost-backup-" in cd and ".db" in cd
+
+    restored = tmp_path / "restored.db"
+    restored.write_bytes(r.content)
+
+    conn = sqlite3.connect(restored)
+    try:
+        assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        # State the running CP holds is present in the snapshot.
+        assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 5
+        row = conn.execute(
+            "SELECT name FROM workers WHERE id=?", (worker_id,)
+        ).fetchone()
+        assert row is not None
+    finally:
+        conn.close()
+
+
+def test_backup_consistent_under_concurrent_writes(tmp_path: Path):
+    """[R39] The core guarantee: a snapshot taken while writes are in flight is
+    internally consistent (integrity_check passes), and its row count is sane —
+    between the count before the writes started and a final quiesced copy. A naive
+    file copy under WAL could capture a torn state; the online backup API cannot.
+    """
+    db = tmp_path / "roost.db"
+    app = server.create_app(db_path=db, token=TOKEN, run_sweeper=False)
+    with TestClient(app) as c:
+        c.headers.update({"Authorization": f"Bearer {TOKEN}"})
+
+        # Seed a baseline so the backup is never racing an empty DB.
+        for i in range(10):
+            assert c.post("/jobs", json={"command": f"seed {i}"}).status_code == 200
+        baseline = _job_count(db)
+        assert baseline == 10
+
+        stop = threading.Event()
+        errors: list[str] = []
+
+        def hammer() -> None:
+            n = 0
+            while not stop.is_set() and n < 200:
+                resp = c.post("/jobs", json={"command": f"w {n}"})
+                if resp.status_code != 200:
+                    errors.append(resp.text)
+                    return
+                n += 1
+
+        writer = threading.Thread(target=hammer)
+        writer.start()
+        try:
+            # Take several backups while writes are actively in flight.
+            snapshots: list[Path] = []
+            for k in range(3):
+                r = c.get("/admin/backup")
+                assert r.status_code == 200, r.text
+                snap = tmp_path / f"snap-{k}.db"
+                snap.write_bytes(r.content)
+                snapshots.append(snap)
+        finally:
+            stop.set()
+            writer.join(timeout=10)
+        assert not errors, f"writer hit errors: {errors[:3]}"
+        assert not writer.is_alive()
+
+        final = _job_count(db)
+        assert final > baseline  # writes actually happened during the window
+
+        for snap in snapshots:
+            conn = sqlite3.connect(snap)
+            try:
+                assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+                count = conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
+            finally:
+                conn.close()
+            # A consistent point-in-time snapshot: at least the baseline, never
+            # more than the fully-quiesced final count.
+            assert baseline <= count <= final, (
+                f"snapshot row count {count} outside [{baseline}, {final}]"
+            )
+
+
+def test_backup_leaves_no_temp_file_behind(client: TestClient, tmp_path: Path):
+    """[R39] The server-side temp snapshot is cleaned up after the response is
+    streamed — repeated backups must not accumulate files in the temp dir."""
+    import tempfile
+
+    before = set(Path(tempfile.gettempdir()).glob("roost-backup-*.db"))
+    for _ in range(3):
+        assert client.get("/admin/backup").status_code == 200
+    after = set(Path(tempfile.gettempdir()).glob("roost-backup-*.db"))
+    # No new roost-backup temp files linger once the responses have been sent.
+    assert after <= before
+
+
+def test_backup_temp_file_cleaned_up_on_client_disconnect(client: TestClient):
+    """[R39] The snapshot is streamed from a generator whose `finally` deletes the
+    temp file, so even a client that disconnects mid-download leaves nothing behind
+    (a leaked file would be a full copy of the fleet DB in the temp dir)."""
+    import tempfile
+
+    before = set(Path(tempfile.gettempdir()).glob("roost-backup-*.db"))
+    # Open the stream but abandon it without reading the body — a client disconnect.
+    with client.stream("GET", "/admin/backup") as resp:
+        assert resp.status_code == 200
+        # leave the context without iter_bytes(): closing the response tears down
+        # the server-side generator (GeneratorExit → finally → unlink).
+    after = set(Path(tempfile.gettempdir()).glob("roost-backup-*.db"))
+    assert after <= before
