@@ -440,15 +440,27 @@ Done-when: the fallback blob POST and second `/publish` POST wrapped so transpor
 
 Fresh measure: **80% TOTAL branch @ 884 tests** (judge re-measured); session-added code fully covered; weakest: cli.py 62%, worker.py 72%. Six Tier-A items judged across the two slates; three promoted now, three queued (next slot): A6-2 iOS README count (STAMPED 92/92 vs claimed 58/58), A6-3 panel 401 wording (panel.html:243,412), A2-3 worker process-safety branches (_kill_active_job/_kill_aux_procs, worker.py:1205-1310).
 
-### R94. `roost history` ignores `goal_display` — the last raw-shell-text surface — `open` `self-promoted`
+### R94. `roost history` ignores `goal_display` — the last raw-shell-text surface — `done` *(2026-06-07, PR #105)* `self-promoted`
 Surface: backend/CLI/consistency. A6 survey #3 rank 1. R86 wired the glanceable summary into panel/mac/iOS/Android and `server.py:985`'s docstring names `roost history` as a consumer — but `_history_row` (cli.py:344) and `_recent_successes` (cli.py:375) read raw `run.get("goal")`. The documented "what went wrong this week" entry point still shows the wall of shell text the R86 nit was filed about.
 Done-when: both render `run.get("goal_display") or run.get("goal")` (fallback = old-CP safe); `_history_runs`'s has-a-real-goal filter stays on `goal`; tests extend tests/test_cli.py:367-426 (summary rendered; fallback when absent); pytest green.
 
-### R95. cli.py client-token surface coverage lift — `open` `self-promoted`
+### R95. cli.py client-token surface coverage lift — `done` *(2026-06-07, PR #106 — 62→67% branch, mutation-probed)* `self-promoted`
 Surface: tests/ratchet. A2 rank 1 (cli.py 62% branch — weakest module). `pair`/`token`/`revoke` + `_list_client_tokens`/`_revoke_client_token`/`_mint_client_token` (cli.py:941-1052): untested 403/404/empty/≥400 dispatch branches, revoked-vs-active + last-used formatting, distinct loopback warnings (phone vs script), QR fallback. Expected +4-6 branch points on cli.py.
 Done-when: real-behavior assertions via CliRunner + stubbed `_ctx_client`/MockTransport (R16 style, no processes); every error/dispatch branch asserted on observable output or exception type; cli.py branch coverage strictly up (judge re-measures + mutation-probes); no module down; pytest green.
 
-### R96. worker.py pure argv-builder coverage (`_build_auto_argv` + `_build_codex_argv`) — `open` `self-promoted`
+### R96. worker.py pure argv-builder coverage (`_build_auto_argv` + `_build_codex_argv`) — `done` *(2026-06-07, PR #107 — 72→75%; R30 anchoring verified, no new bug)* `self-promoted`
+
+### R97. iOS README pure-layer harness count stale — stamp it — `open` `self-promoted`
+Surface: docs/iOS. A6 survey #3 rank 2, Tier A STAMPED (surveyor ran the harness: **92/92** on Swift 6.0.3 vs the claimed 58/58 at mobile-app/ios/README.md:257).
+Done-when: README:257 states the verified current count with a re-stamped date, or count-free phrasing the judge confirms can't drift (R91 precedent — prefer this); harness re-run green via the documented recipe on /tmp/swift-toolchain as the evidence; docs-drift ratchet stays 0; pytest green.
+
+### R98. Panel labels auth failures as "control plane unreachable" — `open` `self-promoted`
+Surface: panel/UX. A6 survey #3 rank 3 (user-test n7, re-confirmed). panel.html:243 throws `Error("HTTP " + r.status)` for any non-2xx; the catch at :412 prefixes EVERY error with "control plane unreachable — " → a bad token renders the self-contradictory "control plane unreachable — HTTP 401". The CP answered; it's an auth failure.
+Done-when: HTTP-status errors (esp. 401/403) render an auth/permission message distinct from transport failures' "unreachable" wording; transport wording unchanged; verified by rendered verdict text for a 401 response vs a fetch reject (Playwright against a scratch CP — browsers cached — or capped honestly per evidence table); server untouched; pytest green.
+
+### R99. worker.py process-safety branch coverage (`_kill_active_job` / `_kill_aux_procs`) — `open` `self-promoted`
+Surface: tests/ratchet. A2 rank 3 (worker.py now 75% after R96). worker.py:1205-1310: untested two-level kill fallback (`os.killpg` → ProcessLookupError/PermissionError → `proc.kill()`), docker-kill timeout teardown, aux-proc reaping. Judge note from the slate: `_kill_aux_procs` + early-return are trivially sync-testable — do those first; only the docker-timeout async seam is harder (R72's tests are adjacent precedent).
+Done-when: stubbed `os.killpg`/proc seams assert the fallback paths; sync wins first, async docker-timeout second; worker.py branch coverage strictly up; judge mutation-probes; no module down; pytest green.
 Surface: tests/ratchet. A2 rank 2 (worker.py 72%). Zero existing test references for worker.py:1068-1125: missing task/intent → ValueError; triage-prompt insertion at the CORRECT index incl. bwrap-wrapped argv (security-relevant — R30's bug class); sandbox/model defaulting; codex-missing → FileNotFoundError (monkeypatch shutil.which); args passthrough. Expected +2-3 branch points.
 Done-when: direct pure-function assertions on argv shape + raised errors; judge mutation-probes; no module down; pytest green.
 

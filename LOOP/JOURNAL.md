@@ -2545,3 +2545,50 @@ Entries are written by the loop; humans read, never need to edit.
 - Models: orchestrator claude-opus-4-8[1m]; surveyors opus; judges sonnet
 - Notes: both judges re-ran the measurements themselves (coverage report
   re-derived; iOS harness re-run 92/92).
+
+## 2026-06-07 ~22:17 UTC — R94: history/capabilities render goal_display (iteration #30)
+- Verdict: shipped
+- Branch/PR: loop/r94-history-goal-display / https://github.com/currenttide/roost/pull/105 (merged 33f3fed)
+- What changed: `_history_row` + `_recent_successes` render
+  `goal_display or goal` (old-CP-safe fallback); the has-a-real-goal filter
+  deliberately stays on raw `goal`; scope grep confirmed no other display-only
+  goal sites. The last raw-shell-text surface from the R86 nit is closed.
+- Evidence: 2 fail-on-master tests + 1 fallback pin; pytest 887; judge stashed
+  the fix to re-prove the failures
+- Judge: approve (round 1)
+- Models: implementer claude-opus-4-8[1m] / judge claude-sonnet-4-6
+
+## 2026-06-07 ~22:17 UTC — R95: cli token-surface coverage 62→67% (iteration #30)
+- Verdict: shipped
+- Branch/PR: loop/r95-cli-token-coverage / https://github.com/currenttide/roost/pull/106 (merged c420712)
+- What changed: 24 real-behavior tests over pair/token/revoke + the three
+  client-token helpers (403/404/empty/≥400 dispatch, revoked-vs-active,
+  last-used formatting, distinct phone-vs-script loopback warnings, QR
+  fallback, env-snippet output). Tests only; zero product code; no bug found.
+- Evidence: cli.py 62→67% branch (misses 511→440); no module down; implementer
+  AND judge each ran mutation probes (e.g. 404-message flip → asserting test
+  fails); clean rebase over R94 (same test file, different region)
+- Judge: approve (round 1) — re-measured + own mutation probe
+- Models: implementer claude-opus-4-8[1m] / judge claude-sonnet-4-6
+
+## 2026-06-07 ~22:17 UTC — R96: worker argv-builder tests, 72→75% (iteration #30)
+- Verdict: shipped
+- Branch/PR: loop/r96-argv-builder-tests / https://github.com/currenttide/roost/pull/107 (merged 10cc3e3)
+- What changed: full branch coverage of `_build_auto_argv`/`_build_codex_argv`
+  (worker.py:1083-1125): ValueError paths, task-precedence, sandbox/model
+  defaulting, triage-splice present/absent, BWRAP-WRAPPED splice anchored via
+  `argv.index("claude")` (the R30 bug class — asserted by exact position),
+  codex missing-CLI FileNotFoundError, args passthrough. Tests only. NO new
+  fixed-index bug found — R30's anchoring verified correct at both sites.
+- Evidence: worker.py 72→75%; suite green; judge mutation probes (cut-index
+  flip + codex arg-order swap → tests fail). Judge round 1 was a `revise`
+  FALSE ALARM: a stale pre-R94 base made the diff look like it deleted cli
+  tests; rebase showed tests/test_worker.py only — round 2 approve.
+- Models: implementer claude-opus-4-8[1m] / judge claude-sonnet-4-6
+- Notes: iteration #30 totals: 3/3 (PRs #105 #106 #107), suite 884 → 924
+  collected. Coverage-reporting footnote: R95 quoted a TOTAL of 89→90% vs the
+  A2 baseline's 80% — different measurement scope (likely incl. tests/);
+  per-module numbers (cli 62→67, worker 72→75) are consistent across all runs
+  and are what the ratchet tracks; next A2 re-measure reconciles TOTAL.
+  Next: promote the queued Tier-A trio (A6-2 iOS README count, A6-3 panel 401
+  wording, A2-3 worker process-safety branches) as R97-R99 → iteration #31.
