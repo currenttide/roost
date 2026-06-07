@@ -893,3 +893,27 @@ Entries are written by the loop; humans read, never need to edit.
 - Notes: iteration #2, slot 2 of 3. Single-line INTEGRATIONS.md edit inside the
   CLI block avoided conflict with R28's concurrent tool-table edit — merged
   clean, no rebase. Replenish-prep (slot 3) still in flight.
+
+## 2026-06-06 ~22:25 UTC — Replenishment cycle #6 prep: hunt-#3 deferred bugs repro'd
+- Verdict: shipped (slate prep; promotions follow immediately)
+- Branch/PR: loop/replenish-5-prep / https://github.com/currenttide/roost/pull/39 (merged a0dea76)
+- What changed: LOOP/repro-a1-hunt3.py only (190 lines; not collected by the
+  default suite). Both A1 hunt-#3 deferred bugs re-verified against current
+  master and CONFIRMED: Bug A (bwrap argv corruption, worker.py:2028-2029 —
+  splice at fixed argv[:3] lands inside bwrap flags) and Bug B (relay tasks
+  leaked on CancelledError, worker.py:2076-2091 — gather inside try, not
+  finally). Implementer also applied the obvious fixes temporarily to prove the
+  tests then PASS (not tautologies), then reverted byte-identical.
+- Evidence:
+  - `python -m pytest -q LOOP/repro-a1-hunt3.py` → 2 failed, deterministic
+    across 5 runs, each for the claimed reason
+  - `python -m pytest -q` → 541 passed (LOOP/ not collected)
+- Judge: approve (round 1) — re-ran both commands, independently confirmed both
+  bugs + test honesty
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6
+- Notes: iteration #2 slot 3 of 3 — iteration complete (R28 #37, R29 #38,
+  prep #39). Cycle #6 promotions: R30 (Bug A) + R31 (Bug B) enter Ranked with
+  judge-approved repros; R32 (version drift) promoted via A6 from Proposed,
+  gates to be judge-verified pre-implementation. R30+R31 share _oneshot_agent —
+  dispatched to ONE agent sequentially (two PRs) to avoid same-function
+  conflicts; R32 parallel.

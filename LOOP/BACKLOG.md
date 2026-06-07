@@ -78,6 +78,20 @@ Done-when: tool table contains every tool in TOOL_IMPL with one-line description
 Surface: docs. A6 survey cycle #4 (judge-approved, fast-tracked per protocol). Both commands fully implemented (cli.py:1916, cli.py:1029) but absent from README.md's "Inspect & control runs" table and docs/INTEGRATIONS.md. `roost history --failed` is the natural "what went wrong this week" entry point and no user can discover it.
 Done-when: README.md inspect/control table includes `roost history [--failed]` and `roost prune-workers`; INTEGRATIONS.md CLI section mentions `roost history`; pytest green (docs-drift ratchet stays 0).
 
+### R30. `_oneshot_agent` corrupts bwrap argv when inserting `--append-system-prompt` — `open` `self-promoted`
+Surface: backend/correctness. A1 hunt #3 deferred bug, repro'd + judge-approved in cycle #6 prep (PR #39). `roost/worker.py:2028-2029`: with policy `sandbox: "bwrap"`, the argv is bwrap-wrapped but the code splices `--append-system-prompt` at fixed index `argv[:3]`, landing inside bwrap's flags (`--ro-bind / /` → `--ro-bind / --append-system-prompt … /`). `_build_auto_argv` (line ~1013) does it correctly via `argv.index("claude")`.
+Repro: `LOOP/repro-a1-hunt3.py::test_oneshot_agent_keeps_bwrap_argv_intact_with_system_prompt` — FAILS on master.
+Done-when: insertion anchored to the `claude` position (parity with `_build_auto_argv`); repro passes; pytest green.
+
+### R31. `_oneshot_agent` leaks relay tasks on CancelledError — `open` `self-promoted`
+Surface: backend/robustness. A1 hunt #3 deferred bug, repro'd + judge-approved in cycle #6 prep (PR #39). `roost/worker.py:2076-2091`: relay tasks `t1`/`t2` are gathered inside `try`, not `finally`; a cancel during `asyncio.wait_for(proc.wait(), …)` skips the gather and the tasks float as pending (asyncio warnings, test interference).
+Repro: `LOOP/repro-a1-hunt3.py::test_oneshot_agent_cancels_relay_tasks_on_cancellation` — FAILS on master.
+Done-when: finally cancels/awaits both relay tasks on every exit path; repro passes; pytest green.
+
+### R32. Single-source the version (pyproject 0.1.0 vs server 0.2.0) — `open` `self-promoted`
+Surface: backend/correctness. A6 promotion from Proposed (found during I0; gates: additive ✓, code-verifiable ✓, concrete done-when ✓, no design decision ✓ — implementing agent's judge must verify the gates before implementation per protocol). The running CP self-reports 0.2.0 while pyproject.toml says 0.1.0.
+Done-when: version read from package metadata (e.g. `importlib.metadata`) at one source of truth; `GET /healthz` and pyproject agree; test pins the equality; pytest green.
+
 ### R21. Make presigned blob PUT single-use and race-safe — `done` *(2026-06-07, PR #30)* `self-promoted`
 Surface: backend/security. A1 hunt #2 reproduced that a presigned `put_url`
 remains valid after the first upload finalizes the blob: replaying the same URL
@@ -202,8 +216,6 @@ first iteration on that ratchet measures and records it here (no code changes).
 >>>>>>> Stashed changes
 - **A6 (cycle #4, unblocked from Proposed):** Mobile one-shot publish parity — server landed with R7 (PR #15); just needs API.md §6 + iOS/Android decode layers (no server changes)
 - **A6 (cycle #4, unblocked from Proposed):** Version drift — `pyproject.toml` says `0.1.0`, server self-reports `0.2.0`; single-source via `importlib.metadata`
-- **A1 (cycle #4 hunt #3, repro in tests/test_judge_r4_bugs.py):** `_oneshot_agent` corrupts bwrap argv when inserting `--append-system-prompt` — inserts at `argv[:3]` (inside bwrap flags) instead of finding the `claude` position
-- **A1 (cycle #4 hunt #3):** Relay tasks `t1`/`t2` in `_oneshot_agent` not cancelled in `finally` block — float as pending tasks on `CancelledError`, causing asyncio warnings and test interference
 - Published-site listing pagination (`/publish` list unbounded, roost/server.py:2150)
 - Drop `cred_hash` on worker revoke — make revocation total
 - Capability detection: distinguish "no GPU" from "GPU detection failed" (worker logs)
@@ -219,7 +231,6 @@ first iteration on that ratchet measures and records it here (no code changes).
 - Mobile push notifications (DESIGN.md v1.1 — ntfy/UnifiedPush)
 - Interactive follow-up to running agent jobs (DESIGN.md §3.2, v2)
 - Mac app follow-ups (the native SwiftPM app lands with I1; webview wrapper is the deleted PoC — never resurrect it)
-- Version drift: running CP self-reports 0.2.0, pyproject.toml says 0.1.0 — single-source the version (found during I0, 2026-06-06)
 - Publish UI wiring: iOS/Android screens for pick-bundle → upload → publish → share-link (decode layers + contract landed with R6, PR #14, 2026-06-06)
 - Mobile one-shot publish parity: expose `POST /publish?name=` (raw body) in API.md §6 + fixtures + decode layers (server side landed with R7, PR #15, 2026-06-06)
 - Lease-expiry requeue grace analog: should a sweeper requeue also restart the placement-grace window (R19 restarted it for declines only — real failures may deserve different semantics)? (2026-06-07)
