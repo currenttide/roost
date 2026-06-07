@@ -160,7 +160,7 @@ struct TransfersPane: View {
             transfersSection
             stagedSection
         }
-        .task { try? await model.transfers.refreshStaged() }
+        .task { await model.transfers.loadStaged() }
     }
 
     @ViewBuilder
@@ -191,32 +191,65 @@ struct TransfersPane: View {
     @ViewBuilder
     private var stagedSection: some View {
         Section {
-            ForEach(model.transfers.staged) { blob in
-                HStack(spacing: 8) {
-                    Image(systemName: "doc")
-                        .foregroundStyle(.secondary)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(blob.name).font(.callout)
-                        Text("\(ByteCountFormatter.string(fromByteCount: Int64(blob.size), countStyle: .file)) · expires \(RelativeTime.signed(blob.expiresAt))")
-                            .font(.caption2)
+            // One state, one screen — the RoostKit decision guarantees a load
+            // failure (404 or transport) is surfaced rather than swallowed into a
+            // silent empty section (the R93 bug).
+            switch model.transfers.stagedState {
+            case .loading:
+                HStack {
+                    ProgressView().controlSize(.small)
+                    Text("Loading staged files…").font(.caption).foregroundStyle(.secondary)
+                }
+            case .unavailable:
+                Text("Staging isn't available on this control plane (older server). Update the control plane to use the fleet clipboard.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            case .error(let message):
+                VStack(alignment: .leading, spacing: 6) {
+                    Label("Couldn't load staged files", systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                    Text(message).font(.caption2).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("Retry") { Task { await model.transfers.loadStaged() } }
+                        .buttonStyle(.link)
+                        .font(.caption)
+                }
+            case .empty:
+                Text("Nothing staged yet.").font(.caption).foregroundStyle(.secondary)
+            case .list:
+                ForEach(model.transfers.staged) { blob in
+                    HStack(spacing: 8) {
+                        Image(systemName: "doc")
                             .foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(blob.name).font(.callout)
+                            Text("\(ByteCountFormatter.string(fromByteCount: Int64(blob.size), countStyle: .file)) · expires \(RelativeTime.signed(blob.expiresAt))")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(blob.getURL, forType: .string)
+                        } label: { Image(systemName: "link") }
+                            .buttonStyle(.borderless)
+                            .help("Copy fleet URL — paste it into a goal: “fetch <url> and run it”")
+                        Button {
+                            Task { await model.transfers.deleteStaged(blob) }
+                        } label: { Image(systemName: "trash") }
+                            .buttonStyle(.borderless)
                     }
-                    Spacer()
-                    Button {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(blob.getURL, forType: .string)
-                    } label: { Image(systemName: "link") }
-                        .buttonStyle(.borderless)
-                        .help("Copy fleet URL — paste it into a goal: “fetch <url> and run it”")
-                    Button {
-                        Task { await model.transfers.deleteStaged(blob) }
-                    } label: { Image(systemName: "trash") }
-                        .buttonStyle(.borderless)
                 }
             }
-            Button("Stage a file…") { stageViaPanel() }
-                .buttonStyle(.link)
-                .font(.caption)
+            // Staging stays available regardless of the list state (unless the
+            // endpoint is missing, where it can't work).
+            if model.transfers.stagedState != .unavailable {
+                Button("Stage a file…") { stageViaPanel() }
+                    .buttonStyle(.link)
+                    .font(.caption)
+            }
         } header: {
             Text("Staged on the control plane")
         } footer: {
