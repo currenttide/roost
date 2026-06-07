@@ -450,15 +450,15 @@ Done-when: real-behavior assertions via CliRunner + stubbed `_ctx_client`/MockTr
 
 ### R96. worker.py pure argv-builder coverage (`_build_auto_argv` + `_build_codex_argv`) — `done` *(2026-06-07, PR #107 — 72→75%; R30 anchoring verified, no new bug)* `self-promoted`
 
-### R97. iOS README pure-layer harness count stale — stamp it — `open` `self-promoted`
+### R97. iOS README pure-layer harness count stale — stamp it — `done` *(2026-06-07, PR #108 — count-free + stale recipe fixed)* `self-promoted`
 Surface: docs/iOS. A6 survey #3 rank 2, Tier A STAMPED (surveyor ran the harness: **92/92** on Swift 6.0.3 vs the claimed 58/58 at mobile-app/ios/README.md:257).
 Done-when: README:257 states the verified current count with a re-stamped date, or count-free phrasing the judge confirms can't drift (R91 precedent — prefer this); harness re-run green via the documented recipe on /tmp/swift-toolchain as the evidence; docs-drift ratchet stays 0; pytest green.
 
-### R98. Panel labels auth failures as "control plane unreachable" — `open` `self-promoted`
+### R98. Panel labels auth failures as "control plane unreachable" — `done` *(2026-06-07, PR #109 — 3-state wording, Playwright-proven)* `self-promoted`
 Surface: panel/UX. A6 survey #3 rank 3 (user-test n7, re-confirmed). panel.html:243 throws `Error("HTTP " + r.status)` for any non-2xx; the catch at :412 prefixes EVERY error with "control plane unreachable — " → a bad token renders the self-contradictory "control plane unreachable — HTTP 401". The CP answered; it's an auth failure.
 Done-when: HTTP-status errors (esp. 401/403) render an auth/permission message distinct from transport failures' "unreachable" wording; transport wording unchanged; verified by rendered verdict text for a 401 response vs a fetch reject (Playwright against a scratch CP — browsers cached — or capped honestly per evidence table); server untouched; pytest green.
 
-### R99. worker.py process-safety branch coverage (`_kill_active_job` / `_kill_aux_procs`) — `open` `self-promoted`
+### R99. worker.py process-safety branch coverage (`_kill_active_job` / `_kill_aux_procs`) — `done` *(2026-06-07, PR #110 — kill range 0-miss, worker 76%)* `self-promoted`
 Surface: tests/ratchet. A2 rank 3 (worker.py now 75% after R96). worker.py:1205-1310: untested two-level kill fallback (`os.killpg` → ProcessLookupError/PermissionError → `proc.kill()`), docker-kill timeout teardown, aux-proc reaping. Judge note from the slate: `_kill_aux_procs` + early-return are trivially sync-testable — do those first; only the docker-timeout async seam is harder (R72's tests are adjacent precedent).
 Done-when: stubbed `os.killpg`/proc seams assert the fallback paths; sync wins first, async docker-timeout second; worker.py branch coverage strictly up; judge mutation-probes; no module down; pytest green.
 Surface: tests/ratchet. A2 rank 2 (worker.py 72%). Zero existing test references for worker.py:1068-1125: missing task/intent → ValueError; triage-prompt insertion at the CORRECT index incl. bwrap-wrapped argv (security-relevant — R30's bug class); sandbox/model defaulting; codex-missing → FileNotFoundError (monkeypatch shutil.which); args passthrough. Expected +2-3 branch points.

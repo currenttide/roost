@@ -2592,3 +2592,77 @@ Entries are written by the loop; humans read, never need to edit.
   and are what the ratchet tracks; next A2 re-measure reconciles TOTAL.
   Next: promote the queued Tier-A trio (A6-2 iOS README count, A6-3 panel 401
   wording, A2-3 worker process-safety branches) as R97-R99 → iteration #31.
+
+## 2026-06-07 ~22:46 UTC — R97: iOS README count-free + recipe fixed (iteration #31)
+- Verdict: shipped
+- Branch/PR: loop/r97-ios-readme-count / https://github.com/currenttide/roost/pull/108 (merged e583e4a)
+- What changed: README:257 → count-free phrasing (R91 precedent). BONUS drift
+  found in the recipe itself: the symlink include-list was stale (omitted
+  Composer/PairingState/Schedules — the documented recipe no longer compiled);
+  inverted to an exclude-list of the 3 Apple-only Net/ files so it stays
+  correct as the pure layer grows; dangling mac-app pointer fixed.
+- Evidence: harness re-run per the UPDATED recipe → 92/92 on Swift 6.0.3;
+  judge rebuilt the harness from scratch independently (92/92); pytest 924
+- Judge: approve (round 1)
+- Models: implementer claude-opus-4-8[1m] / judge claude-sonnet-4-6
+
+## 2026-06-07 ~22:46 UTC — R98: panel distinguishes auth from unreachable (iteration #31)
+- Verdict: shipped
+- Branch/PR: loop/r98-panel-auth-wording / https://github.com/currenttide/roost/pull/109 (merged c9c5636)
+- What changed: panel.html tick() catch branches on err.status: 401 →
+  "authentication failed — check your token (HTTP 401)"; 403 → "access denied
+  — token lacks permission"; other HTTP → "control plane error — HTTP <code>";
+  transport rejects keep "unreachable" unchanged. Vanilla JS, no deps, server
+  untouched. User-test nit n7 closed.
+- Evidence: 3-case Playwright proof vs scratch CP (good token / 401 / stopped
+  CP), all assertions pass + screenshots; pytest 924; reusable scripts noted
+  in PR (/tmp/r98_evidence.py)
+- Judge: approve (round 1) — re-ran the Playwright gate itself
+- Models: implementer claude-opus-4-8[1m] / judge claude-sonnet-4-6
+
+## 2026-06-07 ~22:46 UTC — R99: kill-path branch coverage complete (iteration #31)
+- Verdict: shipped
+- Branch/PR: loop/r99-kill-path-coverage / https://github.com/currenttide/roost/pull/110 (merged 9b455fc)
+- What changed: 17 tests covering ALL of worker.py:1205-1300 (0 missing
+  branches): _kill_aux_procs early-returns + killpg→ProcessLookupError/
+  PermissionError/OSError→proc.kill() fallback + inner swallow;
+  _kill_active_job sync paths + [H5] aux-first contract; the async docker
+  spawn-FAILURE seam (distinct from R72's timeout seam) incl. the LOUD
+  operator message. Tests only; no latent bug found (clean-area outcome).
+- Evidence: worker.py 74.5→76.4% branch (kill range now 0 miss); suite 941;
+  8 implementer + 3 judge mutation probes all broke the right tests
+- Judge: approve (round 1)
+- Models: implementer claude-opus-4-8[1m] / judge claude-sonnet-4-6
+- Notes: iteration #31 totals: 3/3 (PRs #108 #109 #110). Ranked is now empty
+  of unblocked items.
+
+## 2026-06-07 ~22:50 UTC — IDLE entered (post-user-testing session complete)
+- Verdict: idle (protocol pacing — not an end state)
+- Branch/PR: —
+- What changed: nothing — this entry records the decision. The human-directed
+  user-testing slate (R73–R87) and everything that flowed from it (hunt #9
+  bugs R88-R90, debts R91-R93, replenishment items R94-R99) are ALL shipped.
+  Remaining self-promotable yield is thin: hunt #10's fresh surface is mostly
+  tests + two one-line guards; drift sweeps are returning ~clean; survey #3
+  just ran. Remaining candidates are HUMAN-GATED design calls: mobile CI
+  (which runners/gates), mac-app schedule-create composer, Android tree empty
+  state, cosmetic layout nits, R22/R23 + cred_hash (security session), R37
+  device transport (hardware). Per protocol: don't manufacture work.
+- SESSION TOTALS (LONG-IDLE wake 17:00 → 22:50 UTC, all human-directed or
+  judge-gated): **27 PRs (#84–#110)**, pytest 823 → 941 (+118), RoostKit
+  54 → 115, Android harness 81 → 94, iOS unit 74 → 92 + 4 XCUITest flows +
+  iOS pure-layer 92 on Linux, branch coverage 71% → 80%+ (cli 62→67, worker
+  72→76, kill-range 0-miss), docs-drift 0, macOS CI compiles the app for the
+  first time ever, iOS tap-gap closed (XCUITest headless on the fleet Mac),
+  3 same-day bugs found+fixed in the session's own code, 27/27 judge-approved
+  (25 round-1, 1 revise→approve real catch, 1 false-alarm revise), zero
+  blocked items, zero force-pushes, zero flaky outcomes.
+- Parked for the human: branch protection on master (R92 makes the macOS
+  check meaningful); mobile CI design call; fleet ops (CP container rebuild —
+  healthz lies about its version; oracle + hubbase-gpu agent-job creds;
+  ~/roost-r50 stale clone on the Mac; TCC grant); mac-app schedule-create
+  composer; security-session items.
+- WAKE BEHAVIOR: max-interval checks — repo changed (human commits) → drift
+  sweep + targeted hunt over the changes; unchanged → no-op re-arm. Resume
+  triggers: human commits, new Ranked items, or direction.
+- Models: orchestrator claude-opus-4-8[1m]
