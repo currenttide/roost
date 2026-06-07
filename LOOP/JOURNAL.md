@@ -1865,3 +1865,27 @@ Entries are written by the loop; humans read, never need to edit.
   worktree, masking first fix attempts — corrected to import relative to LOOP/;
   worth encoding in future hunt prompts. Hunt found a bug → long-idle counter
   stays 0. Cycle #18 = R67 (the fix).
+
+## 2026-06-07 ~16:30 UTC — R67: done-callback identity guard
+- Verdict: shipped
+- Branch/PR: loop/r67-done-callback-guard / https://github.com/currenttide/roost/pull/78 (merged 6e74e0f)
+- What changed: `if self._job_tasks.get(_jid) is t:` in _done — only the task
+  owning the entry may evict it; a stale callback from a superseded attempt
+  no-ops. FORM DECISION (documented at both sites): guard ONLY — a drain in
+  _reap_stale_attempt was rejected because await/sleep(0) is not a reliable
+  scheduling barrier and would add an event-loop yield to the hot non-re-lease
+  poll path for zero correctness gain; the early-return comment points back at
+  the guard ("keep both in sync").
+- Evidence:
+  - `python -m pytest -q` → 802 passed ×3 (+2: promoted repro + a regression test
+    driving the REAL _spawn_job/_done asserting both halves — stale no-op AND
+    normal cleanup); LOOP/repro-a1-hunt6.py deleted
+- Judge: approve (round 1) — suite ×3, repro ×3, verified the test isn't a copy,
+  reasoned the unconditional-pop fails both, checked comment accuracy
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only)
+- Notes: iteration #17 complete. Hunt #6 consumed. Worker capacity/teardown
+  accounting now guarded against every interleaving two hunts could construct.
+  PACING: Ranked dry of non-security; next wake = deepening #2 (one item, fresh
+  lens) per protocol — or drift+targeted if the repo changed (human activity).
+  Wake interval moved to the max (3600s): overnight full-wave cadence ends here;
+  the loop idles honestly between thinner findings.
