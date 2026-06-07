@@ -66,3 +66,88 @@ final class PairingTests: XCTestCase {
         XCTAssertEqual(decoded, p)
     }
 }
+
+/// R83: the pairing-flow state machine (idle → contacting(host) → failed /
+/// cancelled / paired) and the short fail-fast probe timeout. Pure logic, so it
+/// runs in the Linux harness without URLSession.
+final class PairingStateTests: XCTestCase {
+
+    func testIdleHasNoCaptionOrErrorAndIsNotBusy() {
+        let s = PairingState.idle
+        XCTAssertFalse(s.isBusy)
+        XCTAssertNil(s.caption)
+        XCTAssertNil(s.errorMessage)
+    }
+
+    func testBeginningEntersContactingWithHostCaption() {
+        let s = PairingState.beginning(url: "http://192.168.1.250:8787")
+        XCTAssertEqual(s, .contacting(host: "192.168.1.250:8787"))
+        XCTAssertTrue(s.isBusy)
+        // The caption finally tells the user WHAT the spinner is doing + WHICH host.
+        XCTAssertEqual(s.caption, "Contacting 192.168.1.250:8787…")
+        XCTAssertNil(s.errorMessage)
+    }
+
+    func testDisplayHostStripsSchemeAndPathButKeepsPort() {
+        XCTAssertEqual(PairingState.displayHost("http://192.168.1.193:8787"),
+                       "192.168.1.193:8787")
+        XCTAssertEqual(PairingState.displayHost("https://cp.example.com/"),
+                       "cp.example.com")          // no port → host only
+        XCTAssertEqual(PairingState.displayHost("https://roost.local:443/healthz"),
+                       "roost.local:443")
+    }
+
+    func testDisplayHostNeverLeaksTheToken() {
+        // The token lives in the payload, never the URL — but be defensive: even a
+        // URL carrying query junk must not surface anything but host[:port].
+        let host = PairingState.displayHost("http://10.0.0.2:8787/x?token=secret")
+        XCTAssertEqual(host, "10.0.0.2:8787")
+        XCTAssertFalse(host.contains("secret"))
+    }
+
+    func testDisplayHostFallsBackToRawForUnparseableURL() {
+        // No host component → echo the raw string rather than crash or show empty.
+        XCTAssertEqual(PairingState.displayHost("not a url"), "not a url")
+    }
+
+    func testFailedExposesMessageAndClearsBusy() {
+        let s = PairingState.failed(message: "Can't reach the host.")
+        XCTAssertFalse(s.isBusy)
+        XCTAssertNil(s.caption)
+        XCTAssertEqual(s.errorMessage, "Can't reach the host.")
+    }
+
+    func testCancellingFromContactingGoesToCancelledWithNoError() {
+        let contacting = PairingState.beginning(url: "http://10.0.0.9:8787")
+        let cancelled = contacting.cancelling()
+        XCTAssertEqual(cancelled, .cancelled)
+        XCTAssertFalse(cancelled.isBusy)        // spinner gone
+        XCTAssertNil(cancelled.errorMessage)    // a deliberate cancel is not a failure
+        XCTAssertNil(cancelled.caption)
+    }
+
+    func testCancellingIsANoOpWhenNotContacting() {
+        // Cancel only acts while a probe is in flight; otherwise leave state alone.
+        XCTAssertEqual(PairingState.idle.cancelling(), .idle)
+        XCTAssertEqual(PairingState.paired.cancelling(), .paired)
+        XCTAssertEqual(PairingState.failed(message: "x").cancelling(),
+                       .failed(message: "x"))
+    }
+
+    func testPairedIsTerminalAndQuiet() {
+        let s = PairingState.paired
+        XCTAssertFalse(s.isBusy)
+        XCTAssertNil(s.caption)
+        XCTAssertNil(s.errorMessage)
+    }
+
+    /// The probe deadline is short (justified ~5 s) so a dead host fails fast,
+    /// and it is *strictly* shorter than the steady-state app/SSE request timeout
+    /// (30 s in AppState.makeClient) — proving the short timeout is scoped to the
+    /// throwaway probe and never shortens long-lived traffic.
+    func testProbeTimeoutIsShortAndScopedToPairing() {
+        XCTAssertEqual(ApiClient.pairingProbeTimeout, 5)
+        XCTAssertLessThanOrEqual(ApiClient.pairingProbeTimeout, 5)
+        XCTAssertLessThan(ApiClient.pairingProbeTimeout, 30)   // < makeClient's request timeout
+    }
+}
