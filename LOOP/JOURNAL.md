@@ -1769,3 +1769,29 @@ Entries are written by the loop; humans read, never need to edit.
 - Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only)
 - Notes: iteration #14 slot 2. Cross-surface drift rate is falling (11 spots in
   R42's sweep → 3 here) — in-PR doc discipline is working. R62 + R64 in flight.
+
+## 2026-06-07 ~13:20 UTC — R62: mac-app verb expansion
+- Verdict: shipped
+- Branch/PR: loop/r62-mac-app-verbs / https://github.com/currenttide/roost/pull/74 (merged fe755f3)
+- What changed: menu bar gains the three menu-bar-natural verbs. Publish:
+  NSOpenPanel tar.gz → one-shot POST /publish?name= → show/copy/open URL + list;
+  slug grammar byte-pinned to publish.py. Schedules: list + enable/disable
+  toggle; interval rendering pinned to the CLI grammar. Send: steer from run
+  detail with delivery surfaced HONESTLY BEFORE sending (command → live stdin;
+  agent/docker → dropped; gate mirrors worker._supports_live_input), real outcome
+  polled from GET /jobs/{id}/inputs. Schedule-create deferred (needs a job-spec
+  composer — judge-sanctioned slice); backup/history stay CLI by design.
+- Evidence:
+  - mac-app swift test 30 → 54 (+24); pure logic (PublishSlug, ScheduleInterval,
+    InputKindGate) + all client calls Linux-tested incl. the 90s non-whole-unit
+    case
+  - `python -m pytest -q` → 792 (server untouched)
+  - claims-cap VERIFIED MECHANICALLY: a deliberate type error inside the
+    #if os(macOS) guard built clean on Linux — proving the UI is excluded from
+    the contracted build, not just assumed
+- Judge: approve (round 1, 8/8 checks with file:line citations) — re-ran both
+  suites, diff-checked both grammars, verified gating honesty + the warn-before-
+  send UX
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only)
+- Notes: iteration #14 slot 1. Every client surface now carries the full verb
+  set appropriate to it. R64 (concurrency hunt) last in flight.
