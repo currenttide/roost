@@ -747,6 +747,25 @@ Entries are written by the loop; humans read, never need to edit.
   include A6 product gap source — first run surfaced headline gap (kind:auto missing
   from roost_submit schema and mobile API.md).
 
+## 2026-06-06 21:30 UTC — R24: Auto job crash after decline marker misclassified as `declined`
+- Verdict: shipped
+- Branch/PR: loop/r24-auto-decline-misclassification / https://github.com/currenttide/roost/pull/31
+- What changed: one-line guard in `run_job` — `elif declined:` → `elif declined and exit_code == 0:`.
+  A triage subprocess that emits ROOST_DECLINE: then crashes (non-zero exit) now correctly
+  reports `type="failed"` instead of `type="declined"`. The distinction matters: `declined`
+  tells the CP to requeue on another node; without the fix, a crashing triage process causes
+  an infinite retry loop across the fleet. A code comment explains the invariant.
+- Evidence:
+  - `python -m pytest -q` → 538 passed in 15.35s (was 537; +1 new test)
+  - New test `test_auto_job_crash_after_decline_marker_reported_as_failed`: mocks kind:auto
+    subprocess emitting the marker then exiting 1; asserts `type="failed"`
+- Judge: approve (round 1, claude-sonnet-4-6) — re-ran pytest (538), independently verified
+  the priority chain at worker.py:1882, confirmed fix correct and minimal; no existing
+  test deletions; all 7 decline tests green.
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (fenced MODEL block present)
+- Notes: replenishment bookkeeping and PROTOCOL.md A6 addition ride this commit. Next: R25
+  (_running/_active leak on cancel).
+
 ## 2026-06-07 03:01 UTC — R21: Make presigned blob PUT single-use and race-safe
 - Verdict: shipped
 - Branch/PR: loop/r21-presigned-put-single-use / https://github.com/currenttide/roost/pull/30
