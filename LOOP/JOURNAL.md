@@ -1634,3 +1634,25 @@ Entries are written by the loop; humans read, never need to edit.
   1+3 merged — same helper/contract), R60 (roost_publish tool), R61 (mobile
   schedules UI). Dispatch deliberately HELD until R57 lands (R60 and R57 both
   touch tests/test_mcp.py — collision avoidance). R57+R58 still in flight.
+
+## 2026-06-07 ~09:50 UTC — R58: config/deploy truth pass
+- Verdict: shipped
+- Branch/PR: loop/r58-config-truth-pass / https://github.com/currenttide/roost/pull/68 (merged 83c0b27)
+- What changed: docs+yml only. CREATED the overdue consolidated CP config
+  reference in DEPLOY.md — 8 env vars, each default truth-checked against the
+  actual code read (ROOST_TOKEN/DB/PUBLISH_DOMAIN/NOTIFY_URL/PRICING/NARRATE/
+  NARRATE_INTERVAL/INSTALL_SOURCE) + the two admin endpoints (backup, metrics)
+  with their 401/403 gating. stack.yml passthroughs ADDED for ROOST_PRICING,
+  ROOST_NARRATE, ROOST_NARRATE_INTERVAL, ROOST_INSTALL_SOURCE (commented
+  ${VAR:-} sibling pattern; empty-string parse verified safe per var). Sweep
+  confirmed all CP-serve env reads covered; worker-side + local-dev vars
+  legitimately out of scope; CLAUDE_CONFIG_DIR skipped (security session).
+- Evidence:
+  - `python -m pytest -q` → 707 passed; `docker compose -f docker/stack.yml
+    config` valid; markdown anchors resolve
+- Judge: approve (round 1) — truth-checked every row against the env reads,
+  confirmed endpoint gating, validated yml + empty-string safety, re-swept for
+  missed vars
+- Models: implementer claude-opus-4-8 / judge claude-sonnet-4-6 (claude -p read-only)
+- Notes: iteration #12 slot 3. R57 (mcp/schema coverage) last in flight — gates
+  the cycle-#14 dispatch (test_mcp.py collision with R60).

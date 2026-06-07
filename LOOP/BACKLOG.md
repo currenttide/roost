@@ -189,7 +189,7 @@ Done-when: every user-facing surface swept; each finding gated + judge-verified 
 Surface: tests. A2: post-R54 the weakest modules are mcp.py 61% and schema.py 62%. mcp.py's untested reach: tool dispatch paths, error mapping, the R46 example-bearing tools' impl branches; schema.py: migration paths V1→V14 (synthetic old-version DBs, the R19/R38 migration pattern from tests).
 Done-when: both modules' branch coverage strictly up (≥8 points each); migration tests cover every version step incl. idempotency; no module down; real assertions (judge mutation-probes); pytest green (707 base).
 
-### R58. Config/deploy truth pass for the new env vars — `open` `self-promoted`
+### R58. Config/deploy truth pass for the new env vars — `done` *(2026-06-07, PR #68 — consolidated CP config reference created)* `self-promoted`
 Surface: docs/deploy. This session added ROOST_PRICING (R44), ROOST_NARRATE_INTERVAL (R49), ROOST_NOTIFY_URL (R37) and the backup/metrics admin endpoints. Verify each is (a) documented where operators look (DEPLOY.md's config reference, README), (b) passed through docker/stack.yml like ROOST_PUBLISH_DOMAIN is, (c) consistent with the code's actual parsing (truth-check defaults/fallbacks). R37 added its own passthrough — verify; R44/R49 likely did not.
 Done-when: every operator-facing env var documented + docker-passthrough'd + truth-checked; gaps fixed additively; pytest green.
 
