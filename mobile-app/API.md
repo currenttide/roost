@@ -165,6 +165,14 @@ Response = full job object; navigate to its `id` immediately. Job objects contai
 `stream: "event"` → `data` is lifecycle JSON (`{"type": "started"|"succeeded"|…}`);
 render as a subtle divider ("started", "succeeded"), or skip unparseable ones.
 
+For agent jobs (`kind: claude`/`auto`), each `stdout` `data` line is one line of
+Anthropic `stream-json`. The wire shape is **unchanged** — the server still relays
+raw lines verbatim — but clients **distil this stream CLIENT-SIDE by default**
+(assistant text, `→ tool` calls, `⎿` results, phase dividers; signatures/reasoning/
+rate-limit noise suppressed) with a raw passthrough toggle. Distillation is purely a
+client-render concern; the contract is in
+[`fixtures/distilled/SPEC.md`](fixtures/distilled/SPEC.md) (CLI/iOS/Android mirror it).
+
 ### Log bounds (server-enforced; transcripts can cap)
 
 - One log line ≤ **64 KiB**; the worker drops longer lines with an

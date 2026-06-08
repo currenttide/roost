@@ -146,7 +146,12 @@ v1 is deliberately **two screens and a sheet**. Everything else is cut.
 - "Tree ▸" shows child jobs for captain dispatches (`/jobs/{id}/tree`) as an indented
   list, each row tappable into its own session view.
 - Log rendering is plain monospaced text with ANSI-color stripping — no markdown
-  engine, no webview. Lightweight, scrolls at 60 fps.
+  engine, no webview. Lightweight, scrolls at 60 fps. For agent (`claude`/`auto`)
+  jobs the stream-json firehose is **distilled by default** (assistant text, tool
+  calls/results, phase dividers — noise suppressed) with a "Raw" toggle for the
+  unfiltered stream; the transform is the shared client-side contract in
+  [`fixtures/distilled/SPEC.md`](fixtures/distilled/SPEC.md) (CLI/iOS/Android all
+  mirror it).
 
 ### 3.3 New-session sheet
 

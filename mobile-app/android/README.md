@@ -13,6 +13,23 @@ kotlinx-serialization, no ML Kit, no Hilt. `org.json` appears only on the *test*
 
 - `minSdk 26`, `targetSdk 35`, `compileSdk 35`.
 
+## Distilled session view (R109)
+
+The session log **defaults to a distilled rendering** of an agent job's
+`stream-json`: assistant text, `→ <tool>: <hint>`, truncated `⎿` results, and
+`🔎/✓/✗` phase dividers — base64 signatures, reasoning blobs, rate-limit pings,
+and roost-internal envelopes are suppressed. A **"Raw / Distilled" toggle** in
+the session top bar (default = distilled; the button reads "Raw" until tapped)
+flips to the unfiltered firehose; it re-projects the rows already buffered, no
+re-fetch. The transform is the pure `DistilledLine.from(_:)`
+(`model/DistilledLine.kt`), an exact mirror of the language-neutral contract in
+[`../fixtures/distilled/SPEC.md`](../fixtures/distilled/SPEC.md) and the CLI
+reference impl (`roost.cli.distill_log_line`). `DistilledFixtureTest` loads the
+shared golden fixtures (`../fixtures/distilled/cases.json`) and asserts the
+Android transform produces the committed output for **every** case — the
+cross-platform consistency guarantee that keeps CLI, iOS, and Android
+byte-identical.
+
 ## Build
 
 The Gradle wrapper JAR is intentionally **not committed**. Generate it once, then build:
@@ -67,8 +84,9 @@ deprecated `security-crypto` artifact. A later `401` unpairs you back to this sc
 - **Session** — header from `GET /jobs/{id}/derived`; a hand-rolled SSE client on
   `HttpURLConnection` (`net/SseClient.kt`) implementing the resume protocol: page
   `GET /logs?since=` to catch up, attach `GET /stream?since=`, dedupe `seq <= last-seen`,
-  persist max seq per job id, reconnect with jittered 1→30 s backoff. Monospace log with
-  ANSI stripping, `event` rows as dividers, auto-follow tail + jump-to-bottom FAB, a result
+  persist max seq per job id, reconnect with jittered 1→30 s backoff. Monospace log,
+  **distilled by default** with a "Raw" toggle (see "Distilled session view" above),
+  `event` rows as dividers, auto-follow tail + jump-to-bottom FAB, a result
   card on `done`, cancel while running, and a `Tree ▸` child list that recurses.
 - **New-session sheet** — editable field + hold-to-talk `SpeechRecognizer` (offline-
   preferred, live partials, haptics, mic hidden if unavailable, runtime RECORD_AUDIO
