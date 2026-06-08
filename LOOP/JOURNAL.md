@@ -2831,3 +2831,20 @@ Entries are written by the loop; humans read, never need to edit.
   setup retries), not node failures — all 15 nodes online (the UAT-noted health
   banner counts operator's own nonzero exits).
 - Models: orchestrator claude-opus-4-8[1m]; implementers opus; judges sonnet
+
+## 2026-06-08 — Distilled-default trio COMPLETE (all 3 platforms)
+- R109 (Android) — PR #120 (61a7e29): Kotlin DistilledLine.from + SessionLines
+  projection; DistilledFixtureTest loads the shared cases.json, asserts all 16
+  golden cases; Raw/Distilled toggle (default distilled). Android harness →100;
+  emulator screenshots (distilled vs raw firehose). Judge sonnet r1.
+- R108 (iOS) — PR #121 (ba75fdc): Swift DistilledLine.from (JSONSerialization,
+  device==Linux identical); DistilledTests loads shared cases.json, all 16;
+  footer Distilled/Raw toggle (showRaw default false). iOS Linux harness →119;
+  Mac-sim xcodebuild 119 + RoostUI smoke 4; sim screenshots distilled vs raw.
+  Judge sonnet r1.
+- CROSS-PLATFORM CONSISTENCY GUARANTEE: CLI (R107 distill_log_line), iOS, and
+  Android all implement the SAME transform tested against the SAME committed
+  golden fixtures (mobile-app/fixtures/distilled/cases.json, 16 cases) — they
+  render byte-identically by construction. User directive #1 (distilled default
+  on every platform) fully delivered.
+- Models: orchestrator claude-opus-4-8[1m]; implementers opus; judges sonnet
