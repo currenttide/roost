@@ -51,7 +51,7 @@ object DistilledLine {
         when (mtype) {
             "system" -> return if (obj.optString("subtype", "") == "init") "🔎 starting…" else null
             "rate_limit_event" -> return null
-            "result" -> return if (obj.optBoolean("is_error", false)) "✗ failed" else "✓ done"
+            "result" -> return if (isTruthy(obj.opt("is_error"))) "✗ failed" else "✓ done"
             "assistant", "user" -> return distillMessage(obj)
         }
         // Rule 2: JSON object without a recognised stream-json type (e.g. roost's
@@ -73,7 +73,11 @@ object DistilledLine {
             val item = list.optJSONObject(i) ?: continue
             when (item.optString("type", "")) {
                 "text" -> {
-                    val flat = firstLine(item.optString("text", ""), RESULT_MAX)
+                    // Render only a STRING `text` (real stream-json always is); a
+                    // null/non-string `text` → empty → block suppressed, so the
+                    // three clients agree instead of leaking a coercion like "123".
+                    val t = item.opt("text")
+                    val flat = if (t is String) firstLine(t, RESULT_MAX) else ""
                     if (flat.isNotEmpty()) out.add(flat)
                 }
                 "tool_use" -> out.add(distillToolUse(item))
@@ -86,15 +90,19 @@ object DistilledLine {
     }
 
     private fun distillToolUse(item: JSONObject): String {
-        val name = item.optString("name", "").ifEmpty { "tool" }
+        val nameVal = item.opt("name")
+        val name = if (nameVal is String && nameVal.isNotEmpty()) nameVal else "tool"
         val inp = item.optJSONObject("input")
         var hint = ""
         if (inp != null) {
             for (k in TOOL_HINT_KEYS) {
-                if (!inp.has(k)) continue
                 val v = inp.opt(k)
-                if (isTruthy(v)) {
-                    hint = firstLine(stringify(v), HINT_MAX)
+                // Render only a non-empty STRING hint, so the three clients stay
+                // byte-identical: a number/bool/list/object hint coerces
+                // differently per language, so such values are skipped and the
+                // scan continues to the next key (SPEC.md rule 4).
+                if (v is String && v.isNotEmpty()) {
+                    hint = firstLine(v, HINT_MAX)
                     break
                 }
             }
@@ -110,18 +118,25 @@ object DistilledLine {
             is JSONArray -> for (i in 0 until content.length()) {
                 val blk = content.opt(i)
                 if (blk is JSONObject) {
-                    if (blk.optString("type", "") == "text" && blk.optString("text", "").isNotEmpty()) {
-                        resultText = blk.optString("text", "")
+                    // Render only a non-empty STRING `text` (org.json optString would
+                    // coerce e.g. 123 -> "123"; Python/iOS require a string). R113.
+                    val t = blk.opt("text")
+                    if (blk.optString("type", "") == "text" && t is String && t.isNotEmpty()) {
+                        resultText = t
                         break
                     }
-                } else if (blk is String) {
+                } else if (blk is String && blk.isNotEmpty()) {
                     resultText = blk
                     break
                 }
             }
         }
         val summary = if (resultText.isNotEmpty()) firstLine(resultText, RESULT_MAX) else "(result)"
-        return if (item.optBoolean("is_error", false)) "  ⎿ ✗ $summary" else "  ⎿ $summary"
+        // JSON truthiness (not optBoolean, which only parses true/false/0/1) so a
+        // truthy non-bool is_error (e.g. 1, "yes") marks the error — matches the
+        // CLI/iOS (SPEC.md truthiness note). optBoolean was the cross-platform
+        // outlier here: it returned false for is_error: 1 / "yes".
+        return if (isTruthy(item.opt("is_error"))) "  ⎿ ✗ $summary" else "  ⎿ $summary"
     }
 
     /** First line of `text`, whitespace-collapsed to a single line, capped at `limit`. */
@@ -131,7 +146,8 @@ object DistilledLine {
         return if (flat.length > limit) flat.substring(0, limit) + "…" else flat
     }
 
-    /** Mirrors Python truthiness for the hint-key check (`if v:`). */
+    /** JSON truthiness for the `is_error` checks (mirrors Python `if v:`): truthy
+     *  unless missing, null, false, 0, "", or an empty list/object. */
     private fun isTruthy(v: Any?): Boolean = when (v) {
         null, JSONObject.NULL -> false
         is String -> v.isNotEmpty()
@@ -140,12 +156,5 @@ object DistilledLine {
         is JSONArray -> v.length() > 0
         is JSONObject -> v.length() > 0
         else -> true
-    }
-
-    /** Mirrors Python `str(v)` for a hint value (the CLI calls `_first_line(v, …)`). */
-    private fun stringify(v: Any?): String = when (v) {
-        null, JSONObject.NULL -> ""
-        is String -> v
-        else -> v.toString()
     }
 }

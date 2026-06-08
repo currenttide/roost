@@ -2372,13 +2372,19 @@ def _first_line(text: str, limit: int) -> str:
 
 
 def _distill_tool_use(item: dict) -> str:
-    name = item.get("name") or "tool"
+    name = item.get("name")
+    if not (isinstance(name, str) and name):
+        name = "tool"
     inp = item.get("input")
     hint = ""
     if isinstance(inp, dict):
         for k in _TOOL_HINT_KEYS:
             v = inp.get(k)
-            if v:
+            # Render only a non-empty STRING hint, so the three clients stay
+            # byte-identical: a number/bool/list/object hint coerces differently
+            # per language (`True` vs `true`, `['a', 'b']` vs `["a","b"]`), so
+            # such values are skipped and the scan continues to the next key.
+            if isinstance(v, str) and v:
                 hint = _first_line(v, _DISTILL_HINT_MAX)
                 break
     return f"→ {name}: {hint}" if hint else f"→ {name}"
@@ -2391,10 +2397,11 @@ def _distill_tool_result(item: dict) -> str:
         text = content
     elif isinstance(content, list):
         for blk in content:
-            if isinstance(blk, dict) and blk.get("type") == "text" and blk.get("text"):
+            if (isinstance(blk, dict) and blk.get("type") == "text"
+                    and isinstance(blk.get("text"), str) and blk["text"]):
                 text = blk["text"]
                 break
-            if isinstance(blk, str):
+            if isinstance(blk, str) and blk:
                 text = blk
                 break
     summary = _first_line(text, _DISTILL_RESULT_MAX) if text else "(result)"
@@ -2456,7 +2463,12 @@ def distill_log_line(data: str) -> Optional[str]:
                     continue
                 itype = item.get("type")
                 if itype == "text":
-                    flat = _first_line(item.get("text", ""), _DISTILL_RESULT_MAX)
+                    # Render only a STRING `text` (real stream-json always is);
+                    # a null/non-string `text` → empty → block suppressed, so the
+                    # three clients agree instead of leaking `None`/`<null>`.
+                    raw_text = item.get("text")
+                    flat = (_first_line(raw_text, _DISTILL_RESULT_MAX)
+                            if isinstance(raw_text, str) else "")
                     if flat:
                         out.append(flat)
                 elif itype == "tool_use":

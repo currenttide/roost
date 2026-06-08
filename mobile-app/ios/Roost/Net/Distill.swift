@@ -90,7 +90,10 @@ enum DistilledLine {
             for case let item as [String: Any] in blocks {
                 switch item["type"] as? String {
                 case "text":
-                    let flat = firstLine(stringValue(item["text"]), resultMax)
+                    // Render only a STRING `text` (real stream-json always is);
+                    // a null/non-string `text` → empty → block suppressed, so the
+                    // three clients agree instead of leaking `<null>` / `123`.
+                    let flat = (item["text"] as? String).map { firstLine($0, resultMax) } ?? ""
                     if !flat.isEmpty { out.append(flat) }
                 case "tool_use":
                     out.append(distillToolUse(item))
@@ -112,10 +115,12 @@ enum DistilledLine {
         var hint = ""
         if let input = item["input"] as? [String: Any] {
             for key in toolHintKeys {
-                // Match the CLI: break on the FIRST truthy value (Python `if v:`),
-                // even if it collapses to an empty hint, so key priority is exact.
-                if let v = input[key], isTruthy(v) {
-                    hint = firstLine(stringValue(v), hintMax)
+                // Render only a non-empty STRING hint, so the three clients stay
+                // byte-identical: a number/bool/list/object hint coerces
+                // differently per language, so such values are skipped and the
+                // scan continues to the next key (SPEC.md rule 4).
+                if let v = input[key] as? String, !v.isEmpty {
+                    hint = firstLine(v, hintMax)
                     break
                 }
             }
@@ -157,27 +162,8 @@ enum DistilledLine {
         return flat
     }
 
-    /// Best-effort string for a tool-input/hint value. The SPEC's hint keys
-    /// (`command`, `file_path`, …) are overwhelmingly strings; a non-string value
-    /// is rendered generically rather than dropped. Portable (no CoreFoundation):
-    /// works identically under Apple Foundation and swift-corelibs-foundation, so
-    /// the Linux harness and the device agree.
-    private static func stringValue(_ value: Any?) -> String {
-        switch value {
-        case let s as String: return s
-        case let b as Bool: return b ? "true" : "false"
-        case .none: return ""
-        case let n as NSNumber:
-            // Integers render without a trailing ".0"; otherwise the double form.
-            // `Double(exactly:)` on the bridged NSNumber is portable.
-            let d = n.doubleValue
-            return d == d.rounded() ? String(Int(d)) : String(d)
-        case let other?: return "\(other)"
-        }
-    }
-
     /// JSON truthiness matching Python's `if v:` / `obj.get(...)` semantics (the
-    /// CLI's `_distill_tool_use` and `is_error` checks): a value is truthy unless
+    /// CLI's `is_error` checks): a value is truthy unless
     /// it is missing, `null`, `false`, `0`, an empty string, or an empty
     /// container. Portable — no CoreFoundation (`kCFBoolean*` is unavailable on
     /// Linux). `Bool` is probed before the numeric branch so a genuine JSON

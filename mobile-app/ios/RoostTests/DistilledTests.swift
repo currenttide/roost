@@ -36,8 +36,8 @@ final class DistilledTests: XCTestCase {
 
     func testGoldenFixturesDistillToExpected() throws {
         let cases = try loadCases()
-        XCTAssertGreaterThanOrEqual(cases.count, 16,
-            "expected the full committed fixture set (R107 shipped 16 cases)")
+        XCTAssertGreaterThanOrEqual(cases.count, 66,
+            "expected the full committed fixture set (R107 + R113 SPEC-branch/adversarial expansion)")
         for c in cases {
             XCTAssertEqual(DistilledLine.from(c.raw), c.distilled,
                 "distilled mismatch for case: \(c.note)")
@@ -171,6 +171,37 @@ final class DistilledTests: XCTestCase {
                     "{\"type\": \"assistant\", \"message\": {\"content\": [null, 7]}}"] {
             _ = DistilledLine.from(bad)
         }
+    }
+
+    // R113: is_error uses JSON truthiness (a truthy number/string means error),
+    // matching the CLI. Pinned directly here as well as via the shared fixtures.
+    func testIsErrorUsesJsonTruthiness() {
+        XCTAssertEqual(DistilledLine.from("{\"type\":\"result\",\"is_error\":1}"), "✗ failed")
+        XCTAssertEqual(DistilledLine.from("{\"type\":\"result\",\"is_error\":\"yes\"}"), "✗ failed")
+        XCTAssertEqual(DistilledLine.from("{\"type\":\"result\",\"is_error\":0}"), "✓ done")
+        XCTAssertEqual(DistilledLine.from("{\"type\":\"result\",\"is_error\":\"\"}"), "✓ done")
+        func tr(_ e: String) -> String {
+            "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"is_error\":\(e),\"content\":\"boom\"}]}}"
+        }
+        XCTAssertEqual(DistilledLine.from(tr("1")), "  ⎿ ✗ boom")
+        XCTAssertEqual(DistilledLine.from(tr("\"yes\"")), "  ⎿ ✗ boom")
+        XCTAssertEqual(DistilledLine.from(tr("0")), "  ⎿ boom")
+    }
+
+    // R113: non-string hint values are skipped (bare arrow) and non-string text is
+    // suppressed — so iOS no longer leaks coercions like "<null>"/"true"/"[\"a\", \"b\"]".
+    func testNonStringHintAndTextDoNotLeakCoercion() {
+        func tu(_ v: String) -> String {
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":\"X\",\"input\":{\"command\":\(v)}}]}}"
+        }
+        XCTAssertEqual(DistilledLine.from(tu("42")), "→ X")
+        XCTAssertEqual(DistilledLine.from(tu("true")), "→ X")
+        XCTAssertEqual(DistilledLine.from(tu("[\"a\",\"b\"]")), "→ X")
+        XCTAssertEqual(DistilledLine.from(
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":\"X\",\"input\":{\"command\":0,\"file_path\":\"/p\"}}]}}"),
+            "→ X: /p")
+        XCTAssertNil(DistilledLine.from("{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":123}]}}"))
+        XCTAssertNil(DistilledLine.from("{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":null}]}}"))
     }
 
     // MARK: - The render seam (DisplayLine default = distilled, R108)

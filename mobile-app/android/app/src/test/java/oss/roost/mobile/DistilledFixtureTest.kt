@@ -38,10 +38,11 @@ class DistilledFixtureTest {
         }
     }
 
-    @Test fun coversAllSixteenCases() {
-        // Pin the fixture count so a silently-shrunk fixture file is caught.
+    @Test fun coversFullGoldenSet() {
+        // Pin the fixture count so a silently-shrunk fixture file is caught. The
+        // floor rose to 65 in R113 (SPEC-branch + adversarial-shape expansion).
         val cases = JSONObject(Fixtures.read("distilled/cases.json")).getJSONArray("cases")
-        assertTrue("expected the full R107 golden set", cases.length() >= 16)
+        assertTrue("expected the full R107+R113 golden set", cases.length() >= 66)
     }
 
     @Test fun nullAndPlainInputsAreSafe() {
@@ -49,5 +50,34 @@ class DistilledFixtureTest {
         assertNull(DistilledLine.from(null))
         assertEquals("plain text", DistilledLine.from("plain text"))
         assertEquals("", DistilledLine.from(""))
+    }
+
+    // R113: is_error uses JSON truthiness, not optBoolean (the Android outlier).
+    // A truthy non-bool is_error (1, "yes") must mark the failure/error — matching
+    // the CLI/iOS. Pinned directly here, not only via the shared fixtures.
+    @Test fun isErrorUsesJsonTruthinessNotOptBoolean() {
+        assertEquals("✗ failed", DistilledLine.from("""{"type":"result","is_error":1}"""))
+        assertEquals("✗ failed", DistilledLine.from("""{"type":"result","is_error":"yes"}"""))
+        assertEquals("✓ done", DistilledLine.from("""{"type":"result","is_error":0}"""))
+        assertEquals("✓ done", DistilledLine.from("""{"type":"result","is_error":""}"""))
+        val tr = { e: String -> """{"type":"user","message":{"content":[{"type":"tool_result","is_error":$e,"content":"boom"}]}}""" }
+        assertEquals("  ⎿ ✗ boom", DistilledLine.from(tr("1")))
+        assertEquals("  ⎿ ✗ boom", DistilledLine.from(tr("\"yes\"")))
+        assertEquals("  ⎿ boom", DistilledLine.from(tr("0")))
+    }
+
+    // R113: non-string hint values are skipped (bare arrow), and non-string text
+    // is suppressed — so the three clients stay byte-identical on malformed input.
+    @Test fun nonStringHintAndTextDoNotLeakCoercion() {
+        val tu = { v: String -> """{"type":"assistant","message":{"content":[{"type":"tool_use","name":"X","input":{"command":$v}}]}}""" }
+        assertEquals("→ X", DistilledLine.from(tu("42")))
+        assertEquals("→ X", DistilledLine.from(tu("true")))
+        assertEquals("→ X", DistilledLine.from(tu("[\"a\",\"b\"]")))
+        // non-string command skipped, falls through to file_path
+        assertEquals("→ X: /p", DistilledLine.from(
+            """{"type":"assistant","message":{"content":[{"type":"tool_use","name":"X","input":{"command":0,"file_path":"/p"}}]}}"""))
+        // non-string / null text -> suppressed
+        assertNull(DistilledLine.from("""{"type":"assistant","message":{"content":[{"type":"text","text":123}]}}"""))
+        assertNull(DistilledLine.from("""{"type":"assistant","message":{"content":[{"type":"text","text":null}]}}"""))
     }
 }
