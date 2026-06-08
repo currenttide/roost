@@ -913,6 +913,46 @@ def test_fleet_verdict_flags_problems_first():
     assert server._fleet_verdict(workers, [good])["level"] == "ok"
 
 
+def test_fleet_verdict_singular_node_grammar():
+    # R105: the verdict bar renders verbatim on the panel + Android — "1 nodes"
+    # reads as a bug. One live node must say "1 node", many must say "N nodes".
+    # idle (no active/verifying runs) branch:
+    one = server._fleet_verdict([{"status": "idle", "id": "w1"}], [])
+    assert "1 node online" in one["summary"], one["summary"]
+    assert "1 nodes" not in one["summary"], one["summary"]
+    three = server._fleet_verdict(
+        [{"status": "idle"}, {"status": "busy"}, {"status": "idle"}], [])
+    assert "3 nodes online" in three["summary"], three["summary"]
+
+    # active branch (a running job present) — same node grammar applies:
+    run = server._derive_run({"id": "y", "state": "running", "spec": {"task": "ok"}})
+    one_active = server._fleet_verdict([{"status": "busy", "id": "w1"}], [run])
+    assert one_active["summary"].startswith("1 node ·"), one_active["summary"]
+    assert "1 nodes" not in one_active["summary"], one_active["summary"]
+    three_active = server._fleet_verdict(
+        [{"status": "busy"}, {"status": "idle"}, {"status": "idle"}], [run])
+    assert three_active["summary"].startswith("3 nodes ·"), three_active["summary"]
+
+    # alert branch verb grammar: "1 needs attention" vs "2 need attention".
+    bad = server._derive_run({"id": "x", "state": "queued", "capable_workers": 0,
+                              "spec": {"task": "need a GPU"}})
+    bad2 = server._derive_run({"id": "z", "state": "queued", "capable_workers": 0,
+                               "spec": {"task": "also need a GPU"}})
+    one_bad = server._fleet_verdict([{"status": "idle"}], [bad])
+    assert one_bad["summary"].startswith("1 needs attention"), one_bad["summary"]
+    two_bad = server._fleet_verdict([{"status": "idle"}], [bad, bad2])
+    assert two_bad["summary"].startswith("2 need attention"), two_bad["summary"]
+
+
+def test_count_noun_grammar():
+    # R105 helper: singular/plural and explicit-plural override.
+    assert server._count_noun(0, "node") == "0 nodes"
+    assert server._count_noun(1, "node") == "1 node"
+    assert server._count_noun(2, "node") == "2 nodes"
+    assert server._count_noun(1, "entry", "entries") == "1 entry"
+    assert server._count_noun(3, "entry", "entries") == "3 entries"
+
+
 def test_derive_run_shape():
     r = server._derive_run({"id": "j1", "state": "succeeded", "worker_id": "w1",
                             "spec": {"task": "write a file"},
