@@ -2666,3 +2666,42 @@ Entries are written by the loop; humans read, never need to edit.
   sweep + targeted hunt over the changes; unchanged → no-op re-arm. Resume
   triggers: human commits, new Ranked items, or direction.
 - Models: orchestrator claude-opus-4-8[1m]
+
+## 2026-06-07 ~21:40 UTC — IDLE → RESTART (human re-ran /loop) → deepening replenishment
+- Verdict: shipped (replenishment cycle — slates → 3 promotions)
+- What changed: human re-invoked /loop after the earlier stop; repo unchanged at
+  85139e3 → per pacing rules this is a DEEPENING pass, not a repeat. A1 hunt #10
+  (fresh seams: SSE/log-relay, schedules tick, steward) found 1 real bug
+  (non-finite schedule interval wedges /schedules) + cleared 7 hypotheses incl.
+  a genuinely-clean steward.py. A2 re-measure: 82% roost-scoped (+2 from R95/
+  R96/R99) and RESOLVED the 80-vs-90 footnote — the unpinned ratchet command
+  folds in tests/ (→90%); pinned the ratchet to `--source=roost` (honest 82%).
+  Promoted R100 (bug, rank 1 per bug>coverage) + R101/R102 (coverage). A2 rank 3
+  (worker input-delivery seam) queued for the next slot.
+- NOTE: hunt #10's agent self-judged on opus (sandbox lacked the Agent tool);
+  the binding cross-model Sonnet judge ran at R100 implementation time.
+- Models: orchestrator claude-opus-4-8[1m]; hunter/surveyor opus; judges sonnet
+
+## 2026-06-07 ~04:38 UTC — R100/R101/R102 shipped (iteration #32)
+- Verdict: shipped (3/3)
+- R100 — non-finite schedule interval rejected at the door / PR #111 (f26928c):
+  single `math.isfinite` guard in `parse_every` covers BOTH the string `"inf"`
+  path and the bare-JSON `1e999`→float path (ScheduleCreate.every: Any) plus
+  -inf/-nan; route already maps None→400. Proof: no-poison-row assertion
+  (GET /schedules stays 200, 0 rows) + live smoke; 3 tests in test_schedules.py;
+  suite 944. Judge (sonnet) re-proved fails-on-master + approved round 1 — the
+  binding gate hunt #10 couldn't run.
+- R101 — cli read/SSE coverage / PR #113 (6d07efd): cli.py 67→77% (+9.9pp,
+  biggest jump of the session), 36 tests via CliRunner+MockTransport; all four
+  _stream done→exit-code branches asserted exactly (judge mutation-probed
+  ec≤0→1). No bug found.
+- R102 — build_command router coverage / PR #112 (50683ae): worker.py 76→78%,
+  23 tests calling the real router (string/list/invalid→ValueError, every kind
+  branch, docker-before-command + cwd precedence); judge 3 mutation probes all
+  caught. No bug found.
+- All judges sonnet, round 1; implementer opus. Suite 941 → 999.
+- HUMAN COMMIT observed mid-iteration: 21a0e2f "deploy: fix Dockerfile wheel
+  glob (0.1.0→version-agnostic) + UAT findings" — addresses the parked
+  fleet-ops stale-container item. Repo now CHANGED → next replenishment owes a
+  drift sweep + targeted hunt over the deploy change (per pacing rules).
+- Models: orchestrator claude-opus-4-8[1m] / judges claude-sonnet-4-6
