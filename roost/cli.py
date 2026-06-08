@@ -2437,7 +2437,14 @@ def distill_log_line(data: str) -> Optional[str]:
     if mtype == "result":
         return "✗ failed" if obj.get("is_error") else "✓ done"
     if mtype in ("assistant", "user"):
-        msg = obj.get("message") or {}
+        msg = obj.get("message")
+        # A truthy non-dict `message` (a JSON string / list / number reaching an
+        # assistant/user envelope) is not a valid stream-json shape: suppress it
+        # rather than calling `.get()` on a non-dict (which would crash the
+        # default distilled view). Matches the mobile clients (iOS
+        # `as? [String:Any]`→nil, Android `optJSONObject`→null).
+        if not isinstance(msg, dict):
+            return None
         content = msg.get("content")
         if isinstance(content, str):
             flat = _first_line(content, _DISTILL_RESULT_MAX)
