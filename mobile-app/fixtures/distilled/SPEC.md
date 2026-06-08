@@ -57,25 +57,54 @@ content blocks distils to one line per block, joined by `\n`).
    | `result`           | otherwise                     | `✓ done`  *(phase divider)*                   |
    | `assistant`/`user` | see content-block rules below | joined block lines, or **suppress** if empty  |
 
-4. **`assistant` / `user` content blocks.** Read `message.content`:
+4. **`assistant` / `user` content blocks.** If `message` is **not a JSON object**
+   (a string / list / number / null reaching an `assistant`/`user` envelope is
+   not a valid stream-json shape), **suppress** the whole line — never index into
+   a non-object (R111). Otherwise read `message.content`:
    - If it is a **string**, show its first-line, whitespace-collapsed, capped at
      **200** chars (suppress if empty).
+   - If `content` is anything other than a string or a list (a number / object /
+     `null` / missing), **suppress** the whole line.
    - If it is a **list**, map each block and join the non-empty results with
-     `\n`; suppress the whole line if nothing survives:
-     - `type == "text"` → the text, whitespace-collapsed, first 200 chars.
-     - `type == "tool_use"` → `→ <name>: <hint>` where `<hint>` is the first
-       present value among input keys
-       `command, file_path, path, pattern, query, url, description, prompt, intent`,
-       whitespace-collapsed and capped at **80** chars. If no hint key is
-       present, just `→ <name>`.
+     `\n`; suppress the whole line if nothing survives. A **non-object** list
+     element (a bare string / number / `null`) is **ignored**. For an object block:
+     - `type == "text"` → the text, whitespace-collapsed, first 200 chars. The
+       `text` field is rendered **only when it is a string**; a missing, `null`,
+       or non-string `text` yields an empty string → the block is suppressed.
+       (Real stream-json `text` is always a string; this just keeps the three
+       clients byte-identical on malformed input instead of leaking a
+       language-specific coercion such as `None` / `<null>` / `123`.)
+     - `type == "tool_use"` → `→ <name>: <hint>` where `<name>` is the block's
+       `name` when it is a **non-empty string**, else the literal `tool`; and
+       `<hint>` is the value of the first present input key among
+       `command, file_path, path, pattern, query, url, description, prompt, intent`
+       **whose value is a non-empty string**, whitespace-collapsed and capped at
+       **80** chars. An input key whose value is not a non-empty string (a number,
+       bool, list, object, `null`, or `""`) is **skipped** — the scan continues to
+       the next key. If `input` is absent / not an object, or no key yields a
+       non-empty string hint, emit just `→ <name>`. (Rendering only string hints
+       keeps the three clients identical instead of diverging on
+       `true`/`True`, `["a","b"]`/`['a', 'b']`/`["a", "b"]`, etc.)
      - `type == "tool_result"` → `  ⎿ <summary>` (note the two leading spaces and
-       the `⎿` continuation glyph). `<summary>` is the result text
-       (string content, or the first `text` block of list content),
-       whitespace-collapsed, first 200 chars; `(result)` if empty. If
-       `is_error` is truthy, prefix the summary with `✗ ` → `  ⎿ ✗ <summary>`.
+       the `⎿` continuation glyph). `<summary>` is the result text — a **string**
+       `content`, or the first list element that is either a non-empty string or
+       an object block with `type == "text"` and a non-empty string `text`
+       (other list elements are skipped; a non-string/non-list `content` yields no
+       text) — whitespace-collapsed, first 200 chars; `(result)` if empty. If
+       `is_error` is **truthy** (see the truthiness note), prefix the summary with
+       `✗ ` → `  ⎿ ✗ <summary>`.
      - `type == "thinking"` / `"redacted_thinking"` → **suppress** (drops the
        reasoning text *and* the base64 `signature` blob).
      - any other block type → ignored.
+
+   **Truthiness.** `is_error` (on a `result` envelope and on a `tool_result`
+   block) is evaluated with **JSON truthiness**, matching the CLI reference
+   (Python `if value:`): a value is truthy unless it is missing, `null`, `false`,
+   `0`, an empty string, or an empty list/object. So `is_error: 1`,
+   `is_error: "yes"`, and `is_error: true` all mean **error**; `is_error: 0`,
+   `is_error: ""`, and `is_error: false` mean **not error**. A boolean-only parse
+   (such as Android's `optBoolean`) is NOT sufficient — it must apply the same
+   JSON-truthiness to non-boolean values.
 
 5. **Truncation / collapse.** "Whitespace-collapsed" means split on any
    whitespace and rejoin with single spaces (flattens multi-line bodies to one

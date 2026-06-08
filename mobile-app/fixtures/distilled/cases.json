@@ -103,6 +103,300 @@
       "source": "synthesized",
       "raw": "{\"type\": \"assistant\", \"message\": {\"content\": [{\"type\": \"tool_use\", \"name\": \"TodoWrite\", \"input\": {\"todos\": []}}]}}",
       "distilled": "→ TodoWrite"
+    },
+    {
+      "note": "SPEC#1 JSON array at top level (not an object) -> passthrough verbatim",
+      "source": "synthesized",
+      "raw": "[1, 2, 3]",
+      "distilled": "[1, 2, 3]"
+    },
+    {
+      "note": "SPEC#1 JSON number at top level (not an object) -> passthrough verbatim",
+      "source": "synthesized",
+      "raw": "12345",
+      "distilled": "12345"
+    },
+    {
+      "note": "SPEC#1 leading-whitespace before a real envelope: trimmed for the {-test, parsed, distilled",
+      "source": "synthesized",
+      "raw": "   {\"type\": \"system\", \"subtype\": \"init\"}",
+      "distilled": "🔎 starting…"
+    },
+    {
+      "note": "SPEC#1 truncated/partial JSON (parse fails) -> passthrough verbatim (never lose a line)",
+      "source": "synthesized",
+      "raw": "{\"type\": \"assistant\", \"message\": {\"content\": [{\"type\": \"tex",
+      "distilled": "{\"type\": \"assistant\", \"message\": {\"content\": [{\"type\": \"tex"
+    },
+    {
+      "note": "SPEC#2 unknown top-level type -> passthrough verbatim (roost-internal never dropped)",
+      "source": "synthesized",
+      "raw": "{\"type\": \"frobnicate\", \"payload\": 1}",
+      "distilled": "{\"type\": \"frobnicate\", \"payload\": 1}"
+    },
+    {
+      "note": "SPEC#2 non-string `type` -> not a recognised envelope -> passthrough verbatim",
+      "source": "synthesized",
+      "raw": "{\"type\": 5, \"message\": {\"content\": \"x\"}}",
+      "distilled": "{\"type\": 5, \"message\": {\"content\": \"x\"}}"
+    },
+    {
+      "note": "SPEC#2 object with no `type` key -> passthrough verbatim",
+      "source": "synthesized",
+      "raw": "{\"foo\": \"bar\"}",
+      "distilled": "{\"foo\": \"bar\"}"
+    },
+    {
+      "note": "SPEC#3 result is_error truthy STRING ('yes') -> failed (JSON truthiness, R113 Android fix)",
+      "source": "synthesized",
+      "raw": "{\"type\": \"result\", \"is_error\": \"yes\"}",
+      "distilled": "✗ failed"
+    },
+    {
+      "note": "SPEC#3 result is_error number 1 (truthy) -> failed (R113: Android optBoolean was the outlier)",
+      "source": "synthesized",
+      "raw": "{\"type\": \"result\", \"is_error\": 1}",
+      "distilled": "✗ failed"
+    },
+    {
+      "note": "SPEC#3 result is_error number 0 (falsy) -> done",
+      "source": "synthesized",
+      "raw": "{\"type\": \"result\", \"is_error\": 0}",
+      "distilled": "✓ done"
+    },
+    {
+      "note": "SPEC#3 result is_error empty-string (falsy) -> done",
+      "source": "synthesized",
+      "raw": "{\"type\": \"result\", \"is_error\": \"\"}",
+      "distilled": "✓ done"
+    },
+    {
+      "note": "SPEC#4 assistant message is a LIST (truthy non-object) -> suppress (R111 class)",
+      "source": "synthesized",
+      "raw": "{\"type\": \"assistant\", \"message\": [\"a\", \"b\"]}",
+      "distilled": null
+    },
+    {
+      "note": "SPEC#4 user message is a NUMBER (truthy non-object) -> suppress (R111 class)",
+      "source": "synthesized",
+      "raw": "{\"type\": \"user\", \"message\": 5}",
+      "distilled": null
+    },
+    {
+      "note": "SPEC#4 content missing -> suppress",
+      "source": "synthesized",
+      "raw": "{\"type\": \"assistant\", \"message\": {}}",
+      "distilled": null
+    },
+    {
+      "note": "SPEC#4 content is a number (not string/list) -> suppress",
+      "source": "synthesized",
+      "raw": "{\"type\": \"assistant\", \"message\": {\"content\": 42}}",
+      "distilled": null
+    },
+    {
+      "note": "SPEC#4 list content with non-object blocks (null/number/string/bool/list) ignored; only a text block survives",
+      "source": "synthesized",
+      "raw": "{\"type\": \"assistant\", \"message\": {\"content\": [null, 7, \"a string block\", true, [1, 2], {\"type\": \"text\", \"text\": \"survivor\"}]}}",
+      "distilled": "survivor"
+    },
+    {
+      "note": "SPEC#4 text block with non-string `text` (number) -> empty -> block suppressed (R113 coercion pin)",
+      "source": "synthesized",
+      "raw": "{\"type\": \"assistant\", \"message\": {\"content\": [{\"type\": \"text\", \"text\": 123}]}}",
+      "distilled": null
+    },
+    {
+      "note": "SPEC#4 text block with null `text` -> empty -> suppressed (R113: was None/<null> on CLI/iOS)",
+      "source": "synthesized",
+      "raw": "{\"type\": \"assistant\", \"message\": {\"content\": [{\"type\": \"text\", \"text\": null}]}}",
+      "distilled": null
+    },
+    {
+      "note": "SPEC#4 text block missing `text` -> empty -> suppressed",
+      "source": "synthesized",
+      "raw": "{\"type\": \"assistant\", \"message\": {\"content\": [{\"type\": \"text\"}]}}",
+      "distilled": null
+    },
+    {
+      "note": "SPEC#4 text block whose value is only whitespace -> collapses to empty -> suppressed",
+      "source": "synthesized",
+      "raw": "{\"type\": \"assistant\", \"message\": {\"content\": [{\"type\": \"text\", \"text\": \"   \\n\\t  \"}]}}",
+      "distilled": null
+    },
+    {
+      "note": "SPEC#4 tool_use missing `name` -> literal 'tool'; string hint still rendered",
+      "source": "synthesized",
+      "raw": "{\"type\": \"assistant\", \"message\": {\"content\": [{\"type\": \"tool_use\", \"input\": {\"command\": \"ls\"}}]}}",
+      "distilled": "→ tool: ls"
+    },
+    {
+      "note": "SPEC#4 tool_use missing `input` -> bare arrow",
+      "source": "synthesized",
+      "raw": "{\"type\": \"assistant\", \"message\": {\"content\": [{\"type\": \"tool_use\", \"name\": \"Bash\"}]}}",
+      "distilled": "→ Bash"
+    },
+    {
+      "note": "SPEC#4 tool_use empty-string `name` -> literal 'tool'",
+      "source": "synthesized",
+      "raw": "{\"type\": \"assistant\", \"message\": {\"content\": [{\"type\": \"tool_use\", \"name\": \"\", \"input\": {\"command\": \"ls\"}}]}}",
+      "distilled": "→ tool: ls"
+    },
+    {
+      "note": "SPEC#4 tool_use `input` not an object (a string) -> bare arrow (no hint)",
+      "source": "synthesized",
+      "raw": "{\"type\": \"assistant\", \"message\": {\"content\": [{\"type\": \"tool_use\", \"name\": \"Bash\", \"input\": \"raw string input\"}]}}",
+      "distilled": "→ Bash"
+    },
+    {
+      "note": "SPEC#4 tool_use hint value is a NUMBER -> skipped -> bare arrow (R113: was '42' coercion)",
+      "source": "synthesized",
+      "raw": "{\"type\": \"assistant\", \"message\": {\"content\": [{\"type\": \"tool_use\", \"name\": \"Sleep\", \"input\": {\"command\": 42}}]}}",
+      "distilled": "→ Sleep"
+    },
+    {
+      "note": "SPEC#4 tool_use hint value is a BOOL -> skipped -> bare arrow (R113: True/true diverged)",
+      "source": "synthesized",
+      "raw": "{\"type\": \"assistant\", \"message\": {\"content\": [{\"type\": \"tool_use\", \"name\": \"X\", \"input\": {\"command\": true}}]}}",
+      "distilled": "→ X"
+    },
+    {
+      "note": "SPEC#4 tool_use hint value is a LIST -> skipped -> bare arrow (R113: 3-way repr divergence)",
+      "source": "synthesized",
+      "raw": "{\"type\": \"assistant\", \"message\": {\"content\": [{\"type\": \"tool_use\", \"name\": \"X\", \"input\": {\"command\": [\"a\", \"b\"]}}]}}",
+      "distilled": "→ X"
+    },
+    {
+      "note": "SPEC#4 tool_use hint: empty-string `command` skipped, falls through to `file_path`",
+      "source": "synthesized",
+      "raw": "{\"type\": \"assistant\", \"message\": {\"content\": [{\"type\": \"tool_use\", \"name\": \"X\", \"input\": {\"command\": \"\", \"file_path\": \"/p\"}}]}}",
+      "distilled": "→ X: /p"
+    },
+    {
+      "note": "SPEC#4 tool_use hint: numeric `command` skipped, falls through to `file_path`",
+      "source": "synthesized",
+      "raw": "{\"type\": \"assistant\", \"message\": {\"content\": [{\"type\": \"tool_use\", \"name\": \"X\", \"input\": {\"command\": 0, \"file_path\": \"/p\"}}]}}",
+      "distilled": "→ X: /p"
+    },
+    {
+      "note": "SPEC#4 tool_result content is a NUMBER (not string/list) -> '(result)' placeholder",
+      "source": "synthesized",
+      "raw": "{\"type\": \"user\", \"message\": {\"content\": [{\"type\": \"tool_result\", \"content\": 42}]}}",
+      "distilled": "  ⎿ (result)"
+    },
+    {
+      "note": "SPEC#4 tool_result content is null -> '(result)'",
+      "source": "synthesized",
+      "raw": "{\"type\": \"user\", \"message\": {\"content\": [{\"type\": \"tool_result\", \"content\": null}]}}",
+      "distilled": "  ⎿ (result)"
+    },
+    {
+      "note": "SPEC#4 tool_result missing content -> '(result)'",
+      "source": "synthesized",
+      "raw": "{\"type\": \"user\", \"message\": {\"content\": [{\"type\": \"tool_result\"}]}}",
+      "distilled": "  ⎿ (result)"
+    },
+    {
+      "note": "SPEC#4 tool_result list content: number/null/non-text-object skipped; first text block wins",
+      "source": "synthesized",
+      "raw": "{\"type\": \"user\", \"message\": {\"content\": [{\"type\": \"tool_result\", \"content\": [42, null, {\"type\": \"image\"}, {\"type\": \"text\", \"text\": \"real\"}]}]}}",
+      "distilled": "  ⎿ real"
+    },
+    {
+      "note": "SPEC#4 tool_result list content: a leading non-empty string element is taken",
+      "source": "synthesized",
+      "raw": "{\"type\": \"user\", \"message\": {\"content\": [{\"type\": \"tool_result\", \"content\": [\"plain str block\", {\"type\": \"text\", \"text\": \"later\"}]}]}}",
+      "distilled": "  ⎿ plain str block"
+    },
+    {
+      "note": "SPEC#4 tool_result list text block with non-string `text` (number) skipped -> '(result)' (R113 Android optString coercion fix)",
+      "source": "synthesized",
+      "raw": "{\"type\": \"user\", \"message\": {\"content\": [{\"type\": \"tool_result\", \"content\": [{\"type\": \"text\", \"text\": 123}]}]}}",
+      "distilled": "  ⎿ (result)"
+    },
+    {
+      "note": "SPEC#4 tool_result is_error with empty content -> '✗ (result)'",
+      "source": "synthesized",
+      "raw": "{\"type\": \"user\", \"message\": {\"content\": [{\"type\": \"tool_result\", \"is_error\": true, \"content\": \"\"}]}}",
+      "distilled": "  ⎿ ✗ (result)"
+    },
+    {
+      "note": "SPEC#4 tool_result is_error truthy STRING ('yes') -> error marker (R113 Android fix)",
+      "source": "synthesized",
+      "raw": "{\"type\": \"user\", \"message\": {\"content\": [{\"type\": \"tool_result\", \"is_error\": \"yes\", \"content\": \"boom\"}]}}",
+      "distilled": "  ⎿ ✗ boom"
+    },
+    {
+      "note": "SPEC#4 tool_result is_error number 1 (truthy) -> error marker (R113 Android fix)",
+      "source": "synthesized",
+      "raw": "{\"type\": \"user\", \"message\": {\"content\": [{\"type\": \"tool_result\", \"is_error\": 1, \"content\": \"boom\"}]}}",
+      "distilled": "  ⎿ ✗ boom"
+    },
+    {
+      "note": "SPEC#4 tool_result is_error number 0 (falsy) -> no error marker",
+      "source": "synthesized",
+      "raw": "{\"type\": \"user\", \"message\": {\"content\": [{\"type\": \"tool_result\", \"is_error\": 0, \"content\": \"ok\"}]}}",
+      "distilled": "  ⎿ ok"
+    },
+    {
+      "note": "SPEC#4 redacted_thinking block -> suppressed (drops the base64 blob, like thinking)",
+      "source": "synthesized",
+      "raw": "{\"type\": \"assistant\", \"message\": {\"content\": [{\"type\": \"redacted_thinking\", \"data\": \"blob\"}]}}",
+      "distilled": null
+    },
+    {
+      "note": "SPEC#4 user envelope: text block then tool_result joined with newline",
+      "source": "synthesized",
+      "raw": "{\"type\": \"user\", \"message\": {\"content\": [{\"type\": \"text\", \"text\": \"note\"}, {\"type\": \"tool_result\", \"content\": \"r1\"}]}}",
+      "distilled": "note\n  ⎿ r1"
+    },
+    {
+      "note": "SPEC#5 text exactly 199 chars (< 200 cap) -> verbatim, no ellipsis",
+      "source": "synthesized",
+      "raw": "{\"type\": \"assistant\", \"message\": {\"content\": [{\"type\": \"text\", \"text\": \"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}]}}",
+      "distilled": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    },
+    {
+      "note": "SPEC#5 text exactly 200 chars (== cap) -> verbatim, no ellipsis (boundary)",
+      "source": "synthesized",
+      "raw": "{\"type\": \"assistant\", \"message\": {\"content\": [{\"type\": \"text\", \"text\": \"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}]}}",
+      "distilled": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    },
+    {
+      "note": "SPEC#5 text 201 chars (> cap) -> first 200 + single ellipsis",
+      "source": "synthesized",
+      "raw": "{\"type\": \"assistant\", \"message\": {\"content\": [{\"type\": \"text\", \"text\": \"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}]}}",
+      "distilled": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA…"
+    },
+    {
+      "note": "SPEC#5 hint exactly 79 chars (< 80 cap) -> verbatim, no ellipsis",
+      "source": "synthesized",
+      "raw": "{\"type\": \"assistant\", \"message\": {\"content\": [{\"type\": \"tool_use\", \"name\": \"X\", \"input\": {\"command\": \"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB\"}}]}}",
+      "distilled": "→ X: BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+    },
+    {
+      "note": "SPEC#5 hint exactly 80 chars (== cap) -> verbatim, no ellipsis (boundary)",
+      "source": "synthesized",
+      "raw": "{\"type\": \"assistant\", \"message\": {\"content\": [{\"type\": \"tool_use\", \"name\": \"X\", \"input\": {\"command\": \"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB\"}}]}}",
+      "distilled": "→ X: BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+    },
+    {
+      "note": "SPEC#5 hint 81 chars (> cap) -> first 80 + single ellipsis",
+      "source": "synthesized",
+      "raw": "{\"type\": \"assistant\", \"message\": {\"content\": [{\"type\": \"tool_use\", \"name\": \"X\", \"input\": {\"command\": \"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB\"}}]}}",
+      "distilled": "→ X: BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB…"
+    },
+    {
+      "note": "SPEC#5 unicode (accents, BMP symbol, astral emoji) preserved through collapse",
+      "source": "synthesized",
+      "raw": "{\"type\": \"assistant\", \"message\": {\"content\": [{\"type\": \"text\", \"text\": \"caf\\u00e9 \\u00e9\\u2603 \\ud83d\\ude00 end\"}]}}",
+      "distilled": "café é☃ 😀 end"
+    },
+    {
+      "note": "SPEC#5 control chars (tab/newline/CR) collapse like whitespace into single spaces",
+      "source": "synthesized",
+      "raw": "{\"type\": \"assistant\", \"message\": {\"content\": [{\"type\": \"text\", \"text\": \"a\\tb\\nc\\rd  e\"}]}}",
+      "distilled": "a b c d e"
     }
   ]
 }
