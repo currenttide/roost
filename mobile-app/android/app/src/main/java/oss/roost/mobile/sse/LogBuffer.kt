@@ -1,6 +1,7 @@
 package oss.roost.mobile.sse
 
 import oss.roost.mobile.model.Ansi
+import oss.roost.mobile.model.DistilledLine
 import oss.roost.mobile.model.LogLine
 
 /**
@@ -47,19 +48,30 @@ class LogBuffer(private val cap: Int = 2000) {
     }
 }
 
-/** A log line prepared for display: ANSI stripped, event rows flagged as dividers. */
+/**
+ * A log line prepared for display, in BOTH forms so the raw/distilled toggle
+ * (R109) switches instantly without re-streaming:
+ *  - `text`      — the RAW view: ANSI stripped; event rows are divider labels.
+ *  - `distilled` — the DISTILLED view (the DEFAULT): the cross-platform
+ *    `DistilledLine` transform of the original `data`, or `null` to SUPPRESS the
+ *    line in distilled mode. `event` stream rows are always suppressed in
+ *    distilled mode (roost-internal noise — they survive only in raw), matching
+ *    the CLI (`roost stream` skips `stream=="event"` rows unless `--verbose`).
+ */
 data class RenderedLine(
     val seq: Int,
     val text: String,
     val kind: Kind,
+    val distilled: String? = null,
 ) {
     enum class Kind { STDOUT, STDERR, EVENT }
 
     companion object {
         fun from(line: LogLine): RenderedLine = when (line.stream) {
-            "event" -> RenderedLine(line.seq, EventLine.label(line.data), Kind.EVENT)
-            "stderr" -> RenderedLine(line.seq, Ansi.strip(line.data), Kind.STDERR)
-            else -> RenderedLine(line.seq, Ansi.strip(line.data), Kind.STDOUT)
+            // event rows: keep the divider label for raw; suppress in distilled.
+            "event" -> RenderedLine(line.seq, EventLine.label(line.data), Kind.EVENT, distilled = null)
+            "stderr" -> RenderedLine(line.seq, Ansi.strip(line.data), Kind.STDERR, DistilledLine.from(line.data))
+            else -> RenderedLine(line.seq, Ansi.strip(line.data), Kind.STDOUT, DistilledLine.from(line.data))
         }
     }
 }

@@ -37,6 +37,9 @@ data class SessionUiState(
     val draft: String = "",
     val sending: Boolean = false,
     val sendOutcome: String? = null,   // last input's queued/delivered/dropped line
+    // R109: the session view renders the DISTILLED transcript by default; the
+    // raw stream-json firehose is behind this per-session toggle (default OFF).
+    val showRaw: Boolean = false,
 ) {
     /** Composer is live only while the job can still accept input (server 409s a
      *  terminal job). Mirrors the server's `terminal` gate + iOS `isTerminal`. */
@@ -184,6 +187,11 @@ class SessionViewModel(
         viewModelScope.launch {
             try { container.api.cancel(jobId) } catch (_: Exception) {}
         }
+    }
+
+    /** Flip the raw/distilled session view (R109). Default is distilled (OFF). */
+    fun toggleRaw() {
+        _state.value = _state.value.copy(showRaw = !_state.value.showRaw)
     }
 
     /** Composer text changed (DESIGN §3.2). */

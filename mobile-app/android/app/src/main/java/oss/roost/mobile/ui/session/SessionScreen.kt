@@ -29,6 +29,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -41,6 +42,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -50,6 +52,7 @@ import oss.roost.mobile.AppContainer
 import oss.roost.mobile.model.Composer
 import oss.roost.mobile.model.Subtitle
 import oss.roost.mobile.sse.RenderedLine
+import oss.roost.mobile.sse.SessionLines
 import oss.roost.mobile.ui.Semantic
 import oss.roost.mobile.ui.common.Format
 import oss.roost.mobile.ui.common.LifecycleResume
@@ -70,17 +73,24 @@ fun SessionScreen(
 
     LifecycleResume(onResume = vm::start, onPause = vm::stop)
 
+    // R109: the displayed rows are the buffered lines projected for the current
+    // raw/distilled toggle (distilled is the default). `SessionLines.forDisplay`
+    // is the PURE, harness-tested projection.
+    val displayLines by remember(state.lines, state.showRaw) {
+        derivedStateOf { SessionLines.forDisplay(state.lines, state.showRaw) }
+    }
+
     // Auto-follow: only when the user is already near the bottom, so scrolling up to read
     // history isn't yanked back down (DESIGN §3.2 auto-follow tail + jump-to-bottom FAB).
     val atBottom by remember {
         derivedStateOf {
             val last = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-            last >= state.lines.size - 2
+            last >= displayLines.size - 2
         }
     }
-    LaunchedEffect(state.lines.size) {
-        if (atBottom && state.lines.isNotEmpty()) {
-            listState.scrollToItem(state.lines.size - 1)
+    LaunchedEffect(displayLines.size) {
+        if (atBottom && displayLines.isNotEmpty()) {
+            listState.scrollToItem(displayLines.size - 1)
         }
     }
 
@@ -106,12 +116,22 @@ fun SessionScreen(
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
                 },
+                actions = {
+                    // R109: distilled is the default; this flips to the raw
+                    // stream-json firehose ("Show raw output", default OFF).
+                    TextButton(
+                        onClick = vm::toggleRaw,
+                        modifier = Modifier.testTag("rawToggle"),
+                    ) {
+                        Text(if (state.showRaw) "Distilled" else "Raw")
+                    }
+                },
             )
         },
         floatingActionButton = {
-            if (!atBottom && state.lines.isNotEmpty()) {
+            if (!atBottom && displayLines.isNotEmpty()) {
                 FloatingActionButton(onClick = {
-                    scope.launch { listState.scrollToItem(state.lines.size - 1) }
+                    scope.launch { listState.scrollToItem(displayLines.size - 1) }
                 }) {
                     Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "Jump to latest")
                 }
@@ -138,7 +158,7 @@ fun SessionScreen(
                     .weight(1f)
                     .fillMaxWidth(),
             ) {
-                items(state.lines, key = { it.seq }) { line -> LogRow(line) }
+                items(displayLines, key = { it.seq }) { line -> LogRow(line) }
                 state.done?.let { item { ResultCard(it) } }
                 if (showTree && state.children.isNotEmpty()) {
                     item { HorizontalDivider() }
