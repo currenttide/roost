@@ -250,7 +250,18 @@ struct DisplayLine: Identifiable, Equatable, Codable {
 
     /// Render a wire `LogRow` (ANSI-stripped; event rows become divider labels,
     /// unparseable ones are skipped → nil).
-    static func from(_ row: LogRow) -> DisplayLine? {
+    ///
+    /// `raw` selects how `stdout` rows render (R108). The DEFAULT
+    /// (`raw == false`) DISTILLS each stdout line of an agent job's stream-json
+    /// into a readable transcript via `DistilledLine.from` — assistant text,
+    /// `→ Tool: summary`, truncated results; phase dividers kept; base64
+    /// signatures, reasoning blobs, and roost-internal `event` envelopes
+    /// suppressed (those distil to `nil` → the row is dropped). A plain
+    /// `command` job's stdout is not stream-json, so it passes through verbatim.
+    /// `raw == true` reproduces today's exact firehose (every stdout line shown
+    /// as-is, ANSI-stripped). The shared golden fixtures under
+    /// `mobile-app/fixtures/distilled/` pin the distilled output across clients.
+    static func from(_ row: LogRow, raw: Bool = false) -> DisplayLine? {
         switch row.stream {
         case "event":
             guard let label = LogRow.eventLabel(row.data) else { return nil }
@@ -258,7 +269,14 @@ struct DisplayLine: Identifiable, Equatable, Codable {
         case "stderr":
             return DisplayLine(seq: row.seq, kind: .stderr, text: Ansi.strip(row.data))
         default:   // "stdout" and anything else render as stdout text
-            return DisplayLine(seq: row.seq, kind: .stdout, text: Ansi.strip(row.data))
+            if raw {
+                return DisplayLine(seq: row.seq, kind: .stdout, text: Ansi.strip(row.data))
+            }
+            // Distilled (default): suppress noise lines (nil); ANSI-strip the
+            // survivors. Distillation parses the raw stream-json (which carries
+            // no ANSI), so it runs before the strip.
+            guard let distilled = DistilledLine.from(row.data) else { return nil }
+            return DisplayLine(seq: row.seq, kind: .stdout, text: Ansi.strip(distilled))
         }
     }
 }

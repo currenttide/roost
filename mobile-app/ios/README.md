@@ -8,6 +8,21 @@ third-party dependencies** (Foundation / SwiftUI / AVFoundation / Speech / Secur
 This builds against the pinned contract in [`../API.md`](../API.md); the design is
 in [`../DESIGN.md`](../DESIGN.md).
 
+## Distilled session view (R108)
+
+The session log **defaults to a distilled rendering** of an agent job's
+`stream-json`: assistant text, `→ Tool: summary`, truncated `⎿` results, and
+`🔎/✓/✗` phase dividers — base64 signatures, reasoning blobs, rate-limit pings,
+and roost-internal envelopes are suppressed. A **"Distilled / Raw" toggle** in the
+session footer (default off = distilled) reveals the unfiltered firehose; it
+re-renders the rows already in hand, no re-fetch. The transform is the pure
+`DistilledLine.from(_:)` (`Roost/Net/Distill.swift`), an exact mirror of the
+language-neutral contract in [`../fixtures/distilled/SPEC.md`](../fixtures/distilled/SPEC.md)
+and the CLI reference impl (`roost.cli.distill_log_line`). `DistilledTests` loads
+the shared golden fixtures (`../fixtures/distilled/cases.json`) and asserts the iOS
+transform produces the committed output for **every** case — the cross-platform
+consistency guarantee that keeps CLI, iOS, and Android byte-identical.
+
 ## The repo contains no `.xcodeproj`
 
 The Xcode project is a *generated artifact*. The source of truth is
@@ -210,7 +225,7 @@ a `403` shows an error but stays paired (it's a scope bug, not a revoked token).
 |---|---|
 | `Roost/App/` | `@main` app + root routing (paired vs pairing) |
 | `Roost/Models/` | Codable models, the failable `HealthStatus`, type-erased `JSONValue` |
-| `Roost/Net/` | `ApiClient`, hand-rolled `SSEParser` + `LogStream` resume loop, Keychain, pairing decode, ANSI strip |
+| `Roost/Net/` | `ApiClient`, hand-rolled `SSEParser` + `LogStream` resume loop, Keychain, pairing decode, ANSI strip, **`DistilledLine` (R108) — the pure distilled-stream transform** |
 | `Roost/Speech/` | on-device dictation (Speech + AVAudioEngine), haptics |
 | `Roost/Stores/` | one `ObservableObject` per screen + `AppState` |
 | `Roost/Views/` | Pairing, Dashboard, Session, New-session sheet |

@@ -152,7 +152,24 @@ final class SmokeTests: XCTestCase {
             XCTAssertTrue(app.buttons["session-composer-send"].exists,
                           "Composer field present but Send button missing.")
         }
-        attachScreenshot(app, name: "03-session")
+        // R108: the session view DEFAULTS to the distilled rendering, with a
+        // footer toggle to the raw firehose. Assert the toggle exists, capture
+        // the distilled default, flip to raw, capture that, flip back.
+        let rawToggle = app.buttons["session-raw-toggle"]
+        XCTAssertTrue(rawToggle.waitForExistence(timeout: appearTimeout),
+                      "Distilled/Raw toggle missing from the session footer.")
+        XCTAssertEqual(rawToggle.label, "Distilled",
+                       "Session view must DEFAULT to the distilled rendering (R108).")
+        attachScreenshot(app, name: "03-session-distilled")
+
+        rawToggle.tap()
+        XCTAssertTrue(app.buttons["session-raw-toggle"].label == "Raw"
+                      || app.staticTexts["Raw"].waitForExistence(timeout: 5),
+                      "Toggle did not switch to the raw firehose view.")
+        attachScreenshot(app, name: "03b-session-raw")
+
+        // Back to the distilled default.
+        app.buttons["session-raw-toggle"].tap()
     }
 
     // MARK: - Flow 4: Notifications + Schedules sheets from the overflow menu
