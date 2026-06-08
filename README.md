@@ -336,7 +336,7 @@ a per-kind default cap applies (`command` 120 min, `claude`/`auto` 240 min, `doc
 | `roost jobs` | recent jobs |
 | `roost history [--failed]` | recent finished runs with outcome, worker & cost; `--failed` shows only runs that failed or weren't verified ("what went wrong this week") |
 | `roost status <id>` | one job's state (incl. queued/delivered/dropped input counts). `<id>` may be an unambiguous id **prefix** (≥6 chars — the 8-char ids `roost history` prints work as-is); ambiguous → lists candidates |
-| `roost logs <id> [--follow]` | job output (`<id>` accepts an id prefix too) |
+| `roost logs <id> [--follow]` | job output (`<id>` accepts an id prefix too). Agent (`kind: claude`) output is **distilled** by default — assistant text, `→ Tool: summary`, truncated results; phase dividers kept; base64/signature/raw stream-json suppressed. Add `--verbose`/`--raw` for the raw stream-json firehose |
 | `roost send <id> <text> [--wait]` | send a follow-up message to a **running** job (see *Interactive follow-up* below) |
 | `roost exec <worker> -- <cmd>` | run a command on one specific node — no SSH, via the job channel (great for a node whose SSH is unreachable) |
 | `roost tree <root> --health` | a dispatch's whole job tree + per-job liveness; each child shows the captain's `↳ why:` plan reason when one was recorded (`<root>` accepts an id prefix too) |
