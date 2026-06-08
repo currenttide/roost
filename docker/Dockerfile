@@ -19,9 +19,10 @@ RUN install -m 0755 -d /etc/apt/keyrings \
     && apt-get update && apt-get install -y --no-install-recommends docker-ce-cli \
     && rm -rf /var/lib/apt/lists/*
 
-# Install roost system-wide from the locally-built wheel.
-COPY dist/roost-0.1.0-py3-none-any.whl /tmp/
-RUN pip install --no-cache-dir /tmp/roost-0.1.0-py3-none-any.whl && rm /tmp/*.whl
+# Install roost system-wide from the locally-built wheel. Version-agnostic glob so
+# a pyproject version bump (e.g. 0.1.0 → 0.2.0, R32) doesn't break this COPY.
+COPY dist/roost-*-py3-none-any.whl /tmp/
+RUN pip install --no-cache-dir /tmp/roost-*-py3-none-any.whl && rm /tmp/*.whl
 
 # Run as a non-root user: Claude Code refuses --dangerously-skip-permissions as
 # root, and non-root is better hygiene for job isolation anyway.
