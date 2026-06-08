@@ -468,17 +468,17 @@ Done-when: direct pure-function assertions on argv shape + raised errors; judge 
 
 User directives (2026-06-08): (1) make the distilled live-stream view the DEFAULT on every platform; (4) mac-app two-step publish fallback — no blocker, build it on the mac-mini-m4 node. (Branch protection deferred per user; fleet worker rollout handled as ops, not a code item.)
 
-### R107. CLI live-stream distilled-default + `--verbose` raw escape + shared spec/fixtures — `open` `human-promoted` `feature`
+### R107. CLI live-stream distilled-default + `--verbose` raw escape + shared spec/fixtures — `done` *(2026-06-08, PR #119 — distill_log_line + golden fixtures; pytest 1083)* `human-promoted` `feature`
 Surface: CLI/feature. The reference implementation + canonical contract for the cross-platform distilled view. Today `_stream` (cli.py ~2304) echoes every raw Claude stream-json log line (incl. base64 signature blobs) — a firehose. The distilled phase markers (🔎/🔧 from worker `last_activity`) are NOT in the log stream; the per-line distillation (assistant text, "→ <Tool>: <summary>", tool results) must be DERIVED by parsing the stream-json `data` field client-side.
 Done-when: ground the mapping in a REAL captured agent-job stream (run a tiny `kind:claude` job on a scratch CP, capture raw logs); define the distilled transform (assistant text shown; tool_use→"→ <Tool>: <short>"; tool_result truncated; suppress base64/signature/raw envelopes; keep 🔎/🔧/✓ phase dividers); make distilled the DEFAULT for `roost logs --follow`/`run`/`_stream`, raw behind `--verbose` (or `--raw`; pick + document); commit a SHARED spec doc + golden fixtures (raw stream-json line → expected distilled output) under mobile-app/fixtures/distilled/ so iOS/Android mirror it exactly; pytest green incl. golden-fixture tests; live smoke on a scratch CP.
 
-### R108. iOS session view: distilled-default (mirror R107 spec/fixtures) — `blocked: R107` `human-promoted` `feature`
+### R108. iOS session view: distilled-default (mirror R107 spec/fixtures) — `in-progress` *(R107 contract landed; agent running)* `human-promoted` `feature`
 Surface: mobile/iOS/feature. After R107 lands the spec+fixtures: iOS SessionStore/SessionView default to the distilled rendering of the same stream-json, raw behind a UI toggle (default off). Linux pure-layer tests against the committed golden fixtures + Mac-node sim screenshot.
 
-### R109. Android session view: distilled-default (mirror R107 spec/fixtures) — `blocked: R107` `human-promoted` `feature`
+### R109. Android session view: distilled-default (mirror R107 spec/fixtures) — `done` *(2026-06-08, PR #120 — DistilledLine.from + 16 golden fixtures; harness 100)* `human-promoted` `feature`
 Surface: mobile/Android/feature. After R107: Android SessionViewModel/SessionScreen default to distilled rendering, raw behind a UI toggle. kotlinc+JUnit tests against the committed golden fixtures + emulator screenshot.
 
-### R110. mac-app two-step publish fallback (mirror CLI R78/R90) — `open` `human-promoted`
+### R110. mac-app two-step publish fallback (mirror CLI R78/R90) — `done` *(2026-06-08, PR #118 — stageBlob/publishFromBlob; RoostKit 123; Mac-node verified)* `human-promoted`
 Surface: mac-app/robustness. `mac-app/Sources/RoostKit/RoostClient.swift` `publishBundle` (~142) is one-shot only → 500s on an older CP. Mirror the CLI fallback (cli.py ~1547-1625): on one-shot non-2xx (except 401/403) → stageBlob (POST /blobs?name=) → publishFromBlob (POST /publish JSON {name,blob_id}); on double-failure surface BOTH errors leading with the one-shot's. RoostClient lacks stageBlob/publishFromBlob — add them.
 Done-when: publishBundle degrades across CP versions; new RoostKit methods + a PublishFallbackTests (one-shot 500 → blob path → Site); Linux `swift test` green + Mac-node `swift build`+`swift test` green (we HAVE mac-mini-m4 — no blocker; build there via roost exec); pytest green (server untouched).
 
