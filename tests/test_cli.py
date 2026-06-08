@@ -1474,6 +1474,125 @@ def test_schedule_disable_500_friendly_error(monkeypatch):
     _assert_clean_error(res, "500")
 
 
+# R104: `workers`/`cancel` bad-token + main()'s top-level handler — a bad token
+# or any unexpected error must surface a friendly message, never a raw httpx /
+# Python traceback. (R77/R79 covered schedule subverbs + status/logs/tree.)
+
+
+def test_workers_bad_token_friendly_not_traceback(monkeypatch):
+    # A 401 from the CP must become an actionable auth hint, not the bare
+    # httpx.HTTPStatusError that raise_for_status() used to leak.
+    _mock_ctx(monkeypatch, {
+        "GET /workers": httpx.Response(401, json={"detail": "invalid token"}),
+    })
+    res = CliRunner().invoke(roost_cli.list_workers_cmd, [], obj={})
+    assert res.exit_code != 0
+    assert not isinstance(res.exception, httpx.HTTPStatusError), \
+        f"raw traceback leaked: {res.exception!r}"
+    assert "Traceback" not in res.output
+    assert "HTTPStatusError" not in res.output
+    assert "auth failed to list workers" in res.output
+
+
+def test_workers_403_friendly_not_traceback(monkeypatch):
+    _mock_ctx(monkeypatch, {
+        "GET /workers": httpx.Response(403, json={"detail": "forbidden"}),
+    })
+    res = CliRunner().invoke(roost_cli.list_workers_cmd, [], obj={})
+    assert res.exit_code != 0
+    assert "auth failed to list workers" in res.output
+
+
+def test_workers_500_friendly_not_traceback(monkeypatch):
+    # A non-auth non-2xx still surfaces a clean one-liner (status + body).
+    _mock_ctx(monkeypatch, {
+        "GET /workers": httpx.Response(500, text="boom"),
+    })
+    res = CliRunner().invoke(roost_cli.list_workers_cmd, [], obj={})
+    assert res.exit_code != 0
+    assert "HTTPStatusError" not in res.output
+    assert "list workers failed: HTTP 500" in res.output
+
+
+def test_cancel_bad_token_friendly_not_traceback(monkeypatch):
+    # The 409 'not cancellable' path was already handled; the 401 path leaked
+    # a raw traceback before R104.
+    _mock_ctx(monkeypatch, {
+        "DELETE /jobs/abc123": httpx.Response(401, json={"detail": "invalid token"}),
+    })
+    res = CliRunner().invoke(roost_cli.cancel, ["abc123"], obj={})
+    assert res.exit_code != 0
+    assert not isinstance(res.exception, httpx.HTTPStatusError), \
+        f"raw traceback leaked: {res.exception!r}"
+    assert "Traceback" not in res.output
+    assert "HTTPStatusError" not in res.output
+    assert "auth failed to cancel" in res.output
+
+
+def test_cancel_409_still_says_not_cancellable(monkeypatch):
+    # R104 must not regress the existing dedicated 409 message.
+    _mock_ctx(monkeypatch, {
+        "DELETE /jobs/abc123": httpx.Response(409, json={}),
+    })
+    res = CliRunner().invoke(roost_cli.cancel, ["abc123"], obj={})
+    assert res.exit_code != 0
+    assert "not cancellable" in res.output
+
+
+def test_main_wraps_unexpected_errors(monkeypatch):
+    # An unexpected (non-Click) error mid-dispatch becomes a clean nonzero
+    # SystemExit + a one-line "error: ..." on stderr, not a raw traceback.
+    import sys
+
+    def boom(*a, **k):
+        raise RuntimeError("kaboom from inside a command")
+
+    monkeypatch.setattr(roost_cli, "cli", boom)
+    monkeypatch.setattr(sys, "argv", ["roost", "workers"])
+    monkeypatch.delenv("ROOST_DEBUG", raising=False)
+    with pytest.raises(SystemExit) as ei:
+        roost_cli.main()
+    assert ei.value.code not in (0, None)
+
+
+def test_main_passes_through_click_exceptions(monkeypatch):
+    # ClickException must reach click's own handler untouched (it formats the
+    # friendly message + sets the exit code itself) — R104 must not swallow it.
+    def raise_click(*a, **k):
+        raise click.ClickException("friendly click message")
+
+    monkeypatch.setattr(roost_cli, "cli", raise_click)
+    monkeypatch.delenv("ROOST_DEBUG", raising=False)
+    with pytest.raises(click.ClickException) as ei:
+        roost_cli.main()
+    assert ei.value.message == "friendly click message"
+
+
+def test_main_passes_through_systemexit(monkeypatch):
+    # click's standalone_mode exits via SystemExit on success/usage errors;
+    # main() must let that exit code through unchanged.
+    def raise_exit(*a, **k):
+        raise SystemExit(2)
+
+    monkeypatch.setattr(roost_cli, "cli", raise_exit)
+    monkeypatch.delenv("ROOST_DEBUG", raising=False)
+    with pytest.raises(SystemExit) as ei:
+        roost_cli.main()
+    assert ei.value.code == 2
+
+
+def test_main_debug_env_reraises_for_debugging(monkeypatch):
+    # ROOST_DEBUG=1 honors the operator's intent to see the full traceback
+    # rather than the swallowed one-liner.
+    def boom(*a, **k):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(roost_cli, "cli", boom)
+    monkeypatch.setenv("ROOST_DEBUG", "1")
+    with pytest.raises(RuntimeError, match="kaboom"):
+        roost_cli.main()
+
+
 # ---------- `roost publish --list` (R-era pagination via X-Total-Count) ----------
 
 
