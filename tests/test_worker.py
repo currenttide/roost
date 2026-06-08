@@ -25,6 +25,7 @@ from roost.worker import (
     _sanitize_env,
     _validate_container,
     build_bwrap_argv,
+    build_command,
     detect_capabilities,
     load_snapshot,
 )
@@ -3107,3 +3108,244 @@ def test_build_codex_argv_appends_args(monkeypatch):
     argv = _build_codex_argv(
         {"kind": "codex", "intent": "fix it", "args": ["--model", "o3", "--full-auto"]})
     assert argv == ["codex", "exec", "fix it", "--model", "o3", "--full-auto"]
+
+
+# ---------------------------------------------------------------------------
+# [R102] build_command kind-dispatch ROUTER coverage (worker.py:502, 507-546).
+# The argv-BUILDERS each branch calls were covered in R96/R99/R1; UNcovered is
+# the router seam that (a) routes `command` str vs list vs invalid-type, (b)
+# picks among the auto/docker/claude/codex builders by `kind`, raising ValueError
+# on an unknown kind, and (c) resolves cwd (spec.cwd / default_cwd / os.getcwd()).
+# This is the security-relevant seam that decides WHICH builder runs. These tests
+# call the REAL build_command directly (never patched) and assert the exact
+# returned (argv, cwd, tempfiles) tuple per branch. Each kind branch is pinned by
+# patching ONLY its target builder with a sentinel — so a swapped dispatch (e.g.
+# claude→codex) makes the matching test fail. No subprocess is ever spawned.
+# ---------------------------------------------------------------------------
+
+
+# ---- `command` str / list / invalid-type routing (worker.py:525-531) ----
+
+
+def test_build_command_string_wraps_in_sh_c():
+    """A string `command` routes to `/bin/sh -c <cmd>` (line 527-528). cwd/tempfiles
+    flow through unchanged."""
+    argv, cwd, tempfiles = build_command(
+        {"command": "echo hi"}, "job1", default_cwd="/work")
+    assert argv == ["/bin/sh", "-c", "echo hi"]
+    assert cwd == "/work"
+    assert tempfiles == []
+
+
+def test_build_command_list_returns_copy_not_alias():
+    """A list `command` routes to a *copy* of the list (line 529-530: `list(cmd)`)
+    — the returned argv must equal but NOT be the same object the caller passed
+    (a fresh-index splice would otherwise mutate the spec)."""
+    cmd = ["ls", "-la", "/data"]
+    argv, cwd, tempfiles = build_command(
+        {"command": cmd}, "job2", default_cwd="/d")
+    assert argv == ["ls", "-la", "/data"]
+    assert argv is not cmd, "list command must be copied, not aliased to the spec"
+    assert cwd == "/d"
+    assert tempfiles == []
+
+
+@pytest.mark.parametrize("bad", [
+    {"a": 1},          # dict
+    42,                # int
+    3.14,              # float
+    ("ls", "-l"),      # tuple is NOT a list
+    True,              # bool
+])
+def test_build_command_invalid_command_type_raises(bad):
+    """A `command` that is neither str nor list → ValueError (line 531). Note a
+    tuple is rejected too — only `isinstance(..., list)` is accepted."""
+    with pytest.raises(ValueError, match=r"`command` must be string or list"):
+        build_command({"command": bad}, "jobBad", default_cwd="/x")
+
+
+def test_build_command_empty_command_falls_through_to_kind(monkeypatch):
+    """An empty/falsey `command` ("") fails the `if spec.get("command")` guard
+    (line 525) and falls through to the kind dispatch — here defaulting to claude.
+    Proves the guard is truthiness, not key-presence."""
+    import roost.worker as wm
+
+    monkeypatch.setattr(wm.shutil, "which", _claude_only)
+    monkeypatch.setattr(wm, "_claude_supports_sandbox", lambda: True)
+    argv, _cwd, _tf = build_command(
+        {"command": "", "intent": "do the thing"}, "jobE", default_cwd="/w")
+    assert argv[:3] == ["claude", "-p", "do the thing"]
+
+
+# ---- kind dispatch: the right builder is selected per kind ----
+
+
+def test_build_command_kind_auto_dispatches_to_auto_builder(monkeypatch):
+    """kind=auto routes to _build_auto_argv (line 507-517). Pinned with a sentinel:
+    swapping this branch's dispatch makes the test fail."""
+    import roost.worker as wm
+
+    sentinel = ["AUTO_ARGV_SENTINEL"]
+    monkeypatch.setattr(wm, "_build_auto_argv", lambda *a, **k: sentinel)
+    argv, cwd, tempfiles = build_command(
+        {"kind": "auto", "task": "t"}, "jobAuto", default_cwd="/auto")
+    assert argv is sentinel, "kind=auto must dispatch to _build_auto_argv"
+    assert cwd == "/auto"
+    assert tempfiles == []
+
+
+def test_build_command_kind_auto_is_case_insensitive(monkeypatch):
+    """The auto check lowercases `kind` (line 507: `.lower() == "auto"`), so AUTO
+    / Auto route to the auto builder too."""
+    import roost.worker as wm
+
+    sentinel = ["AUTO_SENTINEL"]
+    monkeypatch.setattr(wm, "_build_auto_argv", lambda *a, **k: sentinel)
+    argv, _cwd, _tf = build_command({"kind": "AUTO", "task": "t"}, "jA", default_cwd="/x")
+    assert argv is sentinel
+
+
+def test_build_command_kind_docker_dispatches_to_docker_builder(monkeypatch):
+    """kind=docker routes to _build_docker_argv (line 522-523), checked BEFORE the
+    `command` guard so a docker job carrying both image and in-container command
+    still goes to the docker builder."""
+    import roost.worker as wm
+
+    sentinel = ["DOCKER_ARGV_SENTINEL"]
+    monkeypatch.setattr(wm, "_build_docker_argv", lambda *a, **k: sentinel)
+    # Carries a `command` too — must NOT be intercepted by the command branch.
+    argv, cwd, tempfiles = build_command(
+        {"kind": "docker", "image": "alpine", "command": ["ls"]},
+        "jobDk", default_cwd="/dk")
+    assert argv is sentinel, "kind=docker must dispatch to _build_docker_argv"
+    assert cwd == "/dk"
+    assert tempfiles == []
+
+
+def test_build_command_kind_claude_dispatches_to_claude_builder(monkeypatch):
+    """kind=claude routes to _build_claude_argv (line 533-543)."""
+    import roost.worker as wm
+
+    sentinel = ["CLAUDE_ARGV_SENTINEL"]
+    monkeypatch.setattr(wm, "_build_claude_argv", lambda *a, **k: sentinel)
+    argv, cwd, tempfiles = build_command(
+        {"kind": "claude", "intent": "x"}, "jobCl", default_cwd="/cl")
+    assert argv is sentinel, "kind=claude must dispatch to _build_claude_argv"
+    assert cwd == "/cl"
+    assert tempfiles == []
+
+
+def test_build_command_default_kind_is_claude(monkeypatch):
+    """No `kind` and no `command` → defaults to claude (line 533:
+    `spec.get("kind") or "claude"`). Pinned to the claude builder sentinel."""
+    import roost.worker as wm
+
+    sentinel = ["DEFAULT_CLAUDE_SENTINEL"]
+    monkeypatch.setattr(wm, "_build_claude_argv", lambda *a, **k: sentinel)
+    argv, _cwd, _tf = build_command({"intent": "x"}, "jobDef", default_cwd="/d")
+    assert argv is sentinel, "absent kind must default to the claude builder"
+
+
+def test_build_command_kind_codex_dispatches_to_codex_builder(monkeypatch):
+    """kind=codex routes to _build_codex_argv (line 544-545)."""
+    import roost.worker as wm
+
+    sentinel = ["CODEX_ARGV_SENTINEL"]
+    monkeypatch.setattr(wm, "_build_codex_argv", lambda *a, **k: sentinel)
+    argv, cwd, tempfiles = build_command(
+        {"kind": "codex", "intent": "x"}, "jobCx", default_cwd="/cx")
+    assert argv is sentinel, "kind=codex must dispatch to _build_codex_argv"
+    assert cwd == "/cx"
+    assert tempfiles == []
+
+
+def test_build_command_unknown_kind_raises(monkeypatch):
+    """An unrecognised kind with no `command` → ValueError naming the kind
+    (line 546). The message echoes the offending kind."""
+    import roost.worker as wm
+
+    # Ensure no builder is reached even if PATH lookups would otherwise succeed.
+    monkeypatch.setattr(wm.shutil, "which", lambda n: None)
+    with pytest.raises(ValueError, match=r"unknown kind: 'wizard'"):
+        build_command({"kind": "wizard"}, "jobU", default_cwd="/u")
+
+
+def test_build_command_unknown_kind_with_command_does_not_raise():
+    """An unknown kind is harmless when a `command` is present: the command branch
+    (line 525) wins before the kind dispatch is reached, so no ValueError."""
+    argv, _cwd, _tf = build_command(
+        {"kind": "wizard", "command": "echo ok"}, "jobUC", default_cwd="/uc")
+    assert argv == ["/bin/sh", "-c", "echo ok"]
+
+
+# ---- real end-to-end dispatch (no builder patched) confirms each real builder ----
+
+
+def test_build_command_routes_to_real_claude_builder(monkeypatch):
+    """End-to-end: with claude on PATH the default/claude branch produces the real
+    _build_claude_argv head `claude -p <intent>` — proves the router wires the spec,
+    job_id, and cwd through to the genuine builder, not just a sentinel."""
+    import roost.worker as wm
+
+    monkeypatch.setattr(wm.shutil, "which", _claude_only)
+    monkeypatch.setattr(wm, "_claude_supports_sandbox", lambda: True)
+    argv, cwd, tempfiles = build_command(
+        {"kind": "claude", "intent": "real intent"}, "jobReal", default_cwd="/real")
+    assert argv[:3] == ["claude", "-p", "real intent"]
+    assert cwd == "/real"
+    assert isinstance(tempfiles, list)
+
+
+def test_build_command_routes_to_real_codex_builder(monkeypatch):
+    """End-to-end: codex on PATH → real `codex exec <intent>`."""
+    import roost.worker as wm
+
+    monkeypatch.setattr(wm.shutil, "which", lambda n: "/usr/local/bin/codex")
+    argv, _cwd, _tf = build_command(
+        {"kind": "codex", "intent": "real codex"}, "jobRc", default_cwd="/rc")
+    assert argv == ["codex", "exec", "real codex"]
+
+
+def test_build_command_routes_to_real_docker_builder():
+    """End-to-end: kind=docker → real `docker run --rm --name roost-job-<id>` with
+    the image and in-container command after it."""
+    argv, _cwd, _tf = build_command(
+        {"kind": "docker", "image": "alpine:3.20", "command": ["sh", "-c", "id"]},
+        "jobRd", default_cwd="/rd")
+    assert argv[:5] == ["docker", "run", "--rm", "--name", "roost-job-jobRd"]
+    i = argv.index("alpine:3.20")
+    assert argv[i + 1:] == ["sh", "-c", "id"]
+
+
+# ---- cwd precedence: spec.cwd > default_cwd > os.getcwd() (worker.py:502) ----
+
+
+def test_build_command_cwd_prefers_spec_cwd():
+    """spec.cwd wins over default_cwd (line 502 first disjunct)."""
+    _argv, cwd, _tf = build_command(
+        {"command": "x", "cwd": "/spec/dir"}, "jobC1", default_cwd="/default/dir")
+    assert cwd == "/spec/dir"
+
+
+def test_build_command_cwd_falls_back_to_default_cwd():
+    """No spec.cwd → default_cwd (line 502 second disjunct)."""
+    _argv, cwd, _tf = build_command(
+        {"command": "x"}, "jobC2", default_cwd="/default/dir")
+    assert cwd == "/default/dir"
+
+
+def test_build_command_cwd_falls_back_to_getcwd(monkeypatch):
+    """No spec.cwd and no default_cwd → os.getcwd() (line 502 final disjunct)."""
+    import roost.worker as wm
+
+    monkeypatch.setattr(wm.os, "getcwd", lambda: "/the/process/cwd")
+    _argv, cwd, _tf = build_command({"command": "x"}, "jobC3")
+    assert cwd == "/the/process/cwd"
+
+
+def test_build_command_empty_spec_cwd_falls_back_to_default():
+    """An empty-string spec.cwd is falsey → default_cwd is used (truthiness, not
+    key-presence, at line 502)."""
+    _argv, cwd, _tf = build_command(
+        {"command": "x", "cwd": ""}, "jobC4", default_cwd="/default/dir")
+    assert cwd == "/default/dir"
