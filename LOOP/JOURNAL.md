@@ -2869,3 +2869,19 @@ Entries are written by the loop; humans read, never need to edit.
   high-impact cross-platform drift did NOT occur) + 7 hunt hypotheses cleared.
 - "hunt your own fresh code" pattern: 1-for-1 again (crash in <2h-old code).
 - Models: orchestrator claude-opus-4-8[1m]; implementers opus; judges sonnet
+
+## 2026-06-08 ~02:05 UTC — IDLE (all directives + follow-on hunt done; Ranked drained)
+- Verdict: idle (protocol pacing). All four user directives delivered (distilled
+  default on CLI+iOS+Android; mac publish fallback; fleet rolled to latest on
+  13/13 uv nodes; branch protection deferred per user). Follow-on replenishment
+  found+fixed a crash in the fresh distilled code (R111) + aligned the mobile
+  docs (R112). Re-hunting the now-tiny R111/R112 changes = low yield → don't
+  manufacture work.
+- AWAITING THE HUMAN: (1) the 2 hubbase docker workers (host-level container
+  rebuild — `docker compose build && up -d` for those worker services on the
+  hubbase host; out of the worker job channel's reach); (2) branch protection on
+  master; (3) the Proposed/UX nit set. 13/15 fleet nodes on latest; CP current.
+- 2026-06-08 session: PRs #111-#123, pytest 999→1090.
+- WAKE: max-interval; repo changed (human commits/UAT) → drift sweep + hunt over
+  the change; unchanged → no-op re-arm.
+- Models: orchestrator claude-opus-4-8[1m]
