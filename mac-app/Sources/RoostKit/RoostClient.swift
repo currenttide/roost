@@ -139,12 +139,131 @@ public final class RoostClient: @unchecked Sendable {
     /// One-shot publish (the menu-bar flow, mirroring mobile §6a): the `tar.gz`
     /// bundle IS the request body and `name` is REQUIRED (slugified server-side).
     /// Nothing is staged, so a dropped connection can't leave a dangling blob.
+    ///
+    /// Cross-version fallback (mirrors `roost/cli.py` publish, R78/R90): the
+    /// one-shot raw-tar POST is new (R7). Older control planes only know the
+    /// two-step blob flow and react to a raw body in version-specific ways (the
+    /// deployed 0.1.0 CP `json.loads()`es the gzip bytes and 500s; others 422 or
+    /// 404). We CANNOT enumerate every old failure, so the contract is: on ANY
+    /// non-2xx from the one-shot EXCEPT auth (401/403 — a fallback would only hit
+    /// it again), try the two-step `stageBlob` → `publishFromBlob`. If the
+    /// fallback ALSO fails we surface BOTH errors, leading with the one-shot's
+    /// (R90) so a real new-CP bug stays visible instead of being masked by the
+    /// fallback's reroute.
     public func publishBundle(name: String, data: Data) async throws -> Site {
         var request = makeRequest("POST", "/publish", query: ["name": name])
         request.httpBody = data
         // A non-JSON Content-Type selects the server's one-shot path.
         request.setValue("application/gzip", forHTTPHeaderField: "Content-Type")
-        return try await perform(request)
+
+        let (body, response) = try await self.data(for: request)
+        switch response.statusCode {
+        case 200..<300:
+            return try decodeSite(body)
+        case 401, 403:
+            // Auth fails identically on the fallback — surface it directly.
+            throw RoostClientError.unauthorized
+        default:
+            break  // any other non-2xx → try the two-step fallback below.
+        }
+
+        // The one-shot failed with a non-auth error. Lead any fallback failure
+        // with this so a genuine new-CP error stays the headline.
+        let oneShot = RoostClientError.server(
+            status: response.statusCode, message: detail(from: body) ?? "")
+
+        let blob: Blob
+        do {
+            blob = try await stageBlob(name: "\(name).tar.gz", data: data)
+        } catch RoostClientError.unauthorized {
+            throw RoostClientError.unauthorized  // auth — surface directly, not wrapped.
+        } catch {
+            throw publishFallbackError(oneShot: oneShot, fallback: error)
+        }
+        do {
+            return try await publishFromBlob(name: name, blobID: blob.id)
+        } catch RoostClientError.unauthorized {
+            throw RoostClientError.unauthorized
+        } catch {
+            throw publishFallbackError(oneShot: oneShot, fallback: error)
+        }
+    }
+
+    /// Stage a raw `tar.gz` body on the control plane (`POST /blobs?name=`),
+    /// returning the staged blob (its `id` feeds `publishFromBlob`). The legacy
+    /// leg of the publish fallback; uses the raw body, not a file upload.
+    public func stageBlob(name: String, data: Data) async throws -> Blob {
+        var request = makeRequest("POST", "/blobs", query: ["name": name])
+        request.httpBody = data
+        let (body, response) = try await self.data(for: request)
+        switch response.statusCode {
+        case 200..<300:
+            do {
+                return try JSONDecoder().decode(Blob.self, from: body)
+            } catch {
+                throw RoostClientError.decoding(String(describing: error))
+            }
+        case 401, 403:
+            throw RoostClientError.unauthorized
+        default:
+            throw RoostClientError.server(
+                status: response.statusCode, message: detail(from: body) ?? "")
+        }
+    }
+
+    /// Publish a previously-staged blob as a site (`POST /publish` JSON
+    /// `{name, blob_id}` — the original two-step flow). The legacy leg of the
+    /// publish fallback.
+    public func publishFromBlob(name: String, blobID: String) async throws -> Site {
+        var request = makeRequest("POST", "/publish")
+        request.httpBody = try JSONEncoder().encode(
+            PublishFromBlobBody(name: name, blob_id: blobID))
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let (body, response) = try await self.data(for: request)
+        switch response.statusCode {
+        case 200..<300:
+            return try decodeSite(body)
+        case 401, 403:
+            throw RoostClientError.unauthorized
+        default:
+            throw RoostClientError.server(
+                status: response.statusCode, message: detail(from: body) ?? "")
+        }
+    }
+
+    private func decodeSite(_ data: Data) throws -> Site {
+        do {
+            return try JSONDecoder().decode(Site.self, from: data)
+        } catch {
+            throw RoostClientError.decoding(String(describing: error))
+        }
+    }
+
+    /// Both legs failed: report the fallback's error WITH the one-shot's, leading
+    /// with the one-shot (R90's contract). The result is a `.server` error whose
+    /// status is the one-shot's, so callers keying off the original status (and
+    /// the user) see the genuine new-CP failure first.
+    private func publishFallbackError(
+        oneShot: RoostClientError, fallback: Error
+    ) -> RoostClientError {
+        let oneShotMsg = oneShot.errorDescription ?? "\(oneShot)"
+        let fallbackMsg = (fallback as? RoostClientError)?.errorDescription
+            ?? (fallback as? LocalizedError)?.errorDescription
+            ?? "\(fallback)"
+        let combined = "publish failed: \(oneShotMsg)\n"
+            + "  (also tried the two-step blob flow for older control planes; "
+            + "that failed too: \(fallbackMsg))"
+        if case .server(let status, _) = oneShot {
+            return .server(status: status, message: combined)
+        }
+        return .server(status: 0, message: combined)
+    }
+
+    /// Body for the two-step `publishFromBlob` call. Snake-cased to match the
+    /// server's JSON contract (`{name, blob_id}`).
+    private struct PublishFromBlobBody: Encodable {
+        let name: String
+        let blob_id: String
     }
 
     /// Sites published on this control plane (`GET /publish`).
