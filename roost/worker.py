@@ -1119,7 +1119,10 @@ def _build_codex_argv(spec: dict) -> list[str]:
         raise ValueError("codex job requires `intent`")
     if shutil.which("codex") is None:
         raise FileNotFoundError("`codex` CLI not on PATH")
-    argv = ["codex", "exec", intent]
+    # `codex exec` aborts when its cwd is not a git repo; a fresh worker's
+    # default cwd is a plain home dir, so pass --skip-git-repo-check (a flag to
+    # `exec`, placed before the prompt) to let codex jobs run on a clean node.
+    argv = ["codex", "exec", "--skip-git-repo-check", intent]
     if spec.get("args"):
         argv += list(spec["args"])
     return argv

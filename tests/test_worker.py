@@ -3092,22 +3092,45 @@ def test_build_codex_argv_missing_cli_raises(monkeypatch):
 
 
 def test_build_codex_argv_basic_shape(monkeypatch):
-    """Happy path: `codex exec <intent>` with no args (lines 1122, and 1123 false)."""
+    """Happy path: `codex exec --skip-git-repo-check <intent>` with no args.
+
+    [R103] --skip-git-repo-check is a flag to `exec` (before the prompt) so codex
+    jobs run on a fresh worker whose cwd is not a git repo.
+    """
     import roost.worker as wm
 
     monkeypatch.setattr(wm.shutil, "which", lambda n: "/usr/local/bin/codex")
     argv = _build_codex_argv({"kind": "codex", "intent": "fix the bug"})
-    assert argv == ["codex", "exec", "fix the bug"]
+    assert argv == ["codex", "exec", "--skip-git-repo-check", "fix the bug"]
 
 
 def test_build_codex_argv_appends_args(monkeypatch):
-    """`args` are appended verbatim after `codex exec <intent>` (lines 1123-1124)."""
+    """`args` are appended verbatim after `codex exec ... <intent>`."""
     import roost.worker as wm
 
     monkeypatch.setattr(wm.shutil, "which", lambda n: "/usr/local/bin/codex")
     argv = _build_codex_argv(
         {"kind": "codex", "intent": "fix it", "args": ["--model", "o3", "--full-auto"]})
-    assert argv == ["codex", "exec", "fix it", "--model", "o3", "--full-auto"]
+    assert argv == [
+        "codex", "exec", "--skip-git-repo-check", "fix it",
+        "--model", "o3", "--full-auto",
+    ]
+
+
+def test_build_codex_argv_includes_skip_git_repo_check(monkeypatch):
+    """[R103] codex exec aborts in a non-git cwd unless --skip-git-repo-check is
+    passed; a fresh worker's default cwd is a plain home dir. The flag must be a
+    flag to `exec` (before the prompt), not appended after the intent.
+
+    Repro promoted from the UAT-triage scratch repro (failed on master 8ab927b).
+    """
+    import roost.worker as wm
+
+    monkeypatch.setattr(wm.shutil, "which", lambda n: "/usr/local/bin/codex")
+    argv = _build_codex_argv({"kind": "codex", "intent": "fix the bug"})
+    assert "--skip-git-repo-check" in argv, argv
+    # It must precede the prompt so it's parsed as an exec flag, not the prompt.
+    assert argv.index("--skip-git-repo-check") < argv.index("fix the bug"), argv
 
 
 # ---------------------------------------------------------------------------
@@ -3303,7 +3326,7 @@ def test_build_command_routes_to_real_codex_builder(monkeypatch):
     monkeypatch.setattr(wm.shutil, "which", lambda n: "/usr/local/bin/codex")
     argv, _cwd, _tf = build_command(
         {"kind": "codex", "intent": "real codex"}, "jobRc", default_cwd="/rc")
-    assert argv == ["codex", "exec", "real codex"]
+    assert argv == ["codex", "exec", "--skip-git-repo-check", "real codex"]
 
 
 def test_build_command_routes_to_real_docker_builder():
