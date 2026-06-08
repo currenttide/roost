@@ -500,6 +500,10 @@ Surface: backend/UX. UAT C3, judge-confirmed (cosmetic; lowest-leverage of the t
 Repro: /tmp/uat-triage-repros.py::test_fleet_verdict_singular_node_grammar (FAIL on master).
 Done-when: singular renders "1 node"; test asserts both forms; check for the same `N nodes`/`N jobs` pattern elsewhere in _fleet_verdict and fix consistently; pytest green.
 
+### R106. worker.py R38 input-delivery seam + creds error-branch coverage — `open` `self-promoted`
+Surface: tests/ratchet. A2 rank-3 (queued from replenishment #2; worker.py 78% after R102/R96/R99). Untested: `_deliver_inputs` entire body (worker.py:2334-2379 — no-active-entry early return / HTTP≥400 / HTTPError+ValueError fetch-fail / per-input not-live→dropped / exited-or-closed-stdin→dropped / write-OK→delivered / BrokenPipe→dropped); `_ack_input` (2384-2390 incl. HTTPError swallow); real `_send_log` 413/429 log-drop branch (2398-2409); `_post_event` HTTPError path (2412-2417); `_claude_creds_path` CLAUDE_CONFIG_DIR-vs-default (1572-1577); `_refresh_claude_creds` ERROR branches only (1585-1586 HTTPError, 1591 empty-creds, 1609-1610 OSError-print — happy path already tested). Worker side of `send --wait`, distinct from R99's kill-paths.
+Done-when: real-behavior assertions via a fake `self.client` (stub async httpx) + a fake `proc` exposing `.stdin`/`.returncode` (async, no real subprocess); assert dropped-vs-delivered ack state + detail strings per branch, the 413/429 log-drop, CLAUDE_CONFIG_DIR override; worker.py branch coverage strictly up; judge mutation-probes; no module down; pytest green.
+
 ### R21. Make presigned blob PUT single-use and race-safe — `done` *(2026-06-07, PR #30)* `self-promoted`
 Surface: backend/security. A1 hunt #2 reproduced that a presigned `put_url`
 remains valid after the first upload finalizes the blob: replaying the same URL
