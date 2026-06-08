@@ -2666,9 +2666,11 @@ def test_run_server_error_raises_clickexception(monkeypatch):
 # ---------- `logs` (no-follow): dump + lookup error (cli.py:2018-2029) -------
 
 
-def test_logs_dump_renders_rows_and_state(monkeypatch):
+def test_logs_dump_distilled_default_passes_plain_text(monkeypatch):
     # `logs` uses `_resolve`+`_client` directly (not `_ctx_client`), so stub
     # those — otherwise it would hit a real control plane (the R16 lesson).
+    # R107: distilled is the DEFAULT — plain (non-stream-json) command output
+    # passes through verbatim, WITHOUT the raw `[seq stream]` prefix.
     rec = _patch_submit_client(monkeypatch, {
         "GET /jobs/job-1/logs": httpx.Response(200, json={
             "state": "succeeded",
@@ -2676,10 +2678,68 @@ def test_logs_dump_renders_rows_and_state(monkeypatch):
                      {"seq": 2, "stream": "stderr", "data": "warn"}]})})
     res = CliRunner().invoke(roost_cli.logs, ["job-1", "--since", "0"], obj={})
     assert res.exit_code == 0, res.output
+    assert "hello" in res.output
+    assert "warn" in res.output
+    assert "[   1 stdout]" not in res.output  # no raw prefix in distilled view
+    assert "-- state: succeeded --" in res.output
+    assert dict(rec.last("GET").url.params)["since"] == "0"
+
+
+def test_logs_dump_verbose_renders_raw_rows_and_state(monkeypatch):
+    # R107: --verbose/--raw reproduces today's EXACT raw firehose output.
+    rec = _patch_submit_client(monkeypatch, {
+        "GET /jobs/job-1/logs": httpx.Response(200, json={
+            "state": "succeeded",
+            "logs": [{"seq": 1, "stream": "stdout", "data": "hello"},
+                     {"seq": 2, "stream": "stderr", "data": "warn"}]})})
+    res = CliRunner().invoke(
+        roost_cli.logs, ["job-1", "--since", "0", "--verbose"], obj={})
+    assert res.exit_code == 0, res.output
     assert "[   1 stdout] hello" in res.output
     assert "[   2 stderr] warn" in res.output
     assert "-- state: succeeded --" in res.output
     assert dict(rec.last("GET").url.params)["since"] == "0"
+
+
+def test_logs_dump_distilled_renders_agent_stream_json(monkeypatch):
+    # R107: a `kind: claude` job's stream-json log lines are distilled into a
+    # readable transcript by default — assistant text + "→ Tool: summary";
+    # base64 signature blobs (thinking) and noise (rate_limit) are suppressed.
+    assistant_text = json.dumps(
+        {"type": "assistant",
+         "message": {"content": [{"type": "text", "text": "Working on it."}]}})
+    thinking = json.dumps(
+        {"type": "assistant",
+         "message": {"content": [
+             {"type": "thinking", "thinking": "", "signature": "Er0CCmMIDhgC"}]}})
+    tool_use = json.dumps(
+        {"type": "assistant",
+         "message": {"content": [
+             {"type": "tool_use", "name": "Bash",
+              "input": {"command": "ls -la", "description": "list"}}]}})
+    # roost-internal event-stream envelopes (started/progress) are pure noise in
+    # the distilled view — suppressed regardless of their JSON shape.
+    started = json.dumps({"type": "started", "attempt": 1, "exit_code": None})
+    _patch_submit_client(monkeypatch, {
+        "GET /jobs/job-1/logs": httpx.Response(200, json={
+            "state": "succeeded",
+            "logs": [
+                {"seq": 1, "stream": "event", "data": started},
+                {"seq": 2, "stream": "stdout", "data": assistant_text},
+                {"seq": 3, "stream": "stdout", "data": thinking},
+                {"seq": 4, "stream": "stdout", "data": tool_use}]})})
+    res = CliRunner().invoke(roost_cli.logs, ["job-1"], obj={})
+    assert res.exit_code == 0, res.output
+    assert "Working on it." in res.output
+    assert "→ Bash: ls -la" in res.output
+    assert "Er0CCmMIDhgC" not in res.output  # signature blob suppressed
+    assert "thinking" not in res.output
+    assert '"type": "started"' not in res.output  # event-stream envelope suppressed
+    # --verbose is LOSSLESS — the event-stream line reappears raw, with prefix.
+    res2 = CliRunner().invoke(roost_cli.logs, ["job-1", "--verbose"], obj={})
+    assert res2.exit_code == 0, res2.output
+    assert '[   1 event] {"type": "started"' in res2.output
+    assert "Er0CCmMIDhgC" in res2.output  # nothing suppressed in raw view
 
 
 def test_logs_lookup_error_404_says_job_not_found(monkeypatch):
@@ -2797,6 +2857,41 @@ def test_stream_log_and_state_events_are_echoed(monkeypatch):
     assert seen["path"] == "/jobs/job-1/stream"
     assert seen["params"]["since"] == "2"
     assert seen["auth"] == "Bearer tok"
+
+
+def test_stream_distilled_default_renders_agent_lines(monkeypatch, capsys):
+    # R107: distilled is the DEFAULT in `_stream` too — agent stream-json log
+    # lines become readable; roost-internal `event`-stream envelopes suppressed.
+    text = json.dumps({"type": "assistant",
+                       "message": {"content": [{"type": "text", "text": "hello world"}]}})
+    started = json.dumps({"type": "started", "attempt": 1})
+    body = _sse_body(
+        _sse_frame("log", json.dumps({"seq": 1, "stream": "event", "data": started})),
+        _sse_frame("log", json.dumps({"seq": 2, "stream": "stdout", "data": text})),
+        _sse_frame("done", '{"state": "succeeded", "exit_code": 0}'),
+    )
+    _patch_stream_client(monkeypatch, body)
+    rc = roost_cli._stream("http://cp", "tok", "j")
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "hello world" in out
+    assert '"type": "started"' not in out  # event envelope suppressed in distilled
+    assert "[   2 stdout]" not in out      # no raw prefix in distilled
+
+
+def test_stream_verbose_reproduces_raw_firehose(monkeypatch, capsys):
+    # R107: verbose=True reproduces today's EXACT raw output (lossless).
+    text = json.dumps({"type": "assistant",
+                       "message": {"content": [{"type": "text", "text": "hi"}]}})
+    body = _sse_body(
+        _sse_frame("log", json.dumps({"seq": 2, "stream": "stdout", "data": text})),
+        _sse_frame("done", '{"state": "succeeded", "exit_code": 0}'),
+    )
+    _patch_stream_client(monkeypatch, body)
+    rc = roost_cli._stream("http://cp", "tok", "j", verbose=True)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert f"[   2 stdout] {text}" in out  # raw line, with prefix, verbatim
 
 
 def test_stream_done_succeeded_maps_to_exit_zero(monkeypatch):

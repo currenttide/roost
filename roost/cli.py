@@ -1761,10 +1761,17 @@ def schedule(ctx: click.Context, goal: Optional[str], every: Optional[str],
 @click.argument("spec", type=click.Path(allow_dash=True))
 @click.option("--follow/--detach", default=True,
               help="Stream logs until job finishes (default) or return immediately.")
+@click.option("--verbose", "--raw", "-v", "verbose", is_flag=True,
+              help="Show the raw stream-json firehose instead of the distilled view.")
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON on submit.")
 @click.pass_context
-def submit(ctx: click.Context, spec: str, follow: bool, as_json: bool) -> None:
-    """Submit a job spec (YAML/JSON file or - for stdin)."""
+def submit(ctx: click.Context, spec: str, follow: bool, verbose: bool, as_json: bool) -> None:
+    """Submit a job spec (YAML/JSON file or - for stdin).
+
+    While following, the agent stream is DISTILLED by default (assistant text,
+    "→ Tool: summary", truncated results); pass --verbose/--raw for the raw
+    stream-json firehose.
+    """
     body = _load_spec(spec)
     url, token, _ = _resolve(ctx)
     with _client(url, token) as c:
@@ -1779,7 +1786,7 @@ def submit(ctx: click.Context, spec: str, follow: bool, as_json: bool) -> None:
     click.echo(f"submitted: {job['id']} (state={job['state']})")
     if not follow:
         return
-    rc = _stream(url, token, job["id"])
+    rc = _stream(url, token, job["id"], verbose=verbose)
     sys.exit(rc)
 
 
@@ -1793,10 +1800,12 @@ def submit(ctx: click.Context, spec: str, follow: bool, as_json: bool) -> None:
               help="Hard wall-clock cap.")
 @click.option("--verify/--no-verify", default=True, show_default=True,
               help="Independently verify the result was actually achieved (the trust loop).")
+@click.option("--verbose", "--raw", "-v", "verbose", is_flag=True,
+              help="Show the raw stream-json firehose instead of the distilled view.")
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON on submit.")
 @click.pass_context
 def run(ctx: click.Context, task: tuple, follow: bool, model: Optional[str],
-        wallclock_min: int, verify: bool, as_json: bool) -> None:
+        wallclock_min: int, verify: bool, verbose: bool, as_json: bool) -> None:
     """Run a plain-language TASK on whatever node fits best — no spec needed.
 
     The task is handed to a free worker whose own agent self-assesses fit and either
@@ -1823,7 +1832,7 @@ def run(ctx: click.Context, task: tuple, follow: bool, model: Optional[str],
     click.echo(f"running: {job['id']} (kind=auto) — a worker will self-select")
     if not follow:
         return
-    rc = _stream(url, token, job["id"])
+    rc = _stream(url, token, job["id"], verbose=verbose)
     # Trust loop: surface the verifier's verdict + evidence (the human reads this, not logs).
     try:
         with _client(url, token) as c:
@@ -2031,13 +2040,21 @@ def tree(ctx: click.Context, job_id: str, as_json: bool, health: bool) -> None:
 @click.argument("job_id")
 @click.option("--follow/--no-follow", default=False, help="Tail until job finishes.")
 @click.option("--since", default=0, type=int, help="Start from this seq (exclusive).")
+@click.option("--verbose", "--raw", "-v", "verbose", is_flag=True,
+              help="Show the raw stream-json firehose instead of the distilled view.")
 @click.pass_context
-def logs(ctx: click.Context, job_id: str, follow: bool, since: int) -> None:
+def logs(ctx: click.Context, job_id: str, follow: bool, since: int,
+         verbose: bool) -> None:
     """Dump (or follow) job logs. `job_id` may be an unambiguous id prefix
-    (≥6 chars; the 8-char ids `roost history` prints work as-is)."""
+    (≥6 chars; the 8-char ids `roost history` prints work as-is).
+
+    Agent-job output is DISTILLED by default into a readable transcript
+    (assistant text, "→ Tool: summary", truncated results; base64/signature
+    blobs suppressed). Pass --verbose/--raw for the raw stream-json firehose.
+    """
     url, token, _ = _resolve(ctx)
     if follow:
-        rc = _stream(url, token, job_id, since=since)
+        rc = _stream(url, token, job_id, since=since, verbose=verbose)
         sys.exit(rc)
     with _client(url, token) as c:
         r = c.get(f"/jobs/{job_id}/logs", params={"since": since})
@@ -2045,7 +2062,15 @@ def logs(ctx: click.Context, job_id: str, follow: bool, since: int) -> None:
             raise err
         payload = r.json()
         for log in payload.get("logs", []):
-            click.echo(f"[{log['seq']:>4} {log['stream']}] {log['data']}")
+            if verbose:
+                click.echo(f"[{log['seq']:>4} {log['stream']}] {log['data']}")
+            elif log.get("stream") == "event":
+                # roost-internal control/liveness envelopes — noise in distilled.
+                continue
+            else:
+                line = distill_log_line(log.get("data", ""))
+                if line is not None and line != "":
+                    click.echo(line)
         click.echo(f"-- state: {payload['state']} --")
 
 
@@ -2301,8 +2326,153 @@ def ping(ctx: click.Context) -> None:
     click.echo(r.json())
 
 
-def _stream(url: str, token: str, job_id: str, since: int = 0) -> int:
-    """Stream a job's SSE feed to stdout. Returns a process-style exit code."""
+# ---------- distilled live-stream view (R107) ----------
+#
+# THE CANONICAL CONTRACT for the distilled rendering of an agent job's live feed.
+# `distill_log_line` is a PURE function so it is unit-testable and pinned by the
+# golden fixtures under mobile-app/fixtures/distilled/ — iOS (R108) and Android
+# (R109) mirror these rules EXACTLY against the same fixtures. The transform spec
+# lives next to the fixtures (mobile-app/fixtures/distilled/SPEC.md).
+#
+# An agent job (`kind: claude`/`auto`) runs `claude -p --output-format
+# stream-json --verbose`; the worker relays each raw stdout line as a `log` SSE
+# event whose `data` field is one line of that stream-json (the Anthropic
+# streaming envelope). A plain `command` job's stdout is NOT stream-json — it is
+# ordinary text. The default view DISTILLS the stream-json into a readable
+# transcript; `--verbose`/`--raw` reproduces today's exact firehose.
+#
+# Distillation maps one raw `data` line → one distilled line or None (suppress):
+#   plain text / non-stream-json JSON  → passthrough verbatim (command output,
+#                                        roost `event` envelopes)
+#   system / init                      → "🔎 starting…"           (phase divider)
+#   system / other subtype             → None  (thinking_tokens etc. — noise)
+#   rate_limit_event                   → None
+#   assistant · text block             → the text (assistant speech, shown)
+#   assistant · thinking block         → None  (suppress reasoning + signature blob)
+#   assistant · tool_use block         → "→ <Tool>: <short summary>"
+#   user · tool_result block           → "  ⎿ <truncated result>" / error marker
+#   result                             → "✓ done" / "✗ failed"     (phase divider)
+# Base64 signatures, raw JSON envelopes, and huge tool_result bodies never reach
+# the user in the default view.
+
+# Tool-input keys, in priority order, used to summarise a tool_use call.
+_TOOL_HINT_KEYS = (
+    "command", "file_path", "path", "pattern", "query", "url", "description",
+    "prompt", "intent",
+)
+# Max characters for a one-line summary / truncated tool result.
+_DISTILL_HINT_MAX = 80
+_DISTILL_RESULT_MAX = 200
+
+
+def _first_line(text: str, limit: int) -> str:
+    """First non-empty line of `text`, collapsed to a single line, capped."""
+    flat = " ".join(str(text).split())
+    return flat[:limit] + ("…" if len(flat) > limit else "")
+
+
+def _distill_tool_use(item: dict) -> str:
+    name = item.get("name") or "tool"
+    inp = item.get("input")
+    hint = ""
+    if isinstance(inp, dict):
+        for k in _TOOL_HINT_KEYS:
+            v = inp.get(k)
+            if v:
+                hint = _first_line(v, _DISTILL_HINT_MAX)
+                break
+    return f"→ {name}: {hint}" if hint else f"→ {name}"
+
+
+def _distill_tool_result(item: dict) -> str:
+    content = item.get("content")
+    text = ""
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, list):
+        for blk in content:
+            if isinstance(blk, dict) and blk.get("type") == "text" and blk.get("text"):
+                text = blk["text"]
+                break
+            if isinstance(blk, str):
+                text = blk
+                break
+    summary = _first_line(text, _DISTILL_RESULT_MAX) if text else "(result)"
+    if item.get("is_error"):
+        return f"  ⎿ ✗ {summary}"
+    return f"  ⎿ {summary}"
+
+
+def distill_log_line(data: str) -> Optional[str]:
+    """Distil ONE raw `log` SSE `data` line into a readable line, or None to
+    suppress it. PURE — never raises on odd input. This is the reference
+    implementation of the cross-platform contract (mirrored by iOS/Android);
+    the golden fixtures under mobile-app/fixtures/distilled/ pin it.
+
+    Non-stream-json input (a `command` job's plain stdout, or a roost-internal
+    JSON `event` envelope) passes through verbatim so nothing is lost. Recognised
+    Anthropic stream-json envelopes are distilled per the rules above; base64
+    signatures, reasoning blobs, and oversized tool-result bodies are suppressed
+    or truncated.
+    """
+    if data is None:
+        return None
+    text = data.strip()
+    if not text or not text.startswith("{"):
+        return data  # plain command output — passthrough verbatim
+    try:
+        obj = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return data  # looked like JSON but isn't — passthrough verbatim
+    if not isinstance(obj, dict):
+        return data
+    mtype = obj.get("type")
+    # Anthropic stream-json envelopes carry a `message` (assistant/user) or are
+    # one of the known top-level control types. Anything else (e.g. roost's own
+    # `{"type": "started", ...}` event envelope) is not stream-json → passthrough.
+    if mtype == "system":
+        return "🔎 starting…" if obj.get("subtype") == "init" else None
+    if mtype == "rate_limit_event":
+        return None
+    if mtype == "result":
+        return "✗ failed" if obj.get("is_error") else "✓ done"
+    if mtype in ("assistant", "user"):
+        msg = obj.get("message") or {}
+        content = msg.get("content")
+        if isinstance(content, str):
+            flat = _first_line(content, _DISTILL_RESULT_MAX)
+            return flat or None
+        if isinstance(content, list):
+            out: list[str] = []
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                itype = item.get("type")
+                if itype == "text":
+                    flat = _first_line(item.get("text", ""), _DISTILL_RESULT_MAX)
+                    if flat:
+                        out.append(flat)
+                elif itype == "tool_use":
+                    out.append(_distill_tool_use(item))
+                elif itype == "tool_result":
+                    out.append(_distill_tool_result(item))
+                # thinking / redacted_thinking (signature blob) → suppressed.
+            return "\n".join(out) if out else None
+        return None
+    # Unknown JSON shape (roost event envelope, etc.) — passthrough verbatim so
+    # the raw view and any roost-internal markers are never silently dropped.
+    return data
+
+
+def _stream(url: str, token: str, job_id: str, since: int = 0,
+            verbose: bool = False) -> int:
+    """Stream a job's SSE feed to stdout. Returns a process-style exit code.
+
+    By default the per-line agent stream-json is DISTILLED into a readable
+    transcript (assistant text, "→ Tool: summary", truncated results; phase
+    dividers kept; base64/signature/raw envelopes suppressed). `verbose=True`
+    reproduces the exact raw firehose (every line, prefixed with seq+stream).
+    """
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     exit_code = 0
     with httpx.Client(base_url=url.rstrip("/"), headers=headers,
@@ -2313,7 +2483,18 @@ def _stream(url: str, token: str, job_id: str, since: int = 0) -> int:
                 raise click.ClickException(f"stream failed: HTTP {resp.status_code}: {resp.text}")
             for event, data in _iter_sse(resp):
                 if event == "log":
-                    click.echo(f"[{data.get('seq', '?'):>4} {data.get('stream', '?')}] {data.get('data', '')}")
+                    if verbose:
+                        click.echo(f"[{data.get('seq', '?'):>4} {data.get('stream', '?')}] {data.get('data', '')}")
+                    elif data.get("stream") == "event":
+                        # roost-internal control/liveness envelopes (started /
+                        # progress / argv / succeeded) — pure noise in the
+                        # distilled view; their content is surfaced by the
+                        # distilled stdout lines + the `-- done --` divider.
+                        continue
+                    else:
+                        line = distill_log_line(data.get("data", ""))
+                        if line is not None and line != "":
+                            click.echo(line)
                 elif event == "state":
                     click.echo(f"-- state: {data.get('state')} --")
                 elif event == "done":
