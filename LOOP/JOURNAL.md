@@ -2848,3 +2848,24 @@ Entries are written by the loop; humans read, never need to edit.
   render byte-identically by construction. User directive #1 (distilled default
   on every platform) fully delivered.
 - Models: orchestrator claude-opus-4-8[1m]; implementers opus; judges sonnet
+
+## 2026-06-08 — Replenishment: hunt fresh distilled code + drift sweep #111-121 → R111/R112
+- R111 (distill crash) — PR #123 (3f0899c): the A1 hunt over the just-shipped
+  distilled parser found `distill_log_line` crashes the now-DEFAULT view on an
+  assistant/user envelope whose `message` is a truthy non-dict (`or {}` only
+  rescues falsy) → AttributeError, reachable end-to-end (server stores str data
+  verbatim). Fix: `isinstance(msg, dict)` suppress, matching the mobile clients
+  (Python was the outlier — iOS/Android already suppress; cases.json missed the
+  case). Added the 17th golden fixture (non-dict message → null), VERIFIED on
+  both mobile harnesses (Android 21, iOS 119 — no mobile bug). Twin sweep: none.
+  5 repros fail-on-master → pass; pytest 1083→1090. Binding Sonnet judge
+  (hunt had self-judged on opus) approved r1.
+- R112 (mobile distilled docs) — PR #122 (ca0199f): A3 drift sweep #111-121 found
+  the mobile docs lagged the distilled rollout (CLI+iOS were disciplined). 3
+  additive doc fixes — Android README "Distilled session view" section (mirroring
+  iOS), DESIGN §3.2, API §4 (kept wire contract explicitly unchanged). Every
+  claim truth-checked file:line. docs-drift ratchet → 0. Judge sonnet r1.
+- Drift sweep verified the SPEC.md↔distill_log_line CONTRACT is accurate (the
+  high-impact cross-platform drift did NOT occur) + 7 hunt hypotheses cleared.
+- "hunt your own fresh code" pattern: 1-for-1 again (crash in <2h-old code).
+- Models: orchestrator claude-opus-4-8[1m]; implementers opus; judges sonnet
