@@ -464,6 +464,23 @@ Done-when: stubbed `os.killpg`/proc seams assert the fallback paths; sync wins f
 Surface: tests/ratchet. A2 rank 2 (worker.py 72%). Zero existing test references for worker.py:1068-1125: missing task/intent → ValueError; triage-prompt insertion at the CORRECT index incl. bwrap-wrapped argv (security-relevant — R30's bug class); sandbox/model defaulting; codex-missing → FileNotFoundError (monkeypatch shutil.which); args passthrough. Expected +2-3 branch points.
 Done-when: direct pure-function assertions on argv shape + raised errors; judge mutation-probes; no module down; pytest green.
 
+## Replenishment 2026-06-07 night #2 — A1 hunt #10 + A2 re-measure (loop restarted by human; repo unchanged → deepening)
+
+Hunt #10 repro file: `/workspace/yang/roost-oss/LOOP/repro-a1-hunt10.py` (+ /tmp backup; uncommitted). Coverage re-measured 82% roost-scoped (+2). NOTE: hunt #10's agent self-judged on opus (its sandbox lacked the Agent tool) — the binding cross-model Sonnet judge happens at implementation time (the implementer re-runs the repros under its mandatory judge). A2 rank 3 (worker R38 input-DELIVERY seam `_deliver_inputs`/`_ack_input` + creds error branches) queued Tier-A-judged for the next slot.
+
+### R100. Non-finite schedule interval (`inf`/`nan`) bypasses the floor guard → wedges `GET /schedules` — `open` `self-promoted`
+Surface: backend/robustness. A1 hunt #10, judge-confirmed (2 repros). `parse_every` (server.py:323-340) falls through to `float(every)` for unrecognized strings, so `"inf"`/`"nan"`/`"1e400"` (and a bare JSON `1e999` → `inf`) return a NON-FINITE float; the create guard `interval < SCHEDULE_MIN_INTERVAL_SEC` is bypassed (`inf < 30` and `nan < 30` are both False; `-inf` is correctly caught). Symptoms: (a) `inf` commits a poison row (`next_run_at=inf`) then FastAPI's JSON render raises "Out of range float values are not JSON compliant" → `GET /schedules` returns **500 forever** for every client (CLI/mobile/MCP) — one malformed request durably wedges the whole schedule-list surface; (b) `nan` → NULL violates NOT NULL → IntegrityError 500 at create.
+Repro: LOOP/repro-a1-hunt10.py — `test_finding_inf_interval_wedges_schedule_list`, `test_finding_nan_interval_500s_create`, FAIL on master (got 500, expect 400).
+Done-when: `POST /schedules` with non-finite `every` (`inf`/`nan`/`1e400`/bare `1e999`) returns a clean 400 with a clear message; NO row committed; `GET /schedules` stays 200 throughout; finiteness rejected at the door (e.g. `parse_every` returns None when `not math.isfinite(result)`, or a guard beside the floor check); both repros promoted into tests/; pytest green.
+
+### R101. cli.py inspect/control read commands + SSE stream coverage — `open` `self-promoted`
+Surface: tests/ratchet. A2 rank 1 (cli.py 67% — biggest weakest module). Untested non-process surfaces: `_iter_sse` (387-411), `_lookup_error` (269), `submit`/`run` --json/--detach bodies (1748-1763, 1790-1819), `logs` (2018-2029), `cancel` 409+tree-count (2038-2044), `jobs` state/root filters + intent truncation (2114-2126), `_stream` SSE event dispatch + exit-code arithmetic (succeeded / ec>0 / ec<=0 / None) (2284-2311). `send`/`exec`/`status`/`tree`/`history`/`pair`/`token` already tested — excluded. ~129 missing stmts; the core "what is my fleet doing" observability surface.
+Done-when: real-behavior assertions via CliRunner + httpx MockTransport (R16/R95 idiom, no processes/live-LLM); every error/dispatch/SSE-event branch asserted on observable output or exit code (the `_stream` exit-code mapping asserted exactly); cli.py branch coverage strictly up (judge re-measures + mutation-probes); no module down; pytest green.
+
+### R102. worker.py `build_command` kind-dispatch router coverage — `open` `self-promoted`
+Surface: tests/ratchet. A2 rank 2 (worker.py 76%). The router body of `build_command` (worker.py:508-517, 529-546) is never invoked directly — every test patches it out, while the argv-builders it calls were covered in R96/R99. Untested: `command` string vs list vs invalid-type→ValueError; `kind=claude/codex/unknown`→ValueError; cwd resolution (spec.cwd / default_cwd / os.getcwd()). Security-relevant: this is the seam that routes to the bwrap/argv builders.
+Done-when: pure-function assertions on the returned (argv, cwd, tempfiles) per kind branch + ValueError on invalid command-type and unknown kind; cwd precedence asserted; no subprocess; worker.py branch coverage strictly up; judge mutation-probes; no module down; pytest green.
+
 ### R21. Make presigned blob PUT single-use and race-safe — `done` *(2026-06-07, PR #30)* `self-promoted`
 Surface: backend/security. A1 hunt #2 reproduced that a presigned `put_url`
 remains valid after the first upload finalizes the blob: replaying the same URL
@@ -577,7 +594,7 @@ first iteration on that ratchet measures and records it here (no code changes).
 | Ratchet | Measure | Baseline | Direction |
 |---|---|---|---|
 | Test pass | `python -m pytest -q` | 347 passed (2026-06-05) | count may grow; failures never tolerated |
-| Branch coverage of `roost/` | `coverage run --branch -m pytest && coverage report` (dev-only dep, never shipped) | **80% TOTAL** (2026-06-07 night, 707→884 tests, A2 re-measure; judge re-measured; 7 modules at 100%) | up only |
+| Branch coverage of `roost/` | `coverage run --branch --source=roost -m pytest && coverage report` (dev-only dep, never shipped; `--source=roost` pins the metric to product code so it stops drifting by scope) | **82% TOTAL roost-scoped** (2026-06-07 night #2, 941 tests, A2 re-measure; judge re-measured; 7 modules at 100%). Footnote: the old unpinned command folded in `tests/` → ~90%; 82% is the honest product number and a genuine +2 over the prior roost-scoped 80%. | up only |
 | Docs drift | confirmed findings per full drift sweep | 0 (2026-06-07 — sweep found 1+2, R15 fixed all three, judge truth-checked) | stays 0 |
 | Runnable examples | every `examples/*.yaml` accepted by a scratch CP submit | **3/3** (2026-06-07, scratch CP :8789) | stays 100% |
 
