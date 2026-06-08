@@ -266,6 +266,26 @@ def _print_job(job: dict, verbose: bool = False) -> None:
         click.echo(json.dumps(job.get("spec", {}), indent=2, sort_keys=True))
 
 
+def _auth_error(verb: str) -> click.ClickException:
+    """Friendly 401/403 message for a verb that needs a valid token (R104).
+    Parity with `_admin_403`'s wording so a bad/missing token surfaces an
+    actionable hint instead of a raw httpx.HTTPStatusError traceback."""
+    return click.ClickException(
+        f"auth failed to {verb} — check your --token/ROOST_TOKEN")
+
+
+def _http_error(r, verb: str) -> Optional[click.ClickException]:
+    """Friendly error for a non-2xx on a verb that has no richer per-status
+    handling of its own (R104), or None if the response is fine (2xx). 401/403
+    become the actionable auth hint; any other non-2xx becomes a clean one-liner
+    carrying the status and body — never a raw `raise_for_status()` traceback."""
+    if r.status_code < 400:
+        return None
+    if r.status_code in (401, 403):
+        return _auth_error(verb)
+    return click.ClickException(f"{verb} failed: HTTP {r.status_code}: {r.text}")
+
+
 def _lookup_error(r) -> Optional[click.ClickException]:
     """Friendly error for a job-id lookup on a READ verb (status/logs/tree), or
     None if the response is fine (2xx). Surfaces the control plane's own actionable
@@ -2039,7 +2059,8 @@ def cancel(ctx: click.Context, job_id: str, as_tree: bool) -> None:
         r = c.delete(f"/jobs/{job_id}", params={"tree": as_tree})
         if r.status_code == 409:
             raise click.ClickException("job not cancellable (missing or already finished)")
-        r.raise_for_status()
+        if err := _http_error(r, "cancel"):
+            raise err
         count = r.json().get("cancelled", 1)
         click.echo(f"cancelled {count} job(s)" if as_tree else "cancelled")
 
@@ -2187,7 +2208,8 @@ def list_workers_cmd(ctx: click.Context) -> None:
     """List registered workers."""
     with _ctx_client(ctx) as c:
         r = c.get("/workers")
-        r.raise_for_status()
+        if err := _http_error(r, "list workers"):
+            raise err
         for w in r.json():
             caps = w.get("capabilities", {})
             summary_bits = []
@@ -2312,7 +2334,21 @@ def _stream(url: str, token: str, job_id: str, since: int = 0) -> int:
 
 
 def main() -> None:
-    cli(obj={})
+    # click handles ClickException/UsageError/Abort and SystemExit itself in its
+    # standalone mode (friendly stderr + the right exit code), so let those pass
+    # through untouched. Any OTHER unexpected error would otherwise dump a raw
+    # Python traceback at the user (R104); wrap it into a clean one-line
+    # "error: ..." on stderr and a nonzero exit. Set ROOST_DEBUG=1 to re-raise
+    # the original exception with its full traceback for debugging.
+    try:
+        cli(obj={})
+    except (click.ClickException, click.exceptions.Abort, SystemExit):
+        raise
+    except Exception as e:
+        if os.environ.get("ROOST_DEBUG"):
+            raise
+        click.echo(f"error: {e}", err=True)
+        raise SystemExit(1) from e
 
 
 if __name__ == "__main__":
