@@ -71,6 +71,21 @@ def test_parse_every_garbage():
     assert parse_every({"every": 5}) is None
 
 
+def test_parse_every_rejects_non_finite():
+    # R100: a non-finite interval (inf/-inf/nan) is not usable and must be
+    # rejected at the door — otherwise `inf < 30` / `nan < 30` are both False
+    # so it slips past the >= floor guard and poisons the schedules table.
+    # Covers both how it can arrive: string forms and a bare JSON number that
+    # overflows to inf (e.g. 1e999 → float('inf')).
+    assert parse_every("inf") is None
+    assert parse_every("-inf") is None
+    assert parse_every("nan") is None
+    assert parse_every("1e400") is None        # string overflow → inf
+    assert parse_every(float("inf")) is None   # bare JSON number 1e999
+    assert parse_every(float("-inf")) is None
+    assert parse_every(float("nan")) is None
+
+
 # ---------- CRUD surface ----------
 
 
@@ -96,6 +111,50 @@ def test_create_validates_interval(client: TestClient):
         "spec": {"command": "echo x"}, "every": "5s"})  # under the 30s floor
     assert r.status_code == 400
     assert ">=" in r.json()["detail"]
+
+
+def test_create_non_finite_interval_rejected_no_poison_row(client: TestClient):
+    # R100 (A1 hunt #10, F1): `every: "inf"` (or any value parsing to a
+    # non-finite float — "1e400", or a bare JSON number 1e999 that overflows
+    # to inf) used to bypass the floor guard (`inf < 30` is False), commit a
+    # poison row, then 500 on JSON render — wedging GET /schedules FOREVER for
+    # every client. It must now be a clean 400 with NO row committed, and the
+    # list endpoint must stay 200 throughout.
+    for ev in ("inf", "-inf", "1e400"):
+        r = client.post("/schedules", json={
+            "spec": {"command": "echo x"}, "every": ev})
+        assert r.status_code == 400, f"{ev!r} accepted: {r.status_code}: {r.text}"
+        assert client.get("/schedules").status_code == 200
+
+    # The bare JSON number path: 1e999 deserializes to float('inf') (not a
+    # string), so it must be caught on the int/float branch too.
+    r = client.post(
+        "/schedules",
+        content=b'{"spec": {"command": "echo x"}, "every": 1e999}',
+        headers={"content-type": "application/json"})
+    assert r.status_code == 400, f"1e999 accepted: {r.status_code}: {r.text}"
+
+    # No poison row leaked: the list is empty and stays 200, and a later GOOD
+    # schedule lists cleanly (proving the surface was never wedged).
+    assert client.get("/schedules").json() == []
+    good = client.post("/schedules", json={
+        "spec": {"command": "ok"}, "every": "30m"})
+    assert good.status_code == 200, good.text
+    lr = client.get("/schedules")
+    assert lr.status_code == 200
+    assert [s["id"] for s in lr.json()] == [good.json()["id"]]
+
+
+def test_create_nan_interval_rejected(client: TestClient):
+    # R100 (A1 hunt #10, F2): `every: "nan"` returned nan; `nan < 30` is False
+    # so the floor guard was bypassed; the INSERT then violated interval_sec
+    # NOT NULL (SQLite coerces nan → NULL) → IntegrityError → 500 at create.
+    # Now a clean 400, no row committed.
+    r = client.post("/schedules", json={
+        "spec": {"command": "echo x"}, "every": "nan"})
+    assert r.status_code == 400, f"nan accepted: {r.status_code}: {r.text}"
+    assert client.get("/schedules").status_code == 200
+    assert client.get("/schedules").json() == []
 
 
 def test_create_validates_spec(client: TestClient):

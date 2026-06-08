@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import os
 import re
 import secrets
@@ -323,21 +324,30 @@ _EVERY_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([smhd])\s*$")
 def parse_every(every: Any) -> Optional[float]:
     """'30m' / '6h' / '90s' / '1d' / bare seconds (number or string) → seconds.
 
-    Returns None when it can't be parsed (caller decides the error)."""
+    Returns None when it can't be parsed (caller decides the error). A
+    non-finite result (inf/-inf/nan — from "inf"/"nan"/"1e400" or a bare
+    JSON number like 1e999 that overflows to inf) is rejected here too: it
+    is not a usable interval and would otherwise slip past the >= floor
+    guard (`inf < 30` and `nan < 30` are both False) and poison the DB."""
     if isinstance(every, bool):
         return None
     if isinstance(every, (int, float)):
-        return float(every)
-    if isinstance(every, str):
+        result = float(every)
+    elif isinstance(every, str):
         m = _EVERY_RE.match(every.lower())
         if m:
             mult = {"s": 1, "m": 60, "h": 3600, "d": 86400}[m.group(2)]
-            return float(m.group(1)) * mult
-        try:
-            return float(every)
-        except ValueError:
-            return None
-    return None
+            result = float(m.group(1)) * mult
+        else:
+            try:
+                result = float(every)
+            except ValueError:
+                return None
+    else:
+        return None
+    if not math.isfinite(result):
+        return None
+    return result
 
 
 def _validate_job_spec(spec: dict[str, Any]) -> None:
