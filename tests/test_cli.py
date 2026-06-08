@@ -2270,3 +2270,465 @@ def test_revoke_worker_server_error_raises(monkeypatch):
     assert res.exit_code != 0
     assert isinstance(res.exception, httpx.HTTPStatusError)
     assert res.exception.response.status_code == 500
+
+
+# ======================================================================
+# R101 — inspect/control read commands + SSE stream coverage. The "what is
+# my fleet doing" observability surface that the rest of the suite skips:
+# `_iter_sse` (the SSE frame parser), `_lookup_error` (read-verb error map),
+# `submit`/`run` --json/--detach bodies, `logs`, `cancel`, `jobs` filters,
+# and the `_stream` event dispatch + exit-code arithmetic. Style: CliRunner
+# + httpx.MockTransport (R16/R54/R95 idiom). The SSE tests feed a *real*
+# streaming MockTransport body through the real `_iter_sse`/`_stream` bodies
+# (not a stub) and assert the parsed events and the exit-code mapping
+# EXACTLY. No process / live-LLM / config-file is ever touched.
+# ======================================================================
+
+
+# ---------- SSE frame helpers (a real streaming MockTransport body) ----------
+
+
+def _sse_body(*frames: str) -> bytes:
+    """Concatenate SSE frame strings into a single streaming response body."""
+    return "".join(frames).encode()
+
+
+def _sse_frame(event: str | None, data: str) -> str:
+    """One SSE message: optional `event:` line + one `data:` line + blank sep."""
+    head = f"event: {event}\n" if event is not None else ""
+    return f"{head}data: {data}\n\n"
+
+
+def _streaming_response(body: bytes, status: int = 200) -> httpx.Response:
+    """An httpx.Response backed by a real byte stream — `iter_lines()` walks it
+    the way `_iter_sse` expects of a live `text/event-stream` body."""
+    return httpx.Response(status, content=body,
+                          headers={"content-type": "text/event-stream"})
+
+
+def _patch_stream_client(monkeypatch, body: bytes, status: int = 200) -> dict:
+    """Make `_stream`'s internally-built `httpx.Client` route at a MockTransport
+    that returns the given streaming body. Records the URL/params/auth header the
+    real `_stream` sends so the wire shape is pinned, not just the output."""
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["params"] = dict(request.url.params)
+        seen["auth"] = request.headers.get("authorization")
+        return _streaming_response(body, status)
+
+    real_client = httpx.Client
+
+    def factory(*args, **kwargs):
+        # _stream passes base_url/headers/timeout; we inject the transport.
+        kwargs.pop("transport", None)
+        return real_client(*args, transport=httpx.MockTransport(handler), **kwargs)
+
+    monkeypatch.setattr(roost_cli.httpx, "Client", factory)
+    return seen
+
+
+# ---------- `_iter_sse`: the SSE frame parser (cli.py:387-411) ----------
+
+
+def test_iter_sse_parses_event_and_json_data():
+    body = _sse_body(
+        _sse_frame("log", '{"seq": 1, "stream": "stdout", "data": "hi"}'),
+        _sse_frame("done", '{"state": "succeeded", "exit_code": 0}'),
+    )
+    with httpx.Client(base_url="http://cp",
+                      transport=httpx.MockTransport(
+                          lambda r: _streaming_response(body))) as c:
+        with c.stream("GET", "/jobs/x/stream") as resp:
+            events = list(roost_cli._iter_sse(resp))
+    assert events == [
+        ("log", {"seq": 1, "stream": "stdout", "data": "hi"}),
+        ("done", {"state": "succeeded", "exit_code": 0}),
+    ]
+
+
+def test_iter_sse_defaults_event_to_message_and_skips_comments():
+    # No `event:` line → default "message"; a `:`-prefixed keepalive is ignored.
+    body = _sse_body(": keepalive\n\n", _sse_frame(None, '{"k": "v"}'))
+    with httpx.Client(base_url="http://cp",
+                      transport=httpx.MockTransport(
+                          lambda r: _streaming_response(body))) as c:
+        with c.stream("GET", "/jobs/x/stream") as resp:
+            events = list(roost_cli._iter_sse(resp))
+    # The keepalive emits nothing (no data lines); the message frame defaults.
+    assert events == [("message", {"k": "v"})]
+
+
+def test_iter_sse_multiline_data_is_joined_and_bad_json_is_raw():
+    # Two data: lines join with a newline; unparseable JSON falls back to {"raw"}.
+    body = _sse_body("event: note\ndata: line-1\ndata: line-2\n\n")
+    with httpx.Client(base_url="http://cp",
+                      transport=httpx.MockTransport(
+                          lambda r: _streaming_response(body))) as c:
+        with c.stream("GET", "/jobs/x/stream") as resp:
+            events = list(roost_cli._iter_sse(resp))
+    assert events == [("note", {"raw": "line-1\nline-2"})]
+
+
+# ---------- `_lookup_error`: read-verb error map (cli.py:269-287) ----------
+
+
+def test_lookup_error_none_for_2xx():
+    assert roost_cli._lookup_error(httpx.Response(200, json={"ok": True})) is None
+
+
+def test_lookup_error_404_is_job_not_found():
+    err = roost_cli._lookup_error(httpx.Response(404, json={"detail": "anything"}))
+    assert isinstance(err, click.ClickException)
+    assert err.message == "job not found"
+
+
+def test_lookup_error_surfaces_server_detail_string():
+    # R79 prefix-lookup outcomes (400 too-short / 409 ambiguous) carry a `detail`.
+    err = roost_cli._lookup_error(
+        httpx.Response(409, json={"detail": "ambiguous prefix: ab12, ab34"}))
+    assert isinstance(err, click.ClickException)
+    assert err.message == "ambiguous prefix: ab12, ab34"
+
+
+def test_lookup_error_falls_back_to_status_and_body_without_detail():
+    err = roost_cli._lookup_error(httpx.Response(400, text="raw body, no json"))
+    assert isinstance(err, click.ClickException)
+    assert "lookup failed: HTTP 400" in err.message
+    assert "raw body, no json" in err.message
+
+
+# ---------- `submit`: --json / --detach / error bodies (cli.py:1748-1763) ----
+
+
+def _patch_submit_client(monkeypatch, routes: dict) -> _Recorder:
+    """`submit`/`run` use `_resolve` + `_client` (not `_ctx_client`). Stub both
+    so no config/env is read and POST /jobs hits a MockTransport."""
+    rec = _Recorder()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        rec.requests.append(request)
+        key = f"{request.method} {request.url.path}"
+        assert key in routes, f"unexpected request: {key}"
+        spec = routes[key]
+        return spec(request) if callable(spec) else spec
+
+    monkeypatch.setattr(roost_cli, "_resolve",
+                        lambda ctx: ("http://cp", "tok", None))
+    monkeypatch.setattr(
+        roost_cli, "_client",
+        lambda url, token: httpx.Client(
+            base_url="http://cp", transport=httpx.MockTransport(handler)))
+    return rec
+
+
+def test_submit_json_emits_machine_readable_and_never_streams(monkeypatch, tmp_path):
+    spec = tmp_path / "job.json"
+    spec.write_text(json.dumps({"kind": "command", "command": "uptime"}))
+    rec = _patch_submit_client(monkeypatch, {
+        "POST /jobs": httpx.Response(200, json={"id": "job-7", "state": "queued"})})
+    # _stream must NOT be called on the --json path; blow up if it is.
+    monkeypatch.setattr(roost_cli, "_stream",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            AssertionError("must not stream on --json")))
+    res = CliRunner().invoke(roost_cli.submit, [str(spec), "--json"], obj={})
+    assert res.exit_code == 0, res.output
+    out = json.loads(res.output)
+    assert out == {"id": "job-7", "state": "queued"}
+    # The body posted to the CP is exactly the loaded spec.
+    assert json.loads(rec.last("POST").content) == {
+        "kind": "command", "command": "uptime"}
+
+
+def test_submit_detach_prints_id_and_does_not_stream(monkeypatch, tmp_path):
+    spec = tmp_path / "job.yaml"
+    spec.write_text("kind: command\ncommand: uptime\n")
+    _patch_submit_client(monkeypatch, {
+        "POST /jobs": httpx.Response(200, json={"id": "job-9", "state": "queued"})})
+    monkeypatch.setattr(roost_cli, "_stream",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            AssertionError("--detach must not stream")))
+    res = CliRunner().invoke(roost_cli.submit, [str(spec), "--detach"], obj={})
+    assert res.exit_code == 0, res.output
+    assert "submitted: job-9 (state=queued)" in res.output
+
+
+def test_submit_follow_exits_with_stream_code(monkeypatch, tmp_path):
+    spec = tmp_path / "job.yaml"
+    spec.write_text("kind: command\ncommand: false\n")
+    _patch_submit_client(monkeypatch, {
+        "POST /jobs": httpx.Response(200, json={"id": "job-2", "state": "queued"})})
+    calls = {}
+
+    def fake_stream(url, token, jid, **k):
+        calls["jid"] = jid
+        return 5
+    monkeypatch.setattr(roost_cli, "_stream", fake_stream)
+    res = CliRunner().invoke(roost_cli.submit, [str(spec)], obj={})
+    # Default --follow → streams then exits with the job's code (sys.exit(5)).
+    assert res.exit_code == 5
+    assert calls["jid"] == "job-2"
+    assert "submitted: job-2 (state=queued)" in res.output
+
+
+def test_submit_server_error_raises_clickexception(monkeypatch, tmp_path):
+    spec = tmp_path / "job.yaml"
+    spec.write_text("kind: command\ncommand: uptime\n")
+    _patch_submit_client(monkeypatch, {
+        "POST /jobs": httpx.Response(422, text="bad spec")})
+    res = CliRunner().invoke(roost_cli.submit, [str(spec)], obj={})
+    assert res.exit_code != 0
+    assert "submit failed: HTTP 422" in res.output
+    assert "bad spec" in res.output
+
+
+# ---------- `run`: --json / --detach / verifier summary (cli.py:1790-1819) ----
+
+
+def test_run_json_posts_auto_kind_and_skips_summary(monkeypatch):
+    rec = _patch_submit_client(monkeypatch, {
+        "POST /jobs": httpx.Response(200, json={"id": "r-1", "state": "queued"})})
+    monkeypatch.setattr(roost_cli, "_stream",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            AssertionError("--json must not stream")))
+    res = CliRunner().invoke(
+        roost_cli.run, ["report", "the", "gpu", "--json"], obj={})
+    assert res.exit_code == 0, res.output
+    assert json.loads(res.output) == {"id": "r-1", "state": "queued"}
+    body = json.loads(rec.last("POST").content)
+    assert body["kind"] == "auto"
+    assert body["task"] == "report the gpu"
+    assert body["verify"] is True  # default --verify
+
+
+def test_run_detach_with_model_and_no_verify(monkeypatch):
+    rec = _patch_submit_client(monkeypatch, {
+        "POST /jobs": httpx.Response(200, json={"id": "r-2", "state": "queued"})})
+    monkeypatch.setattr(roost_cli, "_stream",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            AssertionError("--detach must not stream")))
+    res = CliRunner().invoke(
+        roost_cli.run,
+        ["lint", "the", "repo", "--detach", "--no-verify",
+         "--model", "claude-x", "--wallclock-min", "3"], obj={})
+    assert res.exit_code == 0, res.output
+    assert "running: r-2 (kind=auto) — a worker will self-select" in res.output
+    body = json.loads(rec.last("POST").content)
+    assert body["verify"] is False
+    assert body["model"] == "claude-x"
+    assert body["budget"]["max_wallclock_min"] == 3
+
+
+def test_run_follow_streams_then_prints_verifier_verdict(monkeypatch):
+    final = {"id": "r-3", "state": "succeeded",
+             "result": {"verified": True, "evidence": "GPU is an A100",
+                        "output": "free 80GB"}}
+    _patch_submit_client(monkeypatch, {
+        "POST /jobs": httpx.Response(200, json={"id": "r-3", "state": "queued"}),
+        "GET /jobs/r-3": httpx.Response(200, json=final)})
+    monkeypatch.setattr(roost_cli, "_stream", lambda url, token, jid, **k: 0)
+    res = CliRunner().invoke(roost_cli.run, ["check", "the", "gpu"], obj={})
+    # Default --follow: streams (rc 0), then surfaces the verifier's verdict.
+    assert res.exit_code == 0
+    assert "✓ verified — GPU is an A100" in res.output
+    assert "result: free 80GB" in res.output
+
+
+def test_run_server_error_raises_clickexception(monkeypatch):
+    _patch_submit_client(monkeypatch, {
+        "POST /jobs": httpx.Response(503, text="no workers")})
+    res = CliRunner().invoke(roost_cli.run, ["do", "it"], obj={})
+    assert res.exit_code != 0
+    assert "run failed: HTTP 503" in res.output
+    assert "no workers" in res.output
+
+
+# ---------- `logs` (no-follow): dump + lookup error (cli.py:2018-2029) -------
+
+
+def test_logs_dump_renders_rows_and_state(monkeypatch):
+    # `logs` uses `_resolve`+`_client` directly (not `_ctx_client`), so stub
+    # those — otherwise it would hit a real control plane (the R16 lesson).
+    rec = _patch_submit_client(monkeypatch, {
+        "GET /jobs/job-1/logs": httpx.Response(200, json={
+            "state": "succeeded",
+            "logs": [{"seq": 1, "stream": "stdout", "data": "hello"},
+                     {"seq": 2, "stream": "stderr", "data": "warn"}]})})
+    res = CliRunner().invoke(roost_cli.logs, ["job-1", "--since", "0"], obj={})
+    assert res.exit_code == 0, res.output
+    assert "[   1 stdout] hello" in res.output
+    assert "[   2 stderr] warn" in res.output
+    assert "-- state: succeeded --" in res.output
+    assert dict(rec.last("GET").url.params)["since"] == "0"
+
+
+def test_logs_lookup_error_404_says_job_not_found(monkeypatch):
+    _patch_submit_client(monkeypatch, {
+        "GET /jobs/ghost/logs": httpx.Response(404, json={"detail": "x"})})
+    res = CliRunner().invoke(roost_cli.logs, ["ghost"], obj={})
+    assert res.exit_code != 0
+    assert "job not found" in res.output
+
+
+def test_logs_follow_delegates_to_stream_exit_code(monkeypatch):
+    monkeypatch.setattr(roost_cli, "_resolve",
+                        lambda ctx: ("http://cp", "tok", None))
+    seen = {}
+
+    def fake_stream(url, token, jid, **k):
+        seen.update(jid=jid, since=k.get("since"))
+        return 4
+    monkeypatch.setattr(roost_cli, "_stream", fake_stream)
+    res = CliRunner().invoke(
+        roost_cli.logs, ["job-5", "--follow", "--since", "9"], obj={})
+    assert res.exit_code == 4
+    assert seen == {"jid": "job-5", "since": 9}
+
+
+# ---------- `cancel`: 409 + single/tree count (cli.py:2038-2044) ------------
+
+
+def test_cancel_single_success(monkeypatch):
+    rec = _mock_ctx(monkeypatch, {
+        "DELETE /jobs/job-1": httpx.Response(200, json={"cancelled": 1})})
+    res = CliRunner().invoke(roost_cli.cancel, ["job-1"], obj={})
+    assert res.exit_code == 0, res.output
+    assert res.output.strip() == "cancelled"
+    assert dict(rec.last("DELETE").url.params)["tree"] == "false"
+
+
+def test_cancel_tree_reports_count(monkeypatch):
+    rec = _mock_ctx(monkeypatch, {
+        "DELETE /jobs/root1": httpx.Response(200, json={"cancelled": 3})})
+    res = CliRunner().invoke(roost_cli.cancel, ["root1", "--tree"], obj={})
+    assert res.exit_code == 0, res.output
+    assert "cancelled 3 job(s)" in res.output
+    assert dict(rec.last("DELETE").url.params)["tree"] == "true"
+
+
+def test_cancel_409_not_cancellable(monkeypatch):
+    _mock_ctx(monkeypatch, {
+        "DELETE /jobs/done1": httpx.Response(409, json={})})
+    res = CliRunner().invoke(roost_cli.cancel, ["done1"], obj={})
+    assert res.exit_code != 0
+    assert "job not cancellable (missing or already finished)" in res.output
+
+
+# ---------- `jobs`: state/root filters + intent truncation (2114-2126) ------
+
+
+def test_jobs_lists_rows_and_truncates_long_intent(monkeypatch):
+    long_intent = "x" * 80  # > 60 → truncated to 57 + "..."
+    rec = _mock_ctx(monkeypatch, {
+        "GET /jobs": httpx.Response(200, json=[
+            {"id": "job-a", "state": "running", "worker_id": "w1",
+             "intent": long_intent},
+            {"id": "job-b", "state": "queued", "worker_id": None,
+             "intent": "short\nwith-newline"}])})
+    res = CliRunner().invoke(roost_cli.list_jobs_cmd, [], obj={})
+    assert res.exit_code == 0, res.output
+    assert ("x" * 57 + "...") in res.output
+    assert ("x" * 80) not in res.output  # the full intent never appears
+    # newline in a short intent is flattened to a space; no worker → "-".
+    assert "short with-newline" in res.output
+    # worker_id None renders as "-" in the worker column of the job-b row.
+    line_b = next(ln for ln in res.output.splitlines() if ln.startswith("job-b"))
+    assert "queued" in line_b
+    assert "-" in line_b.split("queued", 1)[1]  # the worker col, post-state
+
+
+def test_jobs_state_and_root_filters_passthrough(monkeypatch):
+    rec = _mock_ctx(monkeypatch, {
+        "GET /jobs": httpx.Response(200, json=[])})
+    res = CliRunner().invoke(
+        roost_cli.list_jobs_cmd,
+        ["--state", "running", "--root", "root-7", "--limit", "5"], obj={})
+    assert res.exit_code == 0, res.output
+    params = dict(rec.last("GET").url.params)
+    assert params["state"] == "running"
+    assert params["root"] == "root-7"
+    assert params["limit"] == "5"
+
+
+def test_jobs_no_filters_sends_only_limit(monkeypatch):
+    rec = _mock_ctx(monkeypatch, {
+        "GET /jobs": httpx.Response(200, json=[])})
+    res = CliRunner().invoke(roost_cli.list_jobs_cmd, [], obj={})
+    assert res.exit_code == 0, res.output
+    params = dict(rec.last("GET").url.params)
+    assert "state" not in params and "root" not in params
+    assert params["limit"] == "20"  # default
+
+
+# ---------- `_stream`: event dispatch + exit-code arithmetic (2284-2311) ----
+# The exit-code mapping is asserted EXACTLY across all four `done` branches.
+
+
+def test_stream_log_and_state_events_are_echoed(monkeypatch):
+    body = _sse_body(
+        _sse_frame("log", '{"seq": 3, "stream": "stdout", "data": "tick"}'),
+        _sse_frame("state", '{"state": "running"}'),
+        _sse_frame("done", '{"state": "succeeded", "exit_code": 0}'),
+    )
+    seen = _patch_stream_client(monkeypatch, body)
+    rc = roost_cli._stream("http://cp/", "tok", "job-1", since=2)
+    assert rc == 0
+    # The wire shape: auth header + since param + the stream path.
+    assert seen["path"] == "/jobs/job-1/stream"
+    assert seen["params"]["since"] == "2"
+    assert seen["auth"] == "Bearer tok"
+
+
+def test_stream_done_succeeded_maps_to_exit_zero(monkeypatch):
+    body = _sse_body(_sse_frame("done", '{"state": "succeeded", "exit_code": 0}'))
+    _patch_stream_client(monkeypatch, body)
+    assert roost_cli._stream("http://cp", "tok", "j") == 0
+
+
+def test_stream_done_positive_exit_code_passthrough(monkeypatch):
+    # ec > 0 → returned verbatim (NOT clamped). Distinct from succeeded→0.
+    body = _sse_body(_sse_frame("done", '{"state": "failed", "exit_code": 7}'))
+    _patch_stream_client(monkeypatch, body)
+    assert roost_cli._stream("http://cp", "tok", "j") == 7
+
+
+def test_stream_done_nonpositive_exit_code_maps_to_one(monkeypatch):
+    # ec <= 0 but not succeeded (e.g. signal -9) → normalized to 1.
+    body = _sse_body(_sse_frame("done", '{"state": "failed", "exit_code": -9}'))
+    _patch_stream_client(monkeypatch, body)
+    assert roost_cli._stream("http://cp", "tok", "j") == 1
+
+
+def test_stream_done_null_exit_code_maps_to_one(monkeypatch):
+    # No exit_code on a non-succeeded done → 1 (the else branch).
+    body = _sse_body(_sse_frame("done", '{"state": "failed", "exit_code": null}'))
+    _patch_stream_client(monkeypatch, body)
+    assert roost_cli._stream("http://cp", "tok", "j") == 1
+
+
+def test_stream_done_error_line_is_echoed(monkeypatch, capsys):
+    body = _sse_body(
+        _sse_frame("done", '{"state": "failed", "exit_code": 2, "error": "boom"}'))
+    _patch_stream_client(monkeypatch, body)
+    rc = roost_cli._stream("http://cp", "tok", "j")
+    assert rc == 2
+    out = capsys.readouterr().out
+    assert "-- done: failed (exit_code=2) --" in out
+    assert "-- error: boom --" in out
+
+
+def test_stream_error_event_raises_clickexception(monkeypatch):
+    body = _sse_body(_sse_frame("error", '{"error": "worker vanished"}'))
+    _patch_stream_client(monkeypatch, body)
+    with pytest.raises(click.ClickException) as ei:
+        roost_cli._stream("http://cp", "tok", "j")
+    assert ei.value.message == "worker vanished"
+
+
+def test_stream_http_error_status_raises_before_iterating(monkeypatch):
+    _patch_stream_client(monkeypatch, b"job not found", status=404)
+    with pytest.raises(click.ClickException) as ei:
+        roost_cli._stream("http://cp", "tok", "ghost")
+    assert "stream failed: HTTP 404" in ei.value.message
+    assert "job not found" in ei.value.message
