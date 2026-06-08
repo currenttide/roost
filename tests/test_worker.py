@@ -3372,3 +3372,571 @@ def test_build_command_empty_spec_cwd_falls_back_to_default():
     _argv, cwd, _tf = build_command(
         {"command": "x", "cwd": ""}, "jobC4", default_cwd="/default/dir")
     assert cwd == "/default/dir"
+
+
+# ============================================================================
+# [R106] input-delivery seam ([R38] _deliver_inputs / _ack_input / _send_log
+#   413|429 log-drop / _post_event HTTPError) + creds error branches
+#   (_claude_creds_path CLAUDE_CONFIG_DIR override; _refresh_claude_creds error
+#   arms only — the happy path is already covered by the r43 tests above).
+#
+# Method: stub `self.client` with a fake async httpx (records every GET/POST,
+# serves a scripted response or raises httpx.HTTPError) and a fake `proc`
+# exposing `.stdin`/`.returncode` — no real subprocess, no network. Every test
+# asserts REAL behavior: which inputs ended `delivered` vs `dropped` and with
+# which exact detail string, the 413/429 log-drop line, the CLAUDE_CONFIG_DIR
+# override path. Each docstring names the mutation the assertions would catch.
+# ============================================================================
+
+import httpx as _r106_httpx  # noqa: E402
+
+from roost.worker import INPUT_DELIVERY_UNSUPPORTED  # noqa: E402
+
+
+class _R106Resp:
+    """Minimal stand-in for an httpx.Response: a status_code and a JSON body.
+
+    `json_body` may be a dict (returned by .json()), or the sentinel _RAISE to
+    make .json() raise (exercising the non-JSON error-body fallback in
+    _send_log). `.text` is always available."""
+
+    _RAISE = object()
+
+    def __init__(self, status_code=200, json_body=None, text=""):
+        self.status_code = status_code
+        self._json_body = json_body
+        self.text = text
+
+    def json(self):
+        if self._json_body is _R106Resp._RAISE:
+            raise ValueError("not JSON")
+        return self._json_body
+
+
+class _R106FakeClient:
+    """A fake `self.client`. Records every (method, url, json) call. For GETs it
+    pops the next scripted item off `get_script`; for POSTs off `post_script`.
+    A scripted item is either an _R106Resp (returned) or an Exception instance
+    (raised). When a script is empty, returns a bland 200 so a test only has to
+    script the calls it cares about."""
+
+    def __init__(self, get_script=None, post_script=None):
+        self.get_calls: list[tuple[str, dict]] = []
+        self.post_calls: list[tuple[str, dict]] = []
+        self._get_script = list(get_script or [])
+        self._post_script = list(post_script or [])
+
+    async def get(self, url, params=None, timeout=None):
+        self.get_calls.append((url, params or {}))
+        if self._get_script:
+            item = self._get_script.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
+        return _R106Resp(200, {})
+
+    async def post(self, url, json=None, timeout=None):
+        self.post_calls.append((url, json or {}))
+        if self._post_script:
+            item = self._post_script.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
+        return _R106Resp(200, {})
+
+    async def aclose(self):
+        # so Worker.close() (which awaits self.client.aclose()) works.
+        pass
+
+
+class _R106FakeStdin:
+    """A fake StreamWriter for a process's stdin. Records writes; `is_closing()`
+    and a failing write are configurable so we can drive the closed-stdin and
+    BrokenPipe arms of _deliver_inputs."""
+
+    def __init__(self, *, closing=False, write_raises=None):
+        self.buf = b""
+        self._closing = closing
+        self._write_raises = write_raises
+        self.drained = 0
+
+    def is_closing(self):
+        return self._closing
+
+    def write(self, data):
+        if self._write_raises is not None:
+            raise self._write_raises
+        self.buf += data
+
+    async def drain(self):
+        self.drained += 1
+
+
+class _R106FakeProc:
+    """A fake child process exposing only what _deliver_inputs touches:
+    `.stdin` (a writer or None) and `.returncode` (None = alive)."""
+
+    def __init__(self, *, stdin=None, returncode=None):
+        self.stdin = stdin
+        self.returncode = returncode
+
+
+def _r106_worker(fake_client):
+    w = Worker("http://127.0.0.1:9", "tok", "w1", self_test=False)
+    w.client = fake_client  # type: ignore[assignment]
+    return w
+
+
+def _r106_active_entry(*, stdin=None, returncode=None, live_stdin=True,
+                       cancelled=None):
+    proc = _R106FakeProc(stdin=stdin, returncode=returncode)
+    return {"process": proc, "is_docker": False, "cancelled": cancelled,
+            "since": 0.0, "live_stdin": live_stdin}
+
+
+# ---------- _deliver_inputs: structural early returns ----------
+
+
+def test_r106_deliver_inputs_no_active_entry_is_noop():
+    """No _active entry for the job → early return before any HTTP call.
+    Mutation guard: dropping the `if not entry: return` would issue a GET."""
+    async def go():
+        client = _R106FakeClient()
+        w = _r106_worker(client)
+        # _active is empty → job is unknown.
+        await w._deliver_inputs("ghost")
+        assert client.get_calls == []   # no inputs fetch happened
+        assert client.post_calls == []  # nothing acked
+        await w.close()
+
+    asyncio.run(go())
+
+
+def test_r106_deliver_inputs_http_ge_400_returns_without_acking():
+    """A >=400 from the inputs GET → return, no inputs processed, no acks.
+    Mutation guard: weakening `>= 400` to `> 400` (or dropping the guard) would
+    try to read .json() of an error body and ack."""
+    async def go():
+        client = _R106FakeClient(get_script=[_R106Resp(503, {"inputs": [
+            {"id": "i1", "text": "x"}]})])
+        w = _r106_worker(client)
+        w._active["jE"] = _r106_active_entry(stdin=_R106FakeStdin())
+        await w._deliver_inputs("jE")
+        assert len(client.get_calls) == 1            # the fetch was attempted
+        assert client.post_calls == []               # but nothing was acked
+        await w.close()
+
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("exc", [
+    _r106_httpx.ConnectError("down"),  # an httpx.HTTPError subclass
+    ValueError("bad json"),            # .json() decode failure
+])
+def test_r106_deliver_inputs_fetch_failure_is_swallowed(exc, capsys):
+    """httpx.HTTPError or ValueError while fetching inputs → swallowed, logged,
+    no acks. Mutation guard: removing the except arm would let the error escape
+    _deliver_inputs (it is called from the heartbeat loop and must not crash)."""
+    async def go():
+        client = _R106FakeClient(get_script=[exc])
+        w = _r106_worker(client)
+        w._active["jF"] = _r106_active_entry(stdin=_R106FakeStdin())
+        await w._deliver_inputs("jF")   # must not raise
+        assert client.post_calls == []  # nothing acked on a fetch failure
+        await w.close()
+
+    asyncio.run(go())
+    out = capsys.readouterr().out
+    assert "input fetch failed for jF" in out
+
+
+# ---------- _deliver_inputs: per-input outcomes ----------
+
+
+def test_r106_deliver_inputs_skips_input_without_id():
+    """An input item with no id is skipped (continue) — not acked, not delivered.
+    Mutation guard: dropping `if not input_id: continue` would NoneType-key the
+    ack. We pair it with a valid input to prove the loop continues past the skip."""
+    async def go():
+        stdin = _R106FakeStdin()
+        client = _R106FakeClient(get_script=[_R106Resp(200, {"inputs": [
+            {"id": None, "text": "ignored"},
+            {"id": "ok", "text": "real"},
+        ]})])
+        w = _r106_worker(client)
+        w._active["jS"] = _r106_active_entry(stdin=stdin)
+        await w._deliver_inputs("jS")
+        # Exactly one ack: for the valid input only.
+        acks = [c for c in client.post_calls if c[0].endswith("/input-ack")]
+        assert len(acks) == 1
+        assert acks[0][1]["input_id"] == "ok"
+        assert acks[0][1]["state"] == "delivered"
+        await w.close()
+
+    asyncio.run(go())
+
+
+def test_r106_deliver_inputs_not_live_is_dropped_unsupported():
+    """When the job can't take live input (live_stdin False), the input is acked
+    `dropped` with the INPUT_DELIVERY_UNSUPPORTED detail — never silently lost,
+    and nothing is written to stdin. Mutation guard: flipping this ack to
+    `delivered`, or swapping the detail to the exited-message, fails here."""
+    async def go():
+        stdin = _R106FakeStdin()
+        client = _R106FakeClient(get_script=[_R106Resp(200, {"inputs": [
+            {"id": "iN", "text": "hello"}]})])
+        w = _r106_worker(client)
+        w._active["jN"] = _r106_active_entry(stdin=stdin, live_stdin=False)
+        await w._deliver_inputs("jN")
+        acks = [c for c in client.post_calls if c[0].endswith("/input-ack")]
+        assert len(acks) == 1
+        body = acks[0][1]
+        assert body == {"input_id": "iN", "state": "dropped",
+                        "detail": INPUT_DELIVERY_UNSUPPORTED}
+        assert stdin.buf == b""  # nothing written to a non-live stream
+        await w.close()
+
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("entry_kw", [
+    {"returncode": 0},                              # process already exited
+    {"stdin": None},                               # no stdin pipe at all
+    {"stdin": _R106FakeStdin(closing=True)},       # stdin.is_closing()
+    {"live_stdin": True, "cancelled": "lease_lost"},  # cancelled overrides live
+])
+def test_r106_deliver_inputs_dead_or_closed_is_dropped(entry_kw):
+    """A LIVE-kind job whose process exited / has no pipe / has a closing pipe /
+    is cancelled → acked `dropped` with the 'no longer accepting input' detail
+    (NOT the unsupported-kind message). Mutation guard: dropping any of the
+    `proc_alive` / `stdin is None` / `is_closing()` / `cancelled` checks would
+    flip this to a delivery attempt."""
+    async def go():
+        # default live_stdin True unless the param overrides it; ensure a writer
+        # exists for the exited / cancelled cases so the *liveness* check (not the
+        # missing-pipe check) is what trips.
+        kw = dict(entry_kw)
+        if "stdin" not in kw:
+            kw["stdin"] = _R106FakeStdin()
+        client = _R106FakeClient(get_script=[_R106Resp(200, {"inputs": [
+            {"id": "iD", "text": "hi"}]})])
+        w = _r106_worker(client)
+        w._active["jD"] = _r106_active_entry(**kw)
+        await w._deliver_inputs("jD")
+        acks = [c for c in client.post_calls if c[0].endswith("/input-ack")]
+        assert len(acks) == 1
+        body = acks[0][1]
+        assert body["input_id"] == "iD"
+        assert body["state"] == "dropped"
+        # For a cancelled job, `not live` is True → unsupported message; for the
+        # other three the stream is dead-but-live-kind → exited/closed message.
+        if entry_kw.get("cancelled"):
+            assert body["detail"] == INPUT_DELIVERY_UNSUPPORTED
+        else:
+            assert body["detail"] == (
+                "process is no longer accepting input (exited/closed)")
+        await w.close()
+
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("run this", b"run this\n"),     # newline appended
+    ("already\n", b"already\n"),     # already terminated → not doubled
+])
+def test_r106_deliver_inputs_writes_and_acks_delivered(text, expected, capsys):
+    """The happy path: a live stdin gets the (newline-terminated) payload, is
+    drained, an event log is emitted, and the input is acked `delivered` with the
+    'written to process stdin' detail. Mutation guard: flipping this ack to
+    `dropped`, or skipping the newline-append, fails here."""
+    async def go():
+        stdin = _R106FakeStdin()
+        client = _R106FakeClient(get_script=[_R106Resp(200, {"inputs": [
+            {"id": "iW", "text": text}]})])
+        w = _r106_worker(client)
+        w._active["jW"] = _r106_active_entry(stdin=stdin)
+        await w._deliver_inputs("jW")
+        assert stdin.buf == expected          # exact bytes written
+        assert stdin.drained == 1             # flushed so it isn't stuck in buffer
+        posts = client.post_calls
+        # An event log line AND the delivered ack were both POSTed.
+        log_posts = [c for c in posts if c[0].endswith("/logs")]
+        ack_posts = [c for c in posts if c[0].endswith("/input-ack")]
+        assert len(log_posts) == 1
+        assert log_posts[0][1]["stream"] == "event"
+        assert "delivered input to process stdin" in log_posts[0][1]["data"]
+        assert len(ack_posts) == 1
+        assert ack_posts[0][1] == {"input_id": "iW", "state": "delivered",
+                                   "detail": "written to process stdin"}
+        await w.close()
+
+    asyncio.run(go())
+    assert "input delivered to stdin" in capsys.readouterr().out
+
+
+def test_r106_deliver_inputs_broken_pipe_is_dropped():
+    """A BrokenPipeError on stdin.write → acked `dropped` with a 'stdin write
+    failed' detail that names the error; no `delivered` ack is sent. Mutation
+    guard: removing the write-failure except arm lets the OSError escape the
+    heartbeat loop; flipping the ack to `delivered` lies about a lost input."""
+    async def go():
+        stdin = _R106FakeStdin(write_raises=BrokenPipeError("epipe"))
+        client = _R106FakeClient(get_script=[_R106Resp(200, {"inputs": [
+            {"id": "iB", "text": "boom"}]})])
+        w = _r106_worker(client)
+        w._active["jB"] = _r106_active_entry(stdin=stdin)
+        await w._deliver_inputs("jB")
+        ack_posts = [c for c in client.post_calls if c[0].endswith("/input-ack")]
+        assert len(ack_posts) == 1
+        body = ack_posts[0][1]
+        assert body["input_id"] == "iB"
+        assert body["state"] == "dropped"
+        assert body["detail"].startswith("stdin write failed:")
+        assert "epipe" in body["detail"]
+        # No event log claiming delivery on a failed write.
+        log_posts = [c for c in client.post_calls if c[0].endswith("/logs")]
+        assert log_posts == []
+        await w.close()
+
+    asyncio.run(go())
+
+
+def test_r106_deliver_inputs_acks_to_correct_endpoint():
+    """The ack POST targets /workers/<wid>/jobs/<jid>/input-ack — proves the URL
+    is built from worker_id and job_id (mutation: a wrong path would 404 the ack
+    server-side, silently losing the outcome)."""
+    async def go():
+        stdin = _R106FakeStdin()
+        client = _R106FakeClient(get_script=[_R106Resp(200, {"inputs": [
+            {"id": "iU", "text": "x"}]})])
+        w = _r106_worker(client)
+        w._active["jU"] = _r106_active_entry(stdin=stdin)
+        await w._deliver_inputs("jU")
+        # The inputs fetch used the same worker/job path.
+        assert client.get_calls[0][0] == "/workers/w1/jobs/jU/inputs"
+        ack = [c for c in client.post_calls if c[0].endswith("/input-ack")][0]
+        assert ack[0] == "/workers/w1/jobs/jU/input-ack"
+        await w.close()
+
+    asyncio.run(go())
+
+
+# ---------- _ack_input: HTTPError swallow ----------
+
+
+def test_r106_ack_input_swallows_httperror(capsys):
+    """A network failure POSTing the ack is swallowed (best-effort) and logged;
+    it never propagates. Mutation guard: removing the except arm would crash the
+    delivery loop on a transient CP blip."""
+    async def go():
+        client = _R106FakeClient(post_script=[_r106_httpx.ConnectError("x")])
+        w = _r106_worker(client)
+        await w._ack_input("jA", "iA", "delivered", detail="d")  # must not raise
+        # The POST was attempted with the right shape before it failed.
+        assert client.post_calls[0][0] == "/workers/w1/jobs/jA/input-ack"
+        assert client.post_calls[0][1] == {
+            "input_id": "iA", "state": "delivered", "detail": "d"}
+        await w.close()
+
+    asyncio.run(go())
+    assert "input ack failed for jA/iA" in capsys.readouterr().out
+
+
+# ---------- _send_log: real method, 413/429 log-drop + HTTPError ----------
+
+
+@pytest.mark.parametrize("status", [413, 429])
+def test_r106_send_log_413_429_drops_with_json_detail(status, capsys):
+    """The REAL _send_log: a 413 (oversize) / 429 (row ceiling) response makes the
+    line be dropped LOUDLY with the server's JSON `detail` and the status code —
+    the job keeps running (no raise). Mutation guard: weakening `>= 400` or
+    dropping the detail would silently swallow why logs vanish."""
+    async def go():
+        client = _R106FakeClient(post_script=[_R106Resp(
+            status, {"detail": "log row ceiling reached"})])
+        w = _r106_worker(client)
+        await w._send_log("jL", "stdout", "a noisy line")  # must not raise
+        assert client.post_calls[0][0] == "/workers/w1/jobs/jL/logs"
+        assert client.post_calls[0][1] == {"stream": "stdout",
+                                           "data": "a noisy line"}
+        await w.close()
+
+    asyncio.run(go())
+    out = capsys.readouterr().out
+    assert f"log line dropped by server ({status})" in out
+    assert "log row ceiling reached" in out
+
+
+def test_r106_send_log_drop_falls_back_to_text_on_non_json_body(capsys):
+    """If the >=400 error body isn't JSON (.json() raises), the drop message uses
+    the raw `.text` instead. Mutation guard: removing the try/except around
+    .json() would crash _send_log on a plain-text 413."""
+    async def go():
+        client = _R106FakeClient(post_script=[_R106Resp(
+            413, _R106Resp._RAISE, text="Payload Too Large")])
+        w = _r106_worker(client)
+        await w._send_log("jT", "stderr", "x")
+        await w.close()
+
+    asyncio.run(go())
+    out = capsys.readouterr().out
+    assert "log line dropped by server (413)" in out
+    assert "Payload Too Large" in out
+
+
+def test_r106_send_log_swallows_httperror(capsys):
+    """A network failure POSTing a log is swallowed and logged — observability is
+    not the work, so the job is unaffected. Mutation guard: removing the except
+    would crash on a transient CP blip."""
+    async def go():
+        client = _R106FakeClient(post_script=[_r106_httpx.ReadTimeout("slow")])
+        w = _r106_worker(client)
+        await w._send_log("jH", "stdout", "line")  # must not raise
+        await w.close()
+
+    asyncio.run(go())
+    assert "log POST failed" in capsys.readouterr().out
+
+
+def test_r106_send_log_2xx_is_quiet(capsys):
+    """A normal 200 log POST produces NO drop message. Pins the `>= 400` guard so
+    a mutation to `>= 200` (which would log every line as dropped) fails."""
+    async def go():
+        client = _R106FakeClient(post_script=[_R106Resp(200, {})])
+        w = _r106_worker(client)
+        await w._send_log("jOK", "stdout", "fine")
+        await w.close()
+
+    asyncio.run(go())
+    assert "log line dropped" not in capsys.readouterr().out
+
+
+# ---------- _post_event: HTTPError path ----------
+
+
+def test_r106_post_event_swallows_httperror(capsys):
+    """A network failure POSTing a terminal/lifecycle event is swallowed and
+    logged. Mutation guard: removing the except arm would crash the reporting
+    path on a transient CP blip."""
+    async def go():
+        client = _R106FakeClient(post_script=[_r106_httpx.ConnectError("x")])
+        w = _r106_worker(client)
+        await w._post_event("jP", {"type": "succeeded"})  # must not raise
+        assert client.post_calls[0][0] == "/workers/w1/jobs/jP/event"
+        assert client.post_calls[0][1] == {"type": "succeeded"}
+        await w.close()
+
+    asyncio.run(go())
+    assert "event POST failed" in capsys.readouterr().out
+
+
+# ---------- _claude_creds_path: CLAUDE_CONFIG_DIR override vs default ----------
+
+
+def test_r106_claude_creds_path_uses_config_dir_override(monkeypatch):
+    """With CLAUDE_CONFIG_DIR set (the shared-box case), creds live under that
+    isolated dir, NOT under ~/.claude. Mutation guard: ignoring the env var would
+    point a shared box at the wrong (host) credentials file."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/iso/cfg")
+    w = _r106_worker(_R106FakeClient())
+    assert w._claude_creds_path() == Path("/iso/cfg/.credentials.json")
+    asyncio.run(w.close())
+
+
+def test_r106_claude_creds_path_defaults_to_home_dot_claude(monkeypatch):
+    """With CLAUDE_CONFIG_DIR unset, creds default to ~/.claude/.credentials.json.
+    Mutation guard: hard-coding the env path would break the unshared default."""
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: Path("/home/op")))
+    w = _r106_worker(_R106FakeClient())
+    assert w._claude_creds_path() == Path("/home/op/.claude/.credentials.json")
+    asyncio.run(w.close())
+
+
+def test_r106_claude_creds_path_expands_user_in_config_dir(monkeypatch):
+    """A ~-relative CLAUDE_CONFIG_DIR is expanded (expanduser). Pins the
+    `.expanduser()` call so dropping it would yield a literal '~' path."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "~/myconf")
+    monkeypatch.setenv("HOME", "/home/op")  # expanduser reads $HOME
+    w = _r106_worker(_R106FakeClient())
+    assert w._claude_creds_path() == Path("/home/op/myconf/.credentials.json")
+    asyncio.run(w.close())
+
+
+# ---------- _refresh_claude_creds: ERROR branches only ----------
+# (the happy / unchanged / disabled paths are covered by the r43 tests above)
+
+
+def test_r106_refresh_creds_httperror_on_get_is_noop(tmp_path, monkeypatch):
+    """If GET /claude-creds raises httpx.HTTPError, refresh returns early and does
+    NOT touch the local creds file. Mutation guard: removing the except would
+    crash the refresh-forever loop when the CP is briefly unreachable."""
+    async def go():
+        creds = tmp_path / ".credentials.json"
+        client = _R106FakeClient(get_script=[_r106_httpx.ConnectError("down")])
+        w = _r106_worker(client)
+        monkeypatch.setattr(w, "_claude_creds_path", lambda: creds)
+        await w._refresh_claude_creds()  # must not raise
+        assert not creds.exists()        # nothing written on a fetch failure
+        await w.close()
+
+    asyncio.run(go())
+
+
+def test_r106_refresh_creds_non_200_leaves_file_alone(tmp_path, monkeypatch):
+    """A non-200 (e.g. 404 provisioning-disabled) → leave the local copy alone.
+    Here the file pre-exists with sentinel content; refresh must NOT overwrite it.
+    Mutation guard: dropping `if r.status_code != 200: return` would parse an
+    error body and clobber the file."""
+    async def go():
+        creds = tmp_path / ".credentials.json"
+        creds.write_text("KEEP-ME")
+        client = _R106FakeClient(get_script=[_R106Resp(404, {})])
+        w = _r106_worker(client)
+        monkeypatch.setattr(w, "_claude_creds_path", lambda: creds)
+        await w._refresh_claude_creds()
+        assert creds.read_text() == "KEEP-ME"  # untouched
+        await w.close()
+
+    asyncio.run(go())
+
+
+def test_r106_refresh_creds_empty_creds_is_noop(tmp_path, monkeypatch):
+    """A 200 whose body has no/blank credentials_json → no write. Mutation guard:
+    dropping `if not creds: return` would write an empty creds file over a good
+    one, breaking the worker's claude auth."""
+    async def go():
+        creds = tmp_path / ".credentials.json"
+        creds.write_text("KEEP-ME")
+        client = _R106FakeClient(get_script=[
+            _R106Resp(200, {"credentials_json": ""})])
+        w = _r106_worker(client)
+        monkeypatch.setattr(w, "_claude_creds_path", lambda: creds)
+        await w._refresh_claude_creds()
+        assert creds.read_text() == "KEEP-ME"
+        await w.close()
+
+    asyncio.run(go())
+
+
+def test_r106_refresh_creds_oserror_on_write_is_logged(tmp_path, monkeypatch,
+                                                       capsys):
+    """If the atomic creds write fails with OSError, it is caught and printed
+    (not raised). We force the failure by pointing the creds path at a location
+    whose PARENT is a regular file (so mkdir/open both fail). Mutation guard:
+    removing the OSError handler would crash refresh-forever on a read-only or
+    full disk."""
+    async def go():
+        blocker = tmp_path / "blocker"
+        blocker.write_text("i am a file, not a dir")
+        creds = blocker / "sub" / ".credentials.json"  # parent is a file
+        client = _R106FakeClient(get_script=[
+            _R106Resp(200, {"credentials_json": "NEWCREDS"})])
+        w = _r106_worker(client)
+        monkeypatch.setattr(w, "_claude_creds_path", lambda: creds)
+        await w._refresh_claude_creds()  # must not raise
+        assert not creds.exists()
+        await w.close()
+
+    asyncio.run(go())
+    assert "creds refresh write failed" in capsys.readouterr().out
