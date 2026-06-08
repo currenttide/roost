@@ -2783,3 +2783,51 @@ Entries are written by the loop; humans read, never need to edit.
 - WAKE BEHAVIOR: max-interval; repo changed (human commits/new UAT) → drift
   sweep + targeted hunt over the change; unchanged → no-op re-arm.
 - Models: orchestrator claude-opus-4-8[1m]
+
+## 2026-06-08 — Human-directed: distilled-default (all platforms), mac publish fallback, fleet rollout
+- Verdict: in progress / shipped per item
+- R110 (mac publish fallback) — PR #118 (c7f2fac): RoostClient gains stageBlob +
+  publishFromBlob; publishBundle mirrors the CLI R78/R90 cross-version fallback
+  (non-2xx-except-auth → blob path; both-errors-leading-with-one-shot). RoostKit
+  Linux 115→123 + Mac-node swift build/test green. Judge sonnet round 1. Answers
+  the user's #4: no blocker — built on mac-mini-m4 like all session.
+- R107 (CLI distilled-default) — PR #119 (a24b606): distilled live-stream is now
+  the DEFAULT for logs/run/_stream; `--verbose`/`--raw` shows raw losslessly.
+  Pure `distill_log_line(data)->str|None` (parses Claude stream-json:
+  text shown; tool_use→"→ Tool: hint"; tool_result truncated; thinking/base64
+  suppressed; 🔎/✓ phase dividers kept). Shared language-neutral contract +
+  16 golden fixtures committed at mobile-app/fixtures/distilled/ (SPEC.md +
+  cases.json) as the iOS/Android contract. pytest 1039→1083. Judge sonnet r1.
+- R108 (iOS) + R109 (Android) distilled-default: DISPATCHED, mirroring R107's
+  committed fixtures (each loads cases.json + asserts its transform matches every
+  case = cross-platform consistency guarantee).
+- FLEET ROLLOUT (user #2 — "double check + roll out to latest"): "double check"
+  found the version string is uniformly 0.2.0 across all commits (unreliable), so
+  probed installed CODE markers. Pre-roll matrix: 13 uv-tool nodes on R100 (caught
+  the user's ~04:40 UTC roll but missed R103-R106); 2 hubbase docker workers
+  further behind (no R100). RECIPE (proven by canary on digitalocean): build
+  current wheel → stage via blob store → per node `curl` wheel (canonical
+  filename!) → `uv tool install --reinstall --python 3.12` (synchronous, gated
+  on success) → DECOUPLED restart (systemd-run --user --on-active=2 transient
+  unit, so restarting the worker doesn't kill the job doing it; launchctl
+  kickstart -k on mac). RESULT: all 13 uv nodes (10 Linux + windows-wsl + mac +
+  DO) now on R107 with VERIFIED FRESH WORKERS (worker process age confirmed small
+  + on-disk distill_log_line=True); all 15 nodes online. The 2 hubbase docker
+  workers run roost INSIDE a container (pip at /usr/local/lib) → in-container pip
+  wouldn't survive a container restart → need a HOST-LEVEL image rebuild (the
+  Dockerfile the user's 21a0e2f fixed) — parked for the human/host session.
+- GOTCHAS (cost real time, journaled so the next rollout is faster): (a) a loop
+  subagent's `pip install -e .` in its worktree silently REPOINTED the shared
+  miniconda editable roost to that (later-deleted) worktree → local `roost exec`
+  failed without touching nodes until re-pointed (`pip install -e
+  /workspace/yang/roost-oss`); (b) `roost exec` stdout is now bare (no
+  "[N stdout]" prefix) — extract by filtering frame lines, not a prefix sed;
+  (c) on-disk-updated ≠ running-updated — MUST verify worker process age, not
+  just the installed package (caught DO stale-in-memory despite R107 on disk);
+  (d) reuse a transient restart unit name across canary+roll → second restart
+  silently no-ops; use a fresh unit name or reset-failed the timer too.
+- "6 need attention" health banner during/after = benign recent FAILED JOBS (the
+  worker restarts killing their own in-flight exec jobs + R108/R109 emulator/SDK
+  setup retries), not node failures — all 15 nodes online (the UAT-noted health
+  banner counts operator's own nonzero exits).
+- Models: orchestrator claude-opus-4-8[1m]; implementers opus; judges sonnet
