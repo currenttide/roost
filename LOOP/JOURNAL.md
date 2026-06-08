@@ -2705,3 +2705,39 @@ Entries are written by the loop; humans read, never need to edit.
   fleet-ops stale-container item. Repo now CHANGED → next replenishment owes a
   drift sweep + targeted hunt over the deploy change (per pacing rules).
 - Models: orchestrator claude-opus-4-8[1m] / judges claude-sonnet-4-6
+
+## 2026-06-07 ~04:50 UTC — Replenishment: UAT-findings triage (2nd parallel UAT pass)
+- Verdict: shipped (triage cycle — slate → 3 promotions)
+- What changed: the human deploy commit 21a0e2f redeployed the live CP from
+  current master (parked stale-container item RESOLVED: live CP now has
+  /schedules /metrics /jobs-input; 16/16 workers reconnected; DB backed up) and
+  left LOOP/UAT-FINDINGS-2026-06-07.md (4 testers) for the loop to triage. A
+  triage agent (+ cross-model sonnet judge, 5/5 repros confirmed) found: 2 P1
+  items STALE — already shipped by the loop (phone steering composer = R76;
+  Android subtitle = R85); 3 Tier-A bugs with failing repros → R103/R104/R105;
+  Tier-B → Proposed (C4 mac-app publish fallback needs a Mac gate; C5 live-stream
+  distilled-default is a design call — the UAT's "highest-leverage UX fix");
+  human-gated → fleet worker-build rollout across 16 nodes (outward ops).
+- Repros: /tmp/uat-triage-repros.py (+ .bak; uncommitted)
+- Models: orchestrator opus; triage opus; judge sonnet
+
+## 2026-06-07 ~04:58 UTC — R103/R104/R105 shipped (iteration #33, all UAT bugs)
+- Verdict: shipped (3/3)
+- R105 — fleet-verdict pluralization / PR #114 (d6a3610): `_count_noun` helper
+  fixes "1 nodes"→"1 node" + "N needs/need attention" across idle/active/alert
+  branches; gerund forms ("1 running") correctly left; `_resolve_job_id` "N jobs"
+  noted always-plural-by-construction (no bug). Suite 1001.
+- R103 — codex non-git default / PR #115 (4f338f8): `--skip-git-repo-check` added
+  as an `exec` flag before the prompt so codex jobs work in a clean worker's
+  non-git cwd; 3 R96 argv tests updated to the new exact shape (not weakened,
+  judge-verified). Suite 1000.
+- R104 — CLI friendly errors / PR #116 (d4f806c): `workers`/`cancel` mirror the
+  `_admin_403`/`_lookup_error` idiom (401/403 friendly, other non-2xx clean);
+  `main()` wraps unexpected exceptions → clean exit, passes click/SystemExit
+  through, `ROOST_DEBUG=1` re-raises for debugging. 11 tests; suite 1008.
+- All judges sonnet, round 1; implementer opus. Each fix had a failing repro
+  from the UAT triage proven on master first.
+- Models: orchestrator claude-opus-4-8[1m] / judges claude-sonnet-4-6
+- Remaining Ranked: A2 rank-3 (worker input-delivery seam coverage) queued.
+  Proposed/human: C4 mac publish fallback, C5 stream distilled-default,
+  fleet worker rollout, the P3/UX set.

@@ -485,17 +485,17 @@ Done-when: pure-function assertions on the returned (argv, cwd, tempfiles) per k
 
 Triaged LOOP/UAT-FINDINGS-2026-06-07.md vs master 711036c. 2 P1 items STALE (R76 composer, R85 subtitle — the loop already shipped them). 3 Tier-A bugs with failing repros (`/tmp/uat-triage-repros.py` + .bak; uncommitted; cross-model sonnet judge confirmed 5/5 fail). Promoted R103-R105. Tier-B → Proposed: C4 mac-app publish fallback (needs Mac gate), C5 live-stream distilled-default (design call). Human-gated: fleet worker-build rollout across 16 nodes (outward ops, out-of-loop-scope). Queued from cycle #2: A2 rank-3 worker input-delivery coverage.
 
-### R103. codex jobs fail in a non-git cwd — `_build_codex_argv` omits `--skip-git-repo-check` — `open` `self-promoted`
+### R103. codex jobs fail in a non-git cwd — `_build_codex_argv` omits `--skip-git-repo-check` — `done` *(2026-06-07, PR #115)* `self-promoted`
 Surface: backend/worker/correctness. UAT C1, judge-confirmed bug. `worker.py:1116-1125` builds `["codex","exec",intent]`; a fresh worker's default (non-git) cwd makes `codex exec` abort → every codex job fails on a clean node.
 Repro: /tmp/uat-triage-repros.py::test_codex_argv_includes_skip_git_repo_check (FAIL on master).
 Done-when: `_build_codex_argv` includes `--skip-git-repo-check`; repro promoted into tests/ (beside R96's argv tests); pytest green. Additive single-line, Linux-testable.
 
-### R104. CLI raw tracebacks: `workers`/`cancel` bad-token + no top-level `main()` handler — `open` `self-promoted`
+### R104. CLI raw tracebacks: `workers`/`cancel` bad-token + no top-level `main()` handler — `done` *(2026-06-07, PR #116 — workers/cancel + main() wrap + ROOST_DEBUG)* `self-promoted`
 Surface: CLI/robustness. UAT C2, judge-confirmed. `cli.py:2190` (`workers`) and `:2042` (`cancel`) bare `raise_for_status()` → raw httpx traceback on a bad token; `main()` (:2314) has no top-level except so any unexpected error dumps a traceback. (R77/R79 already covered schedule subverbs + status/logs/tree — NOT in scope.)
 Repro: /tmp/uat-triage-repros.py::{test_workers_bad_token_friendly_not_traceback, test_cancel_bad_token_friendly_not_traceback, test_main_wraps_unexpected_errors} (FAIL on master).
 Done-when: `workers`/`cancel` surface a friendly auth error on 401/403 (mirror `_admin_403`/`_lookup_error`) AND `main()` wraps unexpected exceptions into a clean nonzero exit (don't swallow tracebacks for programming errors that aren't user-facing — match the repo's existing ClickException idiom); 3 repros promoted; pytest green.
 
-### R105. "1 nodes online" — fleet-verdict pluralization — `open` `self-promoted`
+### R105. "1 nodes online" — fleet-verdict pluralization — `done` *(2026-06-07, PR #114 — _count_noun helper)* `self-promoted`
 Surface: backend/UX. UAT C3, judge-confirmed (cosmetic; lowest-leverage of the three). `server.py:1061-1062` `_fleet_verdict` emits `f"{len(live)} nodes …"` unconditionally → "1 nodes" with one node; surfaces on panel + Android too.
 Repro: /tmp/uat-triage-repros.py::test_fleet_verdict_singular_node_grammar (FAIL on master).
 Done-when: singular renders "1 node"; test asserts both forms; check for the same `N nodes`/`N jobs` pattern elsewhere in _fleet_verdict and fix consistently; pytest green.
