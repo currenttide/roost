@@ -2741,3 +2741,45 @@ Entries are written by the loop; humans read, never need to edit.
 - Remaining Ranked: A2 rank-3 (worker input-delivery seam coverage) queued.
   Proposed/human: C4 mac publish fallback, C5 stream distilled-default,
   fleet worker rollout, the P3/UX set.
+
+## 2026-06-07 ~05:21 UTC — R106 shipped (iteration #34, solo) + IDLE entered
+- Verdict: shipped
+- Branch/PR: loop/r106-input-delivery-coverage / https://github.com/currenttide/roost/pull/117 (merged 823fb6c)
+- What changed: 28 fault-injection tests over worker.py's R38 input-delivery
+  seam (`_deliver_inputs`/`_ack_input` dropped-vs-delivered + detail strings),
+  real `_send_log` 413/429 log-drop, `_post_event` HTTPError, `_claude_creds_path`
+  CLAUDE_CONFIG_DIR override, and `_refresh_claude_creds` error arms. Tests only;
+  worker.py 78→80%; no bug found. Judge killed 5 mutation probes.
+- Evidence: pytest 1039 (was 1011); worker.py 78→80%, no module down
+- Judge: approve (round 1) — re-measured + 5 mutation probes
+- Models: implementer claude-opus-4-8[1m] / judge claude-sonnet-4-6
+
+## 2026-06-07 ~05:25 UTC — IDLE entered (restart burst complete; Ranked drained)
+- Verdict: idle (protocol pacing — not an end state)
+- What changed: nothing — decision record. The human restart (re-ran /loop after
+  the earlier stop) drove a productive burst: deepening hunt #10 found a real
+  dashboard-wedge bug (R100) and the 2nd parallel UAT pass yielded 3 more
+  confirmed bugs (R103-R105); coverage lifts R101/R102/R106. Ranked is now
+  EMPTY of unblocked items. Remaining candidates are all HUMAN-GATED or design
+  calls — promoting them unilaterally would be manufacturing/over-reach while
+  the human is actively engaged (deploying, leaving UAT files).
+- BURST TOTALS (restart 21:40 → 05:25 UTC): 7 PRs (#111-#117), pytest 999→1039,
+  coverage ratchet pinned to --source=roost (82%), cli 67→77, worker 76→80,
+  all judges round-1, 1 confirmed bug from hunt-our-own-fresh-code (R100) + 3
+  from UAT triage (R103-R105). Whole session since the 17:00 user-testing wake:
+  34 PRs (#84-#117), pytest 823→1039.
+- TOP ITEMS AWAITING THE HUMAN (surfaced, deliberately NOT self-promoted):
+  1. C5 — live-stream "JSON firehose" → distilled-default view (UAT's
+     highest-leverage UX fix; design call spanning CLI _stream + iOS + Android
+     session views; the distilled markers already exist server-side). Wants a
+     human design decision (what to distill / default vs --verbose).
+  2. Fleet worker-build rollout across 16 heterogeneous nodes (outward ops,
+     out-of-loop-scope; workers run stale pre-R42 builds lacking cred
+     auto-refresh → agent jobs 401 ~every 8h until a restart). Needs go-ahead
+     on approach (rolling, per-node verify).
+  3. Branch protection on master (R92 made the macOS check meaningful) — GitHub
+     admin action.
+  4. C4 — mac-app two-step publish fallback (Tier B, needs a Mac-node gate).
+- WAKE BEHAVIOR: max-interval; repo changed (human commits/new UAT) → drift
+  sweep + targeted hunt over the change; unchanged → no-op re-arm.
+- Models: orchestrator claude-opus-4-8[1m]
