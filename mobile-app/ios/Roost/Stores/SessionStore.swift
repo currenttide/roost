@@ -17,6 +17,15 @@ final class SessionStore: ObservableObject {
     @Published private(set) var tree: [Job] = []
     @Published private(set) var streamError: String?
 
+    /// R108: the session view DEFAULTS to the distilled rendering of the agent
+    /// stream-json (assistant text, `→ Tool: summary`, truncated results; noise
+    /// suppressed). Flipping this to `true` reveals the raw firehose. The toggle
+    /// re-renders the rows already in hand — it does not re-fetch — because the
+    /// raw `rows` are retained and `lines` is derived from them.
+    @Published var showRaw = false {
+        didSet { if showRaw != oldValue { rebuildLines() } }
+    }
+
     // Follow-up composer (DESIGN §3.2 / API.md §4, R38).
     @Published var draft: String = ""
     @Published private(set) var sending = false
@@ -25,6 +34,9 @@ final class SessionStore: ObservableObject {
     private weak var app: AppState?
     private var streamTask: Task<Void, Never>?
     private var seen = Set<Int>()     // guards against any double-append
+    /// Raw wire rows (source of truth). `lines` is the distilled/raw rendering
+    /// derived from these, so the toggle re-renders without re-fetching.
+    private var rows: [LogRow] = []
     private var linesSincePersist = 0
 
     init(jobId: String) { self.jobId = jobId }
@@ -146,15 +158,32 @@ final class SessionStore: ObservableObject {
     private func appendLog(_ row: LogRow) {
         guard !seen.contains(row.seq) else { return }
         seen.insert(row.seq)
-        if let line = DisplayLine.from(row) { lines.append(line) }
-        // Keep the list ordered even if events arrive out of seq.
-        if lines.count > 1, lines[lines.count - 1].seq < lines[lines.count - 2].seq {
-            lines.sort { $0.seq < $1.seq }
+        rows.append(row)
+        // Keep rows ordered even if events arrive out of seq, so the derived
+        // `lines` (and any later raw/distilled re-render) stay in seq order.
+        if rows.count > 1, rows[rows.count - 1].seq < rows[rows.count - 2].seq {
+            rows.sort { $0.seq < $1.seq }
+        }
+        if let line = DisplayLine.from(row, raw: showRaw) {
+            lines.append(line)
+            if lines.count > 1, lines[lines.count - 1].seq < lines[lines.count - 2].seq {
+                lines.sort { $0.seq < $1.seq }
+            }
+        } else if rows.count > 1, rows[rows.count - 1].seq < rows[rows.count - 2].seq {
+            // Out-of-order suppressed line: rebuild so `lines` reflects sorted rows.
+            rebuildLines()
         }
         // Throttled write-behind to the offline cache (DESIGN §5); done/stop
         // flush the tail.
         linesSincePersist += 1
         if linesSincePersist >= 25 { persistLines() }
+    }
+
+    /// Re-derive `lines` from the retained raw `rows` in the current mode. Cheap
+    /// (rows are capped) and only runs on a mode toggle or an out-of-order
+    /// suppressed row.
+    private func rebuildLines() {
+        lines = rows.compactMap { DisplayLine.from($0, raw: showRaw) }
     }
 
     private func handleDone(_ d: SSEDonePayload) {
@@ -166,23 +195,26 @@ final class SessionStore: ObservableObject {
 
     // MARK: - Offline cache (DESIGN §5)
 
-    /// Cold-start seed: repaint last-known lines and derive the resume cursor
+    /// Cold-start seed: repaint last-known rows and derive the resume cursor
     /// from them in one step. This deliberately supersedes seeding from the
-    /// bare persisted cursor — a cursor without its lines would leave all
-    /// pre-cursor history invisible (catch-up only pages seq > cursor).
+    /// bare persisted cursor — a cursor without its rows would leave all
+    /// pre-cursor history invisible (catch-up only pages seq > cursor). Raw rows
+    /// (not pre-rendered lines) are cached so the distilled/raw toggle re-renders
+    /// cold-start history too (R108).
     private func seedFromCacheOnce() -> Int {
-        guard lines.isEmpty else { return seen.max() ?? 0 }
-        let cached = OfflineCache.shared.loadLines(jobId)
+        guard rows.isEmpty else { return seen.max() ?? 0 }
+        let cached = OfflineCache.shared.loadRows(jobId)
         guard !cached.isEmpty else { return 0 }
-        lines = cached.sorted { $0.seq < $1.seq }
+        rows = cached.sorted { $0.seq < $1.seq }
         cached.forEach { seen.insert($0.seq) }
-        return cached.map(\.seq).max() ?? 0
+        rebuildLines()
+        return rows.map(\.seq).max() ?? 0
     }
 
     private func persistLines() {
         linesSincePersist = 0
-        guard !lines.isEmpty else { return }
-        OfflineCache.shared.saveLines(jobId, lines)
+        guard !rows.isEmpty else { return }
+        OfflineCache.shared.saveRows(jobId, rows)
     }
 
     private func handleStreamError(_ e: String) {

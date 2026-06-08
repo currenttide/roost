@@ -170,6 +170,17 @@ struct SessionView: View {
                 .accessibilityIdentifier("session-cancel")
             }
             Spacer()
+            // R108: distilled view is the DEFAULT; this reveals the raw firehose.
+            // A plain button (not a Toggle) so it reads clearly in the footer bar;
+            // the filled icon + "Raw"/"Distilled" label make the current mode
+            // obvious. Re-renders the rows in hand — no re-fetch.
+            Button {
+                store.showRaw.toggle()
+            } label: {
+                Label(store.showRaw ? "Raw" : "Distilled",
+                      systemImage: store.showRaw ? "text.alignleft" : "sparkles")
+            }
+            .accessibilityIdentifier("session-raw-toggle")
             Button {
                 Task { await store.loadTree() }
                 showTree = true
