@@ -464,6 +464,24 @@ Done-when: stubbed `os.killpg`/proc seams assert the fallback paths; sync wins f
 Surface: tests/ratchet. A2 rank 2 (worker.py 72%). Zero existing test references for worker.py:1068-1125: missing task/intent → ValueError; triage-prompt insertion at the CORRECT index incl. bwrap-wrapped argv (security-relevant — R30's bug class); sandbox/model defaulting; codex-missing → FileNotFoundError (monkeypatch shutil.which); args passthrough. Expected +2-3 branch points.
 Done-when: direct pure-function assertions on argv shape + raised errors; judge mutation-probes; no module down; pytest green.
 
+## Human-directed 2026-06-08 — distilled-default stream (all platforms) + mac publish fallback
+
+User directives (2026-06-08): (1) make the distilled live-stream view the DEFAULT on every platform; (4) mac-app two-step publish fallback — no blocker, build it on the mac-mini-m4 node. (Branch protection deferred per user; fleet worker rollout handled as ops, not a code item.)
+
+### R107. CLI live-stream distilled-default + `--verbose` raw escape + shared spec/fixtures — `open` `human-promoted` `feature`
+Surface: CLI/feature. The reference implementation + canonical contract for the cross-platform distilled view. Today `_stream` (cli.py ~2304) echoes every raw Claude stream-json log line (incl. base64 signature blobs) — a firehose. The distilled phase markers (🔎/🔧 from worker `last_activity`) are NOT in the log stream; the per-line distillation (assistant text, "→ <Tool>: <summary>", tool results) must be DERIVED by parsing the stream-json `data` field client-side.
+Done-when: ground the mapping in a REAL captured agent-job stream (run a tiny `kind:claude` job on a scratch CP, capture raw logs); define the distilled transform (assistant text shown; tool_use→"→ <Tool>: <short>"; tool_result truncated; suppress base64/signature/raw envelopes; keep 🔎/🔧/✓ phase dividers); make distilled the DEFAULT for `roost logs --follow`/`run`/`_stream`, raw behind `--verbose` (or `--raw`; pick + document); commit a SHARED spec doc + golden fixtures (raw stream-json line → expected distilled output) under mobile-app/fixtures/distilled/ so iOS/Android mirror it exactly; pytest green incl. golden-fixture tests; live smoke on a scratch CP.
+
+### R108. iOS session view: distilled-default (mirror R107 spec/fixtures) — `blocked: R107` `human-promoted` `feature`
+Surface: mobile/iOS/feature. After R107 lands the spec+fixtures: iOS SessionStore/SessionView default to the distilled rendering of the same stream-json, raw behind a UI toggle (default off). Linux pure-layer tests against the committed golden fixtures + Mac-node sim screenshot.
+
+### R109. Android session view: distilled-default (mirror R107 spec/fixtures) — `blocked: R107` `human-promoted` `feature`
+Surface: mobile/Android/feature. After R107: Android SessionViewModel/SessionScreen default to distilled rendering, raw behind a UI toggle. kotlinc+JUnit tests against the committed golden fixtures + emulator screenshot.
+
+### R110. mac-app two-step publish fallback (mirror CLI R78/R90) — `open` `human-promoted`
+Surface: mac-app/robustness. `mac-app/Sources/RoostKit/RoostClient.swift` `publishBundle` (~142) is one-shot only → 500s on an older CP. Mirror the CLI fallback (cli.py ~1547-1625): on one-shot non-2xx (except 401/403) → stageBlob (POST /blobs?name=) → publishFromBlob (POST /publish JSON {name,blob_id}); on double-failure surface BOTH errors leading with the one-shot's. RoostClient lacks stageBlob/publishFromBlob — add them.
+Done-when: publishBundle degrades across CP versions; new RoostKit methods + a PublishFallbackTests (one-shot 500 → blob path → Site); Linux `swift test` green + Mac-node `swift build`+`swift test` green (we HAVE mac-mini-m4 — no blocker; build there via roost exec); pytest green (server untouched).
+
 ## Replenishment 2026-06-07 night #2 — A1 hunt #10 + A2 re-measure (loop restarted by human; repo unchanged → deepening)
 
 Hunt #10 repro file: `/workspace/yang/roost-oss/LOOP/repro-a1-hunt10.py` (+ /tmp backup; uncommitted). Coverage re-measured 82% roost-scoped (+2). NOTE: hunt #10's agent self-judged on opus (its sandbox lacked the Agent tool) — the binding cross-model Sonnet judge happens at implementation time (the implementer re-runs the repros under its mandatory judge). A2 rank 3 (worker R38 input-DELIVERY seam `_deliver_inputs`/`_ack_input` + creds error branches) queued Tier-A-judged for the next slot.
