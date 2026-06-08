@@ -1035,6 +1035,12 @@ def _derive_run(
 FAILURE_RECENT_SEC = 600.0  # a terminal failure older than this is history, not an alert
 
 
+def _count_noun(n: int, singular: str, plural: Optional[str] = None) -> str:
+    """`"1 node"` / `"3 nodes"` — grammar for the verdict bar (panel + Android
+    consumers render this verbatim, so "1 nodes" reads as a bug to users)."""
+    return f"{n} {singular if n == 1 else (plural or singular + 's')}"
+
+
 def _fleet_verdict(workers: list[dict], runs: list[dict], now: Optional[float] = None) -> dict:
     now = now if now is not None else time.time()
     live = [w for w in workers if w.get("status") in ("idle", "busy")]
@@ -1054,12 +1060,14 @@ def _fleet_verdict(workers: list[dict], runs: list[dict], now: Optional[float] =
     verifying = [r for r in runs if r["phase"] in ("verifying", "self-healing")]
     if bad:
         w = bad[0]
+        verb = "needs" if len(bad) == 1 else "need"
         return {"level": "alert",
-                "summary": f"{len(bad)} need attention — {w['health']['status']}: {w['goal'][:60]}"}
+                "summary": f"{len(bad)} {verb} attention — {w['health']['status']}: {w['goal'][:60]}"}
     if active or verifying:
         return {"level": "ok",
-                "summary": f"{len(live)} nodes · {len(active)} running · {len(verifying)} verifying — all healthy"}
-    return {"level": "ok", "summary": f"{len(live)} nodes online · fleet idle"}
+                "summary": f"{_count_noun(len(live), 'node')} · {len(active)} running · "
+                           f"{len(verifying)} verifying — all healthy"}
+    return {"level": "ok", "summary": f"{_count_noun(len(live), 'node')} online · fleet idle"}
 
 
 def _recently_cancelled_for_worker(db_path: Path, worker_id: str) -> list[str]:
