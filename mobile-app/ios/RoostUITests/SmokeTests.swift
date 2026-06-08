@@ -160,12 +160,29 @@ final class SmokeTests: XCTestCase {
                       "Distilled/Raw toggle missing from the session footer.")
         XCTAssertEqual(rawToggle.label, "Distilled",
                        "Session view must DEFAULT to the distilled rendering (R108).")
+
+        // Wait for actual distilled log lines to render before the screenshot, so
+        // the artifact shows the readable transcript (not an empty log). The
+        // distiller keeps phase dividers + assistant text + `→ Tool:`/`⎿`
+        // summaries; any of those static texts means stream-json was distilled.
+        // (Best-effort: a slow/blocked agent legitimately has no lines yet — the
+        // toggle assertions above are the hard gate.)
+        let anyDistilledLine = app.staticTexts.containing(
+            NSPredicate(format:
+                "label CONTAINS '→' OR label CONTAINS '⎿' OR label CONTAINS 'starting' "
+                + "OR label CONTAINS '✓ done' OR label CONTAINS 'R108_DISTILLED_DEMO'")
+        ).firstMatch
+        _ = anyDistilledLine.waitForExistence(timeout: 60)
         attachScreenshot(app, name: "03-session-distilled")
 
         rawToggle.tap()
         XCTAssertTrue(app.buttons["session-raw-toggle"].label == "Raw"
                       || app.staticTexts["Raw"].waitForExistence(timeout: 5),
                       "Toggle did not switch to the raw firehose view.")
+        // Give the raw firehose a beat to repaint the wire lines.
+        _ = app.staticTexts.containing(
+            NSPredicate(format: "label CONTAINS '\"type\"'")).firstMatch
+            .waitForExistence(timeout: 5)
         attachScreenshot(app, name: "03b-session-raw")
 
         // Back to the distilled default.
