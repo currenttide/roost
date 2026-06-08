@@ -174,5 +174,74 @@ def test_never_raises_on_odd_shapes():
     # pure + total: odd shapes must not raise.
     for bad in ['[]', '123', 'null', 'true', '{"type": 5}',
                 '{"type": "assistant", "message": null}',
+                '{"type": "assistant", "message": "hello"}',   # R111: truthy non-dict
+                '{"type": "user", "message": [1, 2]}',          # R111: truthy non-dict
                 '{"type": "assistant", "message": {"content": [null, 7]}}']:
         distill_log_line(bad)  # no exception
+
+
+# ---------- R111: truthy non-dict `message` must suppress, not crash ----------
+# Promoted from the A1 bug-hunt repros (/tmp/hunt-distill-repros.py). On master
+# `distill_log_line` did `msg = obj.get("message") or {}` — the `or {}` only
+# rescues FALSY messages, so a TRUTHY non-dict `message` (a JSON string / list /
+# number in an assistant/user envelope) reached `msg.get("content")` and raised
+# AttributeError, crashing the now-DEFAULT distilled `roost logs` / `--follow` /
+# phone session view for that job. The fix uses `isinstance(msg, dict)` (else
+# suppress → None), matching the mobile clients (iOS `as? [String:Any]`→nil,
+# Android `optJSONObject`→null). The cross-platform contract is pinned by the
+# new non-dict-message golden case in cases.json.
+
+
+@pytest.mark.parametrize("message", ["hello there", ["a", "b"], 5, 3.14])
+def test_truthy_non_dict_message_suppressed_not_raised(message):
+    """A truthy non-dict `message` must suppress (return None), never raise."""
+    raw = json.dumps({"type": "assistant", "message": message})
+    assert distill_log_line(raw) is None  # suppressed, no AttributeError
+    raw_user = json.dumps({"type": "user", "message": message})
+    assert distill_log_line(raw_user) is None
+
+
+def test_falsy_message_still_suppressed():
+    """Boundary check: FALSY messages were already (and remain) suppressed."""
+    for message in ("", [], {}, False, None):
+        raw = json.dumps({"type": "assistant", "message": message})
+        assert distill_log_line(raw) is None
+
+
+def test_non_dict_message_reachable_end_to_end_via_server_logs():
+    """The crashing `data` value round-trips through real server storage
+    untouched (it is a valid str), so a worker POSTing this one line would have
+    wedged the default logs view for any client that fetches it. Proves the bug
+    is reachable end-to-end, not just a unit-level curiosity."""
+    import pathlib
+    import tempfile
+
+    from fastapi.testclient import TestClient
+
+    from roost import server
+
+    token = "test-admin-token"
+    db = pathlib.Path(tempfile.mkdtemp()) / "r.db"
+    app = server.create_app(db_path=db, token=token, run_sweeper=False)
+    c = TestClient(app)
+    c.headers.update({"Authorization": f"Bearer {token}"})
+
+    tok = c.post("/enroll-tokens", json={"label": "t"}).json()["token"]
+    b = c.post("/enroll", json={"token": tok, "name": "w1", "capabilities": {}},
+               headers={"Authorization": ""}).json()
+    wid, cred = b["worker_id"], b["credential"]
+    wh = {"Authorization": f"Bearer {cred}"}
+    job = c.post("/jobs", json={"kind": "claude", "intent": "hi"}).json()
+    jid = job["id"]
+
+    adv = json.dumps({"type": "assistant", "message": "hello there"})
+    r = c.post(f"/workers/{wid}/jobs/{jid}/logs", headers=wh,
+               json={"stream": "stdout", "data": adv})
+    assert r.status_code == 200, r.text
+
+    payload = c.get(f"/jobs/{jid}/logs").json()
+    stored = [lg for lg in payload["logs"] if lg.get("stream") != "event"]
+    assert stored, "expected the stdout log line to be stored"
+    for lg in stored:
+        # Mirrors roost/cli.py logs()/_stream(): the default (non-verbose) path.
+        assert distill_log_line(lg.get("data", "")) is None  # must NOT raise

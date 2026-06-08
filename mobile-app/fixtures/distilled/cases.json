@@ -75,6 +75,12 @@
       "distilled": "{\"not valid json"
     },
     {
+      "note": "assistant envelope with truthy non-dict message (string) -> suppressed (R111). A truthy non-dict `message` is not a valid stream-json shape; all 3 platforms suppress it (Python isinstance(msg, dict), iOS as? [String:Any]->nil, Android optJSONObject->null) rather than calling .get()/[] on a non-dict and crashing the default distilled view.",
+      "source": "synthesized",
+      "raw": "{\"type\": \"assistant\", \"message\": \"hello there\"}",
+      "distilled": null
+    },
+    {
       "note": "tool_result with list content -> truncated result marker",
       "source": "synthesized",
       "raw": "{\"type\": \"user\", \"message\": {\"content\": [{\"type\": \"tool_result\", \"is_error\": false, \"content\": [{\"type\": \"text\", \"text\": \"file contents here\\nsecond line\"}]}]}}",
