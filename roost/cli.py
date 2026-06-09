@@ -456,6 +456,10 @@ def cli(ctx: click.Context, url: Optional[str], token: Optional[str]) -> None:
               help="SQLite path (default: ~/.roost/roost.db)")
 @click.option("--token", "serve_token", default=None,
               help="Required bearer token (default: env ROOST_TOKEN; empty disables auth)")
+@click.option("--insecure", is_flag=True, default=False,
+              help="Explicitly allow serving with NO auth token on a non-loopback "
+                   "host (otherwise the server refuses to start). Equivalent to "
+                   "ROOST_INSECURE_NO_AUTH=1. Loopback binds never need this.")
 @click.option("--provision-auth/--no-provision-auth", default=True, show_default=True,
               help="On enroll, install Claude Code on the worker and provision auth "
                    "by copying this host's credentials (v1 default).")
@@ -472,7 +476,7 @@ def cli(ctx: click.Context, url: Optional[str], token: Optional[str]) -> None:
                    "never affects job state. Unset = no notifications. "
                    "Default: env ROOST_NOTIFY_URL.")
 def serve(host: str, port: int, db_path: Optional[str], serve_token: Optional[str],
-          provision_auth: bool, publish_domain: Optional[str],
+          insecure: bool, provision_auth: bool, publish_domain: Optional[str],
           notify_url: Optional[str]) -> None:
     """Run the control plane."""
     from . import server as _server
@@ -482,7 +486,7 @@ def serve(host: str, port: int, db_path: Optional[str], serve_token: Optional[st
     if not token:
         click.echo("[roost] WARNING: starting with no auth token; "
                    "anyone who can reach this port can submit jobs.", err=True)
-    _server.run(host=host, port=port, db_path=db, token=token,
+    _server.run(host=host, port=port, db_path=db, token=token, insecure=insecure,
                 provision_claude_auth=provision_auth, publish_domain=publish_domain,
                 notify_url=notify_url)
 

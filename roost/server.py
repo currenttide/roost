@@ -4212,11 +4212,16 @@ def run(
 ) -> None:
     import uvicorn
 
-    # [C2] Refuse to serve unauthenticated on a non-loopback bind. With no shared
-    # token, every endpoint is wide open; on a reachable interface that exposes the
-    # whole fleet (and copy-creds onboarding) to the LAN/internet. Require either a
-    # token or an explicit opt-in.
+    # [C2]/[R114] Refuse to serve unauthenticated on a non-loopback bind. With no
+    # shared token, authenticate() returns kind "none" and require_worker/
+    # require_matching_worker pass ANY request — on a reachable interface that
+    # opens the whole worker plane (poll/heartbeat/events/results, plus copy-creds
+    # onboarding) to the LAN/internet. This is the seam where the bind host is
+    # actually known (create_app never sees it), so the guard lives here. Require
+    # either a token or an explicit opt-in: `--insecure` / insecure=True, or
+    # ROOST_INSECURE_NO_AUTH=1 in the environment (literal "1" only).
     effective_token = token if token is not None else os.environ.get("ROOST_TOKEN", "")
+    insecure = insecure or os.environ.get("ROOST_INSECURE_NO_AUTH", "") == "1"
     if not effective_token and host not in _LOOPBACK_HOSTS:
         if not insecure:
             raise SystemExit(
@@ -4224,12 +4229,17 @@ def run(
                 f"non-loopback host ({host!r}) would run the control plane "
                 f"UNAUTHENTICATED and reachable off-box. Set a token "
                 f"(ROOST_TOKEN=… or --token) — or, only if you truly intend an "
-                f"open server on a trusted network, pass --insecure / insecure=True."
+                f"open server on a trusted network, pass --insecure / set "
+                f"ROOST_INSECURE_NO_AUTH=1."
             )
         print(
+            f"[roost] {'!' * 72}\n"
             f"[roost] WARNING: running UNAUTHENTICATED on {host}:{port} "
-            f"(--insecure). Every endpoint is open to anything that can reach "
-            f"this interface.",
+            f"(--insecure / ROOST_INSECURE_NO_AUTH=1).\n"
+            f"[roost] Every endpoint — including the worker plane and creds "
+            f"provisioning — is open\n"
+            f"[roost] to anything that can reach this interface.\n"
+            f"[roost] {'!' * 72}",
             flush=True,
         )
     elif not effective_token:

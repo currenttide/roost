@@ -1462,6 +1462,64 @@ def test_run_refuses_unauthenticated_non_loopback(monkeypatch):
         server.run(host="0.0.0.0", token="", insecure=True, provision_claude_auth=False)
 
 
+class _Served(Exception):
+    """Sentinel raised by the fake uvicorn so run() never binds a socket."""
+
+
+def _patch_serving(monkeypatch):
+    """Stub create_app + uvicorn so server.run() raising _Served == 'it started'."""
+    import sys
+    import types
+    import roost.server as _srv
+    monkeypatch.setattr(_srv, "create_app", lambda **kw: object())
+    fake_uvicorn = types.ModuleType("uvicorn")
+    fake_uvicorn.run = lambda *a, **k: (_ for _ in ()).throw(_Served())
+    monkeypatch.setitem(sys.modules, "uvicorn", fake_uvicorn)
+
+
+def test_run_env_var_opts_into_unauthenticated_non_loopback(monkeypatch, capsys):
+    """[R114] ROOST_INSECURE_NO_AUTH=1 (literal) is an explicit opt-in equivalent
+    to --insecure, and the opt-in prints an unmissable startup warning."""
+    monkeypatch.delenv("ROOST_TOKEN", raising=False)
+    _patch_serving(monkeypatch)
+    monkeypatch.setenv("ROOST_INSECURE_NO_AUTH", "1")
+    with pytest.raises(_Served):
+        server.run(host="0.0.0.0", token="", provision_claude_auth=False)
+    out = capsys.readouterr().out
+    assert "UNAUTHENTICATED" in out
+    assert "ROOST_INSECURE_NO_AUTH" in out
+
+
+def test_run_env_var_opt_in_requires_literal_one(monkeypatch):
+    """[R114] Only the literal '1' opts in — 'true'/'0'/garbage still refuse."""
+    monkeypatch.delenv("ROOST_TOKEN", raising=False)
+    _patch_serving(monkeypatch)
+    for val in ("0", "true", "yes", ""):
+        monkeypatch.setenv("ROOST_INSECURE_NO_AUTH", val)
+        with pytest.raises(SystemExit):
+            server.run(host="0.0.0.0", token="", provision_claude_auth=False)
+
+
+def test_run_loopback_no_token_still_serves(monkeypatch, capsys):
+    """[R114] Zero-config loopback dev keeps working: no token + loopback bind
+    starts (with a warning), no opt-in needed."""
+    monkeypatch.delenv("ROOST_TOKEN", raising=False)
+    monkeypatch.delenv("ROOST_INSECURE_NO_AUTH", raising=False)
+    _patch_serving(monkeypatch)
+    for host in ("127.0.0.1", "localhost", "::1"):
+        with pytest.raises(_Served):
+            server.run(host=host, token="", provision_claude_auth=False)
+    assert "NO shared token on loopback" in capsys.readouterr().out
+
+
+def test_run_with_token_serves_on_any_host(monkeypatch):
+    """[R114] A configured token disarms the guard entirely."""
+    monkeypatch.delenv("ROOST_INSECURE_NO_AUTH", raising=False)
+    _patch_serving(monkeypatch)
+    with pytest.raises(_Served):
+        server.run(host="0.0.0.0", token="sekrit", provision_claude_auth=False)
+
+
 def test_job_health_does_not_flag_stuck_during_verify_or_heal():
     # A job in verify/self-heal is legitimately quiet on its own activity line.
     j = {"state": "running", "idle_sec": 999, "last_activity": "🔎 verifying result"}
