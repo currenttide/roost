@@ -523,15 +523,15 @@ Pixel_8 AVD) — all UI evidence paths proven (R50 iOS sim / R74 Android emulato
 R84 XCUITest headless / R73 mac build). Order: R119 first (it re-bases the whole
 mac-app surface), then R120; R121–R123 parallel-safe (different surfaces); R124 last.
 
-### R119. Verify + merge the mac-app multi-window redesign (branch `mac-app-redesign`) — `open` `human-promoted` `feature`
+### R119. Verify + merge the mac-app multi-window redesign (branch `mac-app-redesign`) — `done` *(2026-06-09, PR #132 — built clean on Swift 6.2.3 first try, zero fix commits; Linux 123 + Mac-node 123 tests green; render capped: node is headless, R120 adds the harness)* `human-promoted` `feature`
 Surface: mac-app/feature. fb6b95a (pushed) restructures the app ground-up (WindowKind registry, console PTY ownership fix, DesignSystem declutter); the commit honestly states "Not yet compiled on macOS". RoostKit untouched per the commit message — verify.
 Done-when: branch rebased on master if needed; Linux RoostKit `swift test` green; Mac-node (`mac-mini-m4`) `swift build` + `swift test` green via a roost job; render evidence per the evidence table (headless RenderShots pattern if R120 lands first, else capped honestly); judge reviews the full diff; PR from the branch merged (squash); pytest green (server untouched).
 
-### R120. Commit the headless SwiftUI render harness as a supported mac-app test utility — `open` `human-promoted`
+### R120. Commit the headless SwiftUI render harness as a supported mac-app test utility — `in-progress` *(dispatched 2026-06-09)* `human-promoted`
 Surface: mac-app/tests. Promotes the standing Proposed item (the product call is now made by the user's mac focus): RenderShots.swift + a 1-line App.swift hook gated on `ROOST_RENDER_DIR`, rendering real views with live `GET /derived` data via `NSHostingView.cacheDisplay` — the only screenshot path on the TCC-less Mac worker.
 Done-when: harness committed + documented (mac-app/README: how to run it via a roost job); produces PNGs of ≥3 key views on mac-mini-m4 as blob artifacts linked in the PR; future mac-app PRs can cite it as render evidence; Linux swift test still green; pytest green.
 
-### R121. Phones: fleet/workers screen (both platforms) — `open` `human-promoted` `feature`
+### R121. Phones: fleet/workers screen (both platforms) — `in-progress` *(dispatched 2026-06-09)* `human-promoted` `feature`
 Surface: mobile/feature. Top remaining UAT gap: no workers/GPU view on the phones — an operator can't answer "is my fleet up" from the couch. Server `GET /workers` exists; verify the mobile token scope reaches it (if not, that's an additive scope decision documented in API.md).
 Done-when: API.md gains the workers surface (additive) + golden fixtures via record_fixtures.py; iOS + Android Fleet screens (name/status/caps/load/last-seen, offline pill consistent with R75's staleness pattern) following the established screen/sheet patterns; pure logic Linux-tested on both harnesses; emulator + sim screenshots per the proven paths; pytest green.
 
@@ -539,7 +539,7 @@ Done-when: API.md gains the workers surface (additive) + golden fixtures via rec
 Surface: mobile/UX. UAT P3 carryover, now cheap: R107's distilled SPEC + fixtures exist; failure results on the phones still show raw JSON walls.
 Done-when: failure-result rendering on both platforms reuses the distilled transform/truncation rules (SPEC.md cross-ref; new golden cases only if a new SPEC branch is exercised — values-only additive regen); Linux-harness tests on both platforms; screenshots per evidence paths; pytest green.
 
-### R123. Android: keyboard occludes Publish/Dispatch/Pair CTAs — `open` `human-promoted`
+### R123. Android: keyboard occludes Publish/Dispatch/Pair CTAs — `in-progress` *(dispatched 2026-06-09)* `human-promoted`
 Surface: mobile/Android/UX. UAT P3: the IME pushes the primary CTA off-screen on the three input-heavy sheets (R74 fixed the inset root cause for the TopAppBar; the IME case remains).
 Done-when: imePadding/scroll behavior fixed app-wide (the three known sheets + audit siblings); Linux-testable state logic asserted where any exists; emulator screenshots keyboard-up per the R74 path; pytest green.
 
@@ -738,4 +738,5 @@ first iteration on that ratchet measures and records it here (no code changes).
 - **Remaining UAT P3/UX (design/cosmetic, mostly needs-mac or cross-surface)**: no workers/GPU screen on phones; failed-agent rows render raw JSON on phones; publish-slug-silently-normalized notice; Android keyboard occludes Publish/Dispatch/Pair CTAs; Mac single-instance guard; Mac Info.plist 0.1.0-vs-0.2.0; version-string staleness signal (expose build sha); iOS verified-state lingering text; untrusted-worker silent-failure submit-time warning; panel/notify polish (node-name tooltips, verdict in notify payload, health banner counting operator's own benign nonzero exits). `blob DELETE 403 for own blob` → SECURITY-SESSION (excluded).
 - **[HUMAN/OPS — out of loop scope] Fleet worker-build rollout across 16 heterogeneous nodes** — UAT P1 ops: workers run stale Jun-05/06 builds (no `roost --version` = pre-R42), lacking R43 cred auto-refresh (creds re-expire ~8h → agent jobs 401 until a worker restart), R24/25/26/30/31, R38 input delivery, R41, R72. DURABLE FIX = update the roost package on all 16 nodes + restart (DEPLOY.md rollout across pis/jetsons/cloud/mac/wsl/docker) — needs explicit human go-ahead on approach (rolling, per-node verify). The live CP itself is now redeployed from current master (2026-06-07, human commit 21a0e2f); this is the worker tier.
 - ~~macOS CI job has never compiled the app~~ → PROMOTED as R92 (2026-06-07 evening cycle). The branch-protection half (required status checks on master) remains a HUMAN/GitHub-admin action — recommended once R92 makes the check meaningful.
+- **mac-app dead code from the R119 judge review (2026-06-09, non-blocking):** `WindowManager.isWorkspaceOrFleetKey` unused + misnamed (checks workspace|runDetail, not fleet); `Run.metaLine(workerName:)` unreferenced; pre-existing placeholder `Text("RECENT RUNS HERE")` in MainWindowView.swift (present on master before the redesign too). Fold into a mac-app polish item (R124 candidate).
 - **Fleet ops (human — NOT loop work), from the 2026-06-07 sweep:** (a) live CP container (`docker-ec7c1cae…`) runs roost 0.1.0 (installed Jun 5) — rebuild from master to unbreak `backup`/`schedule`/`/metrics`/one-shot publish against the live fleet; (b) oracle is unhealthy for agent jobs — Claude cred 401 + a broken SessionStart Node hook; (c) mac-mini-m4's `~/roost-r50` clone is a stale single-branch checkout (origin lacks a master ref) — re-clone or fix the remote; (d) consider granting Screen Recording TCC on the Mac for real-window capture.

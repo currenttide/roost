@@ -3012,3 +3012,28 @@ Entries are written by the loop; humans read, never need to edit.
   so a "state your model ID at the top" instruction gets clipped — have the judge
   state the model ID in its final verdict block instead.
 - Models: orchestrator claude-opus-4-8[1m]; implementers opus; judges sonnet
+
+## 2026-06-09 ~23:32 UTC — R119: mac-app multi-window redesign verified + merged
+- Verdict: shipped
+- Branch/PR: mac-app-redesign (fb6b95a → dc2379e after two rebases) / https://github.com/currenttide/roost/pull/132 (merged 5f2aeb0)
+- What changed: the ground-up multi-window redesign (WindowKind registry, console
+  PTY ownership fix, DesignSystem declutter) — 16 files, +1016/−644, mac-app/ only
+  (scope verified: diff outside mac-app/ empty; RoostKit zero-line diff).
+- Evidence:
+  - Linux RoostKit `swift test` (Swift 6.0.3, /tmp/swift-toolchain) → 123 tests,
+    0 failures (green at both rebase points)
+  - mac-mini-m4 via `roost exec` (macOS 26.5, Xcode 26.2, Swift 6.2.3): fresh
+    shallow clone, `swift build` → Build complete! (13.09s); `swift test` → 123
+    tests, 0 failures. ZERO fix commits needed — the "Not yet compiled on macOS"
+    commit built clean first try.
+  - `python -m pytest -q` → 1214 passed (server untouched)
+  - Render evidence capped honestly: node is headless (0 displays, screencapture
+    fails); RenderShots harness lands with R120.
+- Judge: approve ×3 rounds (full-diff review, local re-runs each round). Judge
+  never emitted the model-ID block despite escalating demands — model ID captured
+  from CLI modelUsage metadata instead: claude-sonnet-4-6 (disclosed in PR).
+- Models: implementer opus / judge sonnet (metadata-verified)
+- Notes: non-blocking judge findings filed to Proposed (dead code:
+  isWorkspaceOrFleetKey, Run.metaLine; pre-existing RECENT RUNS placeholder).
+  Next iteration dispatched: R120 + R121 + R123 (R122 deferred one iteration to
+  avoid Android-file overlap with R121/R123).
