@@ -120,15 +120,17 @@ enum RenderShots {
         let hosting = NSHostingView(rootView: root)
         hosting.frame = NSRect(x: 0, y: 0, width: w, height: h)
         // A real (off-screen) window so layout, ScrollView content, Tables,
-        // Menus and symbols all materialize the way they do on screen.
+        // Menus and symbols all materialize the way they do on screen. Titled
+        // (not borderless): NavigationSplitView only populates its sidebar
+        // column inside a normal titled window.
         let window = NSWindow(
             contentRect: hosting.frame,
-            styleMask: [.borderless], backing: .buffered, defer: false)
+            styleMask: [.titled, .resizable], backing: .buffered, defer: false)
         window.contentView = hosting
         window.orderBack(nil)          // realized but never shown to a user
         window.displayIfNeeded()
         // Let layout + .task/.onAppear loads (pane fetches, log streams) settle.
-        pump(until: { false }, seconds: 1.0)
+        pump(until: { false }, seconds: 1.5)
         hosting.layoutSubtreeIfNeeded()
         window.displayIfNeeded()
         guard let rep = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) else {
