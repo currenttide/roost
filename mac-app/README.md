@@ -79,3 +79,42 @@ before claiming the app compiles.** Two ways, either suffices:
 
 Until one of those is green, a mac-app change is at most
 "compiles on Linux (RoostKit only), needs-mac-verify" — never "the app builds".
+
+## Render evidence (headless screenshots on the fleet's Mac node)
+
+The fleet's Mac node is headless: a launchd session with **zero displays** and
+no Screen Recording / Automation TCC permissions (ungrantable
+non-interactively), so `screencapture` and UI scripting both fail there. The
+supported way to produce **visual** evidence for mac-app PRs is the render
+harness (`Sources/RoostMac/RenderShots.swift`): when the app binary is
+launched with `ROOST_RENDER_DIR` set it skips the normal app, pulls one live
+`GET /derived` snapshot from the control plane, and renders the real SwiftUI
+windows — popover, Workspace, the four Fleet panes, run detail, onboarding,
+settings — to PNGs off-screen via `NSHostingView.cacheDisplay`. Real views,
+real fleet data, no display or TCC grant needed.
+
+Known headless limits (0-display, not app bugs): the Console terminal is a raw
+PTY-backed NSView that only draws on a real screen; the Settings grouped
+`Form` hangs under off-screen hosting (the driver's watchdog contains it); and
+the Workspace window's `NavigationSplitView` sidebar column renders blank —
+its content (goal box + run rows) is covered by the popover shot, and the
+detail pane renders fully.
+
+Run it via a roost job from anywhere:
+
+```bash
+# render on the fleet's Mac node and stage the PNGs as blobs
+roost exec mac-mini-m4 'git clone --depth 1 -b <branch> \
+    https://github.com/currenttide/roost.git /tmp/r120 && \
+    /tmp/r120/mac-app/scripts/render_shots.sh /tmp/r120-shots --stage'
+
+# each printed "blob <id> <name> <size>" is then downloadable from anywhere:
+curl -H "Authorization: Bearer $ROOST_TOKEN" "$ROOST_URL/blobs/<id>" -o view.png
+```
+
+Or locally on any Mac: `./scripts/render_shots.sh [out-dir] [--stage]`. The
+driver renders each view in its own process (`ROOST_RENDER_ONLY`) under a
+watchdog so one hung view (historically the Settings `Form` under headless
+hosting) can't sink the run, and fails unless at least 3 views rendered.
+PRs that change view code should attach these PNGs (or their blob ids) as
+render evidence.
