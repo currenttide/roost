@@ -42,7 +42,8 @@ enrolled.
 ## Control-plane configuration reference
 
 Everything the control plane reads from the environment, with its default and effect.
-All are **optional** except `ROOST_TOKEN` (and even that only warns when unset). Each is
+All are **optional** except `ROOST_TOKEN` (unset is only allowed on a loopback bind, or
+with an explicit `ROOST_INSECURE_NO_AUTH=1` / `--insecure` opt-in — see its row). Each is
 read once at `roost serve` startup, so change one → recreate the CP container (the
 `docker compose … up -d` above) for it to take effect. The Docker deploy passes the
 optional toggles through `docker/stack.yml` (export the matching variable before
@@ -51,7 +52,8 @@ in-depth recipe behind a row, follow its link.
 
 | Env var | Default | Effect when set |
 |---------|---------|-----------------|
-| `ROOST_TOKEN` | _(empty → no auth; logs a warning)_ | Shared admin bearer token. Also accepted via `--token`. See the auth notes in [`README.md`](../README.md). |
+| `ROOST_TOKEN` | _(empty → no auth)_ | Shared admin bearer token. Also accepted via `--token`. With no token every plane — admin, worker (poll/heartbeat/results), creds provisioning — accepts any request, so **no-auth is only allowed on a loopback host** (`127.0.0.1`/`localhost`/`::1`; logs a warning). On any other bind `roost serve` **refuses to start** unless you explicitly opt in (next row). See the auth notes in [`README.md`](../README.md). |
+| `ROOST_INSECURE_NO_AUTH` | _(unset → guarded; only the literal `1` opts in)_ | Explicit opt-in to run **unauthenticated on a non-loopback bind** (equivalent to `roost serve --insecure`). Startup prints an unmissable warning banner. Only for fully trusted, isolated networks — anyone who can reach the port can lease/steal jobs, corrupt results, and pull provisioned credentials. |
 | `ROOST_DB` | `~/.roost/roost.db` | SQLite path for all fleet state. `--db` overrides it; the Docker deploy sets `--db /data/roost.db` and host-mounts it via `ROOST_DATA_DIR`. |
 | `ROOST_PUBLISH_DOMAIN` | _(unset → LAN-only)_ | Public domain for published sites (e.g. `roost.pub`); turns on the host router + public-edge guard. `--publish-domain` overrides. → [Public publishing edge](#public-publishing-edge-roostpub) |
 | `ROOST_NOTIFY_URL` | _(unset → no notifications)_ | ntfy.sh topic / UnifiedPush webhook the CP fire-and-forget POSTs on every terminal job. `--notify-url` overrides. → [Mobile push notifications](#mobile-push-notifications-opt-in) |

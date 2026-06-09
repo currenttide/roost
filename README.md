@@ -402,8 +402,9 @@ Roost handles credentials and runs untrusted-ish work across machines, so the de
 strict:
 
 - **The control plane requires a shared admin token.** It **refuses to bind to a
-  non-loopback address without one** — you'd have to pass an explicit `--insecure` flag to
-  run an open server, and it warns loudly if you do.
+  non-loopback address without one** — you'd have to pass an explicit `--insecure` flag
+  (or set `ROOST_INSECURE_NO_AUTH=1`) to run an open server, and it warns loudly if you
+  do. Loopback (`127.0.0.1`) dev runs stay zero-config.
 - **Worker job env is sanitized.** A job can't set proxy or credential-redirect variables
   (`*_PROXY`, `ANTHROPIC_*`, `CLAUDE_CODE_*`, `NODE_OPTIONS`, `LD_*`, …) that could
   exfiltrate the operator's token or inject code.

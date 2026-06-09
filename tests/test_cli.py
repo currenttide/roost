@@ -2946,3 +2946,29 @@ def test_stream_http_error_status_raises_before_iterating(monkeypatch):
         roost_cli._stream("http://cp", "tok", "ghost")
     assert "stream failed: HTTP 404" in ei.value.message
     assert "job not found" in ei.value.message
+
+
+# ---------- `roost serve --insecure` wiring (R114) ----------
+
+
+def test_serve_passes_insecure_flag_to_server_run(monkeypatch):
+    """[R114] The CLI exposes --insecure and forwards it to server.run() so the
+    non-loopback no-auth refusal can actually be opted out of from `roost serve`."""
+    from roost import server as _server
+
+    seen = {}
+
+    def fake_run(**kw):
+        seen.update(kw)
+
+    monkeypatch.setattr(_server, "run", fake_run)
+    monkeypatch.delenv("ROOST_TOKEN", raising=False)
+
+    res = CliRunner().invoke(roost_cli.cli, ["serve", "--insecure"])
+    assert res.exit_code == 0, res.output
+    assert seen["insecure"] is True
+
+    seen.clear()
+    res = CliRunner().invoke(roost_cli.cli, ["serve"])
+    assert res.exit_code == 0, res.output
+    assert seen["insecure"] is False
