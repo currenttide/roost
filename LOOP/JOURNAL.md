@@ -2907,3 +2907,108 @@ Entries are written by the loop; humans read, never need to edit.
 - Housekeeping: LOOP/repro-a1-hunt10.py deleted (R100 promoted both confirmed
   findings into tests/test_schedules.py; 7 hypotheses cleared inline).
 - Models: orchestrator claude-opus-4-8[1m]
+
+## 2026-06-09 ~23:20 UTC — R114: auth-disabled CP loud guard
+- Verdict: shipped
+- Branch/PR: loop/r114-auth-disabled-guard / https://github.com/currenttide/roost/pull/128 (merged f2eed4b)
+- What changed: non-loopback `roost serve` without a token now REFUSES to start;
+  explicit opt-in via `ROOST_INSECURE_NO_AUTH=1` (literal-"1") or a new real
+  `--insecure` flag, with an unmissable `!!!` startup banner. Seam = `server.run()`
+  (the only place the bind host is known) — `create_app`/TestClient/loopback
+  zero-config untouched. DEPLOY.md env rows + README bullet. Finding: a partial
+  guard already existed but its refusal message referenced a `--insecure` flag
+  that `roost serve` never exposed.
+- Evidence:
+  - `python -m pytest -q` → 1209 passed (post-rebase; +5 new tests)
+  - live smoke (scratch CP): 0.0.0.0:8791 no token → exit 1 REFUSING;
+    env opt-in and --insecure → start + banner + /readyz ok; 127.0.0.1 → unchanged
+- Judge: approve (3 rounds — rounds 2-3 only because `claude -p` print mode drops
+  the requested first-message model-ID block; each round independently re-ran
+  pytest + smoke)
+- Models: implementer opus / judge sonnet (alias-verified claude-sonnet-4-6)
+- Notes: security-adjacent, explicitly human-directed this session; flagged in PR.
+
+## 2026-06-09 ~23:20 UTC — R115: sweep-phase failure signal
+- Verdict: shipped
+- Branch/PR: loop/r115-sweeper-failure-signal / https://github.com/currenttide/roost/pull/129 (merged cff5c5e)
+- What changed: `_note_sweep_failure(phase, exc, context)` — counts into
+  `_SWEEP_FAILURES`, dedupes logs (immediate on first/changed error, once per 60s
+  for identical repeats with suppressed count) — wired into all 7 periodic phases
+  (sweep / schedule_tick / schedule_enqueue / narrate / log_prune / blob_prune /
+  notify). `/metrics` gains `roost_sweep_failures_total{phase=...}` (R35 style,
+  stable zero label set, no deps). Finding: the swallows live in `_sweep_loop`
+  (~4115), NOT at ~2258 (that site re-raises correctly — R12 class); all 12
+  rollback-then-reraise guards verified untouched.
+- Evidence: `python -m pytest -q` → 1212 passed (+3 incl. injected persistent
+  `_sweep()` failure proving deduped log + counter + survival ≥3 iterations +
+  sibling phases still beating)
+- Judge: approve r1
+- Models: implementer opus / judge sonnet
+
+## 2026-06-09 ~23:20 UTC — R116: bounded assignment scan
+- Verdict: shipped
+- Branch/PR: loop/r116-bounded-assignment-scan / https://github.com/currenttide/roost/pull/130 (merged 80bbbaf)
+- What changed: seek-paginated batches (`ASSIGN_SCAN_BATCH=200`, ORDER BY
+  created_at ASC, id ASC — the old visit order; id only resolves previously-
+  unspecified ties); next batch fetched only while every earlier row was skipped →
+  same winner for ANY queue size; common poll materializes one batch instead of
+  fetchall(queue). The item's order-by-override-key suggestion was REJECTED with
+  rationale (it reorders decline-requeued jobs → changes the winner); pagination
+  survives the naive-LIMIT killer (first window 100% ghost-pinned) — proven by test.
+- Evidence:
+  - `python -m pytest -q` → 1214 passed (+2; placement/decline/grace untouched)
+  - live smoke: real uvicorn scratch CP :8797, batch forced to 3, 8 jobs through
+    real poll+event routes → all assigned FIFO, queue drained, SMOKE OK
+- Judge: approve r1 (verified inner loop byte-identical + termination; re-ran gate)
+- Models: implementer opus / judge sonnet
+- Notes: residual documented in code+PR — worst case stays O(queue) when nothing
+  early is takeable (required for unchanged semantics; bound is on per-batch
+  materialization and the common case).
+
+## 2026-06-09 ~22:51 UTC — R117: steward timeout/failure structured signal
+- Verdict: shipped
+- Branch/PR: loop/r117-steward-signal / https://github.com/currenttide/roost/pull/126 (merged 515ac52)
+- What changed: `_steward_attempt` returns (text, outcome, detail) with labels
+  ok|no-binary|spawn-failure|timeout|bad-output; `_note_steward_outcome` emits one
+  loud STEWARD_AGENT_FAILED log per occurrence (R41 precedent) + consecutive-failure
+  counter reset on success; heartbeat capabilities advertise steward_failures +
+  steward_last_error ONLY when >0 (additive, placement unaffected). Caller contract
+  preserved — `_run_steward_agent` still Optional[str]; heuristic fallbacks untouched.
+- Evidence: `python -m pytest -q` → 1200 passed (+10: every outcome path, counter,
+  log content, heartbeat absent/present/clears, e2e fallback-unchanged through
+  _judge_capacity and _diagnose_failure)
+- Judge: approve (2 identical runs — first run's model-ID block was tail-clipped;
+  re-ran for a complete record, disclosed in PR)
+- Models: implementer opus / judge sonnet (claude-sonnet-4-6)
+- Notes: design choice — no-binary COUNTS toward steward_failures (truthful for a
+  claude-less node; follow-up candidate if operators find it noisy). Caller-level
+  capacity-parse failures stay on the pre-existing unparseable log path (uncounted)
+  to honor "fallback unchanged".
+
+## 2026-06-09 ~22:53 UTC — R118: recovery-path tests
+- Verdict: shipped
+- Branch/PR: loop/r118-recovery-tests / https://github.com/currenttide/roost/pull/127 (merged 672f2b8)
+- What changed: tests/test_recovery.py (4 tests, 353 lines, ZERO production
+  changes): CP-restart-over-same-DB sweeps a stale lease with exact R19/R52
+  accounting (decline refunds, expiry doesn't; decliner set + creds survive
+  restart; second expiry → failed/lease_expired); control test proves restart
+  alone never disturbs a live lease; 8 simultaneous polls (ASGITransport+gather,
+  no sleeps) → exactly one 200, attempt incremented once, bookkeeping consistent;
+  repeated-rounds variant.
+- Evidence: `python -m pytest -q` → 1204 passed post-rebase-on-R117; repetition
+  loop ×7 then ×5 post-rebase, all green; tmp_path-scoped (xdist-safe, R45)
+- Judge: approve r1, model claude-sonnet-4-6 — re-ran suite + repetition loop,
+  mutation-probed 3 plausible regressions (all caught by the assertions)
+- Notes: ZERO real bugs found — the lease/restart machinery behaves as documented.
+  The strongest possible outcome for the review's two "untested critical paths."
+
+## 2026-06-09 — Iteration summary (human-directed review fixes)
+- All five 2026-06-09 review findings shipped same-day: PRs #126-#130, suite
+  1190 → 1214, every PR judge-approved (sonnet) + auto-merged. R119 (mac-app
+  redesign verify+merge, first item of the mac/mobile focus) dispatched and
+  in flight at journal time.
+- Process learning for future judge runs: `claude -p` print mode (a) ignores a
+  long prompt passed as argv — pipe via stdin; (b) only prints the FINAL message,
+  so a "state your model ID at the top" instruction gets clipped — have the judge
+  state the model ID in its final verdict block instead.
+- Models: orchestrator claude-opus-4-8[1m]; implementers opus; judges sonnet
