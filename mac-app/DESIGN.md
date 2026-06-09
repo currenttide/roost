@@ -614,6 +614,41 @@ Console and have Claude explain the fleet — no terminal setup, ever.*
 
 ---
 
+## 16. Multi-window redesign (addendum)
+
+> The single 6-tab window became a small set of independent, state-preserving
+> windows a heavy multi-monitor user can spread out — without losing the
+> menu-bar glance.
+
+The original §2.4 described one main window with a sidebar `switch`. That model
+forced every surface through one window and, worse, destroyed the Console's PTY
+whenever you navigated away (the detail subtree unmounted the terminal). The app
+now uses a **window registry** (`WindowManager`, keyed by `WindowKind`):
+
+- **Workspace** (`⌘O`/`⌘1`, Dock click) — Runs master/detail. Per-window
+  selection lives in `WorkspaceModel`, not on the shared `AppModel`.
+- **Console** (`⌘T`/`⌘2`) — its own window whose `contentView` is the raw,
+  app-owned `LocalProcessTerminalView`. It is **never** wrapped in
+  `NSViewRepresentable`, so navigation and hide/show can't tear down the live
+  Claude session. Closing the window hides it (PTY keeps running); Restart is
+  explicit (`terminate()` + rebuild); the PTY is killed only on app quit.
+- **Fleet** (`⌘3`) — Transfers · Publish · Schedules · Workers behind one
+  segmented header (`FleetWindowModel`). Workers is demoted here.
+- **Run detail** — any run opens in its own cascaded window ("Open in New
+  Window" / ⌥-click). The registry owns its `RunDetailModel` so the SSE stream
+  keeps flowing while the window is hidden behind another monitor's window.
+
+Cross-cutting rules: each window is a distinct `NSHostingController` with its own
+per-window `@Observable` model injected alongside the shared `AppModel`; poll
+cadence (§5) keys off *any* window being visible (not just the old single main
+window); `runDetail` is the one archetype that truly closes (and stops its
+stream), the rest hide and are reused. The menu-bar popover (§2.2) slimmed to an
+ambient glance — verdict, goal box, a few active run cards, and footer links to
+the windows. The calm visual language (one status dot per row, three type sizes,
+cards over dense rows, narration on hover) lives in `Views/DesignSystem.swift`.
+
+---
+
 *Designed against the live API of `roost/server.py` (v0.2.0): `/derived`, `/jobs`,
 `/jobs/{id}/stream` (SSE), `/jobs/{id}/tree`, `/workers`, `/workers/prune`, `/healthz`,
 and (new in §14) `/blobs`.*

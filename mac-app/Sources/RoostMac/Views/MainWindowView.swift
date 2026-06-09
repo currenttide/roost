@@ -2,97 +2,93 @@
 import RoostKit
 import SwiftUI
 
-/// The expandable window (DESIGN.md §2.4): same components as the popover
-/// with more room. Sidebar: Runs · Workers · Console · Transfers.
-struct MainWindowView: View {
-    @Environment(AppModel.self) private var model
+// MARK: - Workspace window (Runs)
+
+/// The home window: a calm master/detail over runs (redesign §Architecture).
+/// Selection lives in the per-window `WorkspaceModel`, so multiple windows on
+/// multiple monitors don't fight over one global selection.
+struct WorkspaceWindowView: View {
+    @Environment(WorkspaceModel.self) private var ws
 
     var body: some View {
-        @Bindable var model = model
-        @Bindable var transfers = model.transfers
         NavigationSplitView {
-            List(MainSection.allCases, selection: $model.mainSection) { item in
-                Label(item.rawValue, systemImage: item.icon)
-                    .badge(item == .transfers ? model.transfers.activeCount : 0)
-                    .tag(item)
-            }
-            .navigationSplitViewColumnWidth(min: 150, ideal: 170)
+            RunsSidebar()
+                .navigationSplitViewColumnWidth(min: 280, ideal: 340, max: 480)
         } detail: {
-            switch model.mainSection {
-            case .runs: RunsPane()
-            case .workers: WorkersPane()
-            case .console: ConsolePane()
-            case .transfers: TransfersPane()
-            case .publish: PublishPane()
-            case .schedules: SchedulesPane()
+            detail
+        }
+    }
+
+    @ViewBuilder
+    private var detail: some View {
+        if let runID = ws.selectedRunID {
+            NavigationStack {
+                ScrollView { RunDetailView(runID: runID, compact: false) }
+                    .navigationDestination(for: String.self) { childID in
+                        ScrollView { RunDetailView(runID: childID, compact: false) }
+                    }
             }
+            .id(runID)  // fresh stream per selection
+        } else {
+            ContentUnavailableView(
+                "Select a run", systemImage: "play.circle",
+                description: Text("Pick a run to see its status, logs, and result.\nTip: ⌥-click or right-click a run to open it in its own window."))
         }
-        .sheet(item: $transfers.pendingSend) { pending in
-            SendFileSheet(pending: pending)
-        }
-        .onAppear { model.store.uiVisible = true }
     }
 }
 
-// MARK: - Runs
-
-private struct RunsPane: View {
+/// Goal box + segmented filter + a grouped, selectable list of runs.
+private struct RunsSidebar: View {
     @Environment(AppModel.self) private var model
-    @State private var search = ""
-    @State private var stateFilter = "all"
+    @Environment(WorkspaceModel.self) private var ws
 
-    private var filtered: [Run] {
-        var runs = (model.store.snapshot?.runs ?? [])
-            .sorted { ($0.createdAt ?? 0) > ($1.createdAt ?? 0) }
-        if stateFilter != "all" {
-            runs = runs.filter { $0.state == stateFilter }
-        }
-        if !search.isEmpty {
-            runs = runs.filter {
-                $0.goal.localizedCaseInsensitiveContains(search)
-                    || $0.id.localizedCaseInsensitiveContains(search)
-            }
-        }
-        return runs
-    }
+    private var active: [Run] { model.store.activeRuns }
+    private var recent: [Run] { model.store.recentRuns }
+    private var failed: [Run] { recent.filter { $0.state == "failed" } }
 
     var body: some View {
-        @Bindable var model = model
-        HSplitView {
-            VStack(spacing: 0) {
+        @Bindable var ws = ws
+        VStack(spacing: 0) {
+            VStack(spacing: 10) {
                 GoalBoxView()
-                    .padding(10)
-                Divider()
-                HStack(spacing: 6) {
-                    Image(systemName: "magnifyingglass")
-                        .foregroundStyle(.secondary)
-                    TextField("Filter runs", text: $search)
-                        .textFieldStyle(.plain)
-                    Picker("", selection: $stateFilter) {
-                        Text("All").tag("all")
-                        ForEach(["queued", "running", "succeeded", "failed", "cancelled"],
-                                id: \.self) {
-                            Text($0.capitalized).tag($0)
+                Picker("", selection: $ws.stateFilter) {
+                    Text("All").tag("all")
+                    Text("Active").tag("active")
+                    Text("Failed").tag("failed")
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+            }
+            .padding(12)
+            Divider()
+            List(selection: $ws.selectedRunID) {
+                if ws.stateFilter != "failed", !active.isEmpty {
+                    Section("Active") { rows(active) }
+                }
+                if ws.stateFilter != "active" {
+                    let rows = ws.stateFilter == "failed" ? failed : recent
+                    if !rows.isEmpty {
+                        Section(ws.stateFilter == "failed" ? "Failed" : "Recent") {
+                            self.rows(rows)
                         }
                     }
-                    .pickerStyle(.menu)
-                    .fixedSize()
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                Divider()
-                List(filtered, selection: $model.selectedRunID) { run in
-                    RunRowView(run: run,
-                               workerName: model.store.worker(id: run.worker)?.name)
-                        .tag(run.id)
-                }
-                .listStyle(.inset)
-                loadMore
             }
-            .frame(minWidth: 300, idealWidth: 360)
+            .listStyle(.inset)
+            loadMore
+        }
+    }
 
-            detail
-                .frame(minWidth: 380, maxWidth: .infinity, maxHeight: .infinity)
+    @ViewBuilder
+    private func rows(_ runs: [Run]) -> some View {
+        ForEach(runs) { run in
+            RunRowView(run: run, workerName: model.store.worker(id: run.worker)?.name)
+                .tag(run.id)
+                .contextMenu {
+                    Button("Open in New Window") {
+                        model.openRun(run.id, inNewWindow: true)
+                    }
+                }
         }
     }
 
@@ -106,33 +102,52 @@ private struct RunsPane: View {
             }
             .buttonStyle(.link)
             .font(.caption)
-            .padding(6)
-        }
-    }
-
-    @ViewBuilder
-    private var detail: some View {
-        if let runID = model.selectedRunID {
-            NavigationStack {
-                ScrollView {
-                    RunDetailView(runID: runID, compact: false)
-                }
-                .navigationDestination(for: String.self) { childID in
-                    ScrollView { RunDetailView(runID: childID, compact: false) }
-                }
-            }
-            .id(runID)  // fresh stream per selection
-        } else {
-            ContentUnavailableView(
-                "Select a run", systemImage: "play.circle",
-                description: Text("Pick a run to see its phases, logs, and result."))
+            .padding(8)
         }
     }
 }
 
-// MARK: - Workers
+// MARK: - Fleet window (Transfers · Publish · Schedules · Workers)
 
-private struct WorkersPane: View {
+/// The secondary tooling, gathered into one window with a calm segmented
+/// header. Workers is demoted here (redesign decision); the rest stay
+/// first-class for users who live in them.
+struct FleetWindowView: View {
+    @Environment(AppModel.self) private var model
+    @Environment(FleetWindowModel.self) private var fleet
+
+    var body: some View {
+        @Bindable var fleet = fleet
+        @Bindable var transfers = model.transfers
+        VStack(spacing: 0) {
+            Picker("", selection: $fleet.section) {
+                ForEach(FleetSection.allCases) { section in
+                    Label(section.rawValue, systemImage: section.icon).tag(section)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .padding(10)
+            Divider()
+            Group {
+                switch fleet.section {
+                case .transfers: TransfersPane()
+                case .publish: PublishPane()
+                case .schedules: SchedulesPane()
+                case .workers: WorkersPane()
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .sheet(item: $transfers.pendingSend) { pending in
+            SendFileSheet(pending: pending)
+        }
+    }
+}
+
+// MARK: - Workers (demoted into the Fleet window)
+
+struct WorkersPane: View {
     @Environment(AppModel.self) private var model
     @State private var selection: Worker.ID?
     @State private var confirmPrune = false
@@ -178,32 +193,32 @@ private struct WorkersPane: View {
 
     private var workersTable: some View {
         Table(model.store.workers, selection: $selection) {
-                TableColumn("") { worker in
-                    StatusDot(color: worker.statusColor,
-                              label: worker.status.rawValue,
-                              filled: worker.status != .offline)
-                }
-                .width(16)
-                TableColumn("Name") { worker in
-                    Text(worker.name)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .workerDropTarget(worker, model: model)
-                }
-                TableColumn("Status") { worker in
-                    Text(worker.statusLine).foregroundStyle(.secondary)
-                }
-                TableColumn("Capabilities") { worker in
-                    Text(worker.headline).foregroundStyle(.secondary)
-                }
-                TableColumn("Load") { worker in
-                    Text("\(worker.running)/\(worker.capacity)")
-                }
-                .width(50)
-                TableColumn("Last seen") { worker in
-                    Text(Format.timeAgo(worker.lastSeen)).foregroundStyle(.secondary)
-                }
-                .width(80)
+            TableColumn("") { worker in
+                StatusDot(color: worker.statusColor,
+                          label: worker.status.rawValue,
+                          filled: worker.status != .offline)
             }
+            .width(16)
+            TableColumn("Name") { worker in
+                Text(worker.name)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .workerDropTarget(worker, model: model)
+            }
+            TableColumn("Status") { worker in
+                Text(worker.statusLine).foregroundStyle(.secondary)
+            }
+            TableColumn("Capabilities") { worker in
+                Text(worker.headline).foregroundStyle(.secondary)
+            }
+            TableColumn("Load") { worker in
+                Text("\(worker.running)/\(worker.capacity)")
+            }
+            .width(50)
+            TableColumn("Last seen") { worker in
+                Text(Format.timeAgo(worker.lastSeen)).foregroundStyle(.secondary)
+            }
+            .width(80)
+        }
     }
 
     @ViewBuilder

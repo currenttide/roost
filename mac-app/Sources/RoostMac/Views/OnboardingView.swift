@@ -215,7 +215,9 @@ struct OnboardingView: View {
     }
 
     private func closeWindow() {
-        NSApp.keyWindow?.close()
+        // Route through the registry rather than guessing the key window —
+        // multiple windows may be open behind onboarding (redesign).
+        model.dismissOnboarding()
     }
 }
 #endif

@@ -162,16 +162,33 @@ final class RunDetailModel {
 
 // MARK: - view
 
+/// Run detail (redesign §Decluttered job display): lead with the status, one
+/// clean meta row, logs collapsed behind a disclosure. The model is either
+/// self-owned (popover / inline selection) or injected by a detached window.
 struct RunDetailView: View {
     @Environment(AppModel.self) private var model
-    @State private var detail: RunDetailModel?
+    @State private var ownedModel: RunDetailModel?
     @State private var confirmCancel = false
     @State private var actionError: String?
     @State private var showSend = false
+    @State private var showLogs: Bool
 
     let runID: String
-    /// true in the popover (tighter spacing), false in the main window.
+    /// true in the popover (tighter spacing), false in windows.
     var compact = false
+    /// When set, the model is owned externally (a detached window) and this view
+    /// neither starts nor stops it.
+    var injectedModel: RunDetailModel?
+
+    init(runID: String, compact: Bool = false, injectedModel: RunDetailModel? = nil) {
+        self.runID = runID
+        self.compact = compact
+        self.injectedModel = injectedModel
+        // Detached log windows lead with logs expanded; inline/popover collapse.
+        _showLogs = State(initialValue: injectedModel != nil)
+    }
+
+    private var detail: RunDetailModel? { injectedModel ?? ownedModel }
 
     var body: some View {
         Group {
@@ -182,63 +199,72 @@ struct RunDetailView: View {
             }
         }
         .onAppear {
-            if detail == nil {
+            if injectedModel == nil, ownedModel == nil {
                 let d = RunDetailModel(runID: runID, store: model.store)
                 d.start()
                 Task { await d.loadSelfJob() }
-                detail = d
+                ownedModel = d
             }
         }
         .onDisappear {
-            detail?.stop()
-            detail = nil
+            if injectedModel == nil {
+                ownedModel?.stop()
+                ownedModel = nil
+            }
         }
     }
 
     @ViewBuilder
     private func content(_ detail: RunDetailModel) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 14) {
             if let run = detail.run {
-                header(run)
-                PhaseRailView(run: run)
-                if run.isActive, let narration = run.narration, !narration.isEmpty {
+                statusHeader(run)
+                if run.isTerminal {
+                    outcome(run, detail: detail)
+                } else if let narration = run.narration, !narration.isEmpty {
                     Text("“\(narration)”")
                         .font(.callout.italic())
                         .foregroundStyle(.secondary)
                 }
-                if run.isTerminal {
-                    outcome(run, detail: detail)
-                }
+                PhaseRailView(run: run)
             }
-            logSection(detail)
+            logsDisclosure(detail)
             if !detail.tree.isEmpty {
                 treeSection(detail)
             }
             if let run = detail.run {
-                bottomBar(run)
+                bottomBar(run, detail: detail)
             }
         }
-        .padding(compact ? 12 : 16)
-        .frame(minWidth: compact ? 336 : 480, alignment: .topLeading)
-        .navigationTitle(detail.run?.goal ?? runID)
+        .padding(compact ? 12 : 18)
+        .frame(minWidth: compact ? 336 : 460, alignment: .topLeading)
+        .navigationTitle(detail.run?.displayGoal ?? runID)
     }
 
-    // MARK: header
+    // MARK: header — lead with the answer
 
-    private func header(_ run: Run) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(run.displayGoal.isEmpty ? run.id : run.displayGoal)
-                .font(compact ? .headline : .title3.weight(.semibold))
-                .lineLimit(2)
-            HStack(spacing: 4) {
-                Text(headerMeta(run))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+    private func statusHeader(_ run: Run) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                StatusDot(color: run.statusColor, label: run.health.status,
+                          filled: run.health.status != "cancelled")
+                Text(run.statusWord)
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(run.statusColor)
+                if let pill = run.attention { StatusPill(text: pill) }
+                Spacer()
             }
+            Text(run.displayGoal.isEmpty ? run.id : run.displayGoal)
+                .font(compact ? .headline : .title2.weight(.semibold))
+                .lineLimit(3)
+            Text(metaRow(run))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
             if run.isActive, let progress = run.progress {
                 HStack(spacing: 8) {
                     ProgressView(value: Double(progress), total: 100)
-                    Text("\(progress)%").font(.caption).foregroundStyle(.secondary)
+                    Text("\(progress)%").font(.caption).foregroundStyle(.secondary).monospacedDigit()
                     if let eta = Format.eta(run.etaSec) {
                         Text(eta).font(.caption).foregroundStyle(.secondary)
                     }
@@ -247,79 +273,74 @@ struct RunDetailView: View {
         }
     }
 
-    private func headerMeta(_ run: Run) -> String {
+    private func metaRow(_ run: Run) -> String {
         var parts: [String] = []
         if let name = model.store.worker(id: run.worker)?.name {
-            parts.append(run.isTerminal ? "ran on \(name)" : "running on \(name)")
+            parts.append(run.isTerminal ? "ran on \(name)" : "on \(name)")
         }
-        parts.append(Format.elapsed(run))
-        if run.health.status == "stuck?" {
-            parts.append("⚠ may be stuck — \(run.health.reason)")
-        }
-        if let queued = run.queuedSec, run.state == "queued" {
-            parts.append("queued \(Format.duration(queued))")
-            if run.capableWorkers == 0 {
-                parts.append("⚠ no capable worker online")
-            }
-        }
+        parts.append(run.isTerminal ? "took \(Format.elapsed(run))" : Format.elapsed(run))
+        let cost = Format.costLine(run.cost)
+        if !cost.isEmpty { parts.append(cost) }
         return parts.joined(separator: " · ")
     }
 
-    // MARK: outcome (§2.3 terminal states)
+    // MARK: outcome (§2.3 terminal states) — the evidence, status is in the header
 
     @ViewBuilder
     private func outcome(_ run: Run, detail: RunDetailModel) -> some View {
-        let (title, color): (String, Color) = switch run.health.status {
-        case "verified": ("✓ Verified", .green)
-        case "unverified": ("✓ Succeeded (not verified)", .orange)
-        case "done": ("✓ Succeeded", .green)
-        case "cancelled": ("⊘ Cancelled", .secondary)
-        default: ("✗ Failed", .red)
-        }
+        let failed = run.state == "failed"
+        let diagnosis = run.diagnosis ?? ""
+        let error = detail.done?.error ?? run.result ?? ""
+        let evidence = run.evidence ?? ""
+        let output = detail.done?.output ?? run.result ?? ""
+        let hasContent = failed
+            ? (!diagnosis.isEmpty || !error.isEmpty)
+            : (!evidence.isEmpty || !output.isEmpty)
 
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title).font(.headline).foregroundStyle(color)
-
-            if run.state == "failed" {
-                if let diagnosis = run.diagnosis, !diagnosis.isEmpty {
-                    Text(diagnosis).font(.callout.weight(.medium))
-                }
-                if let error = detail.done?.error ?? run.result, !error.isEmpty {
-                    Text(error)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                }
-            } else {
-                if let evidence = run.evidence, !evidence.isEmpty {
-                    Text(evidence)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                }
-                if let output = detail.done?.output ?? run.result, !output.isEmpty {
-                    Text(output)
-                        .font(.callout)
-                        .textSelection(.enabled)
-                        .lineLimit(compact ? 6 : nil)
+        if hasContent {
+            VStack(alignment: .leading, spacing: 6) {
+                if failed {
+                    if !diagnosis.isEmpty { Text(diagnosis).font(.callout.weight(.medium)) }
+                    if !error.isEmpty {
+                        Text(error).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                    }
+                } else {
+                    if !evidence.isEmpty {
+                        Text(evidence).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                    }
+                    if !output.isEmpty {
+                        Text(output).font(.callout).textSelection(.enabled)
+                            .lineLimit(compact ? 6 : nil)
+                    }
                 }
             }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(run.statusColor.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
         }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(color.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
     }
 
-    // MARK: logs
+    // MARK: logs — collapsed by default (the single biggest declutter)
+
+    private func logsDisclosure(_ detail: RunDetailModel) -> some View {
+        DisclosureGroup(isExpanded: $showLogs) {
+            logSection(detail)
+        } label: {
+            HStack(spacing: 8) {
+                SectionLabel("Logs")
+                streamBadge(detail.streamState)
+                Spacer()
+                Text("\(detail.visibleLogs.count) lines")
+                    .font(.caption).foregroundStyle(.tertiary)
+            }
+            .contentShape(Rectangle())
+        }
+    }
 
     private func logSection(_ detail: RunDetailModel) -> some View {
         @Bindable var detail = detail
         return VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text("LOGS")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.tertiary)
-                streamBadge(detail.streamState)
+            HStack(spacing: 10) {
                 Spacer()
                 if detail.eventCount > 0 {
                     Toggle("events (\(detail.eventCount))", isOn: $detail.showEvents)
@@ -331,9 +352,10 @@ struct RunDetailView: View {
                     .controlSize(.mini)
             }
             LogView(lines: detail.visibleLogs, follow: $detail.follow)
-                .frame(minHeight: compact ? 140 : 220,
+                .frame(minHeight: compact ? 140 : 240,
                        maxHeight: compact ? 200 : .infinity)
         }
+        .padding(.top, 4)
     }
 
     @ViewBuilder
@@ -381,9 +403,7 @@ struct RunDetailView: View {
             }
             .padding(.top, 4)
         } label: {
-            Text("PLAN — \(detail.tree.count) jobs")
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(.tertiary)
+            SectionLabel("Plan", trailing: "\(detail.tree.count) jobs")
         }
     }
 
@@ -399,16 +419,11 @@ struct RunDetailView: View {
     // MARK: actions
 
     @ViewBuilder
-    private func bottomBar(_ run: Run) -> some View {
+    private func bottomBar(_ run: Run, detail: RunDetailModel) -> some View {
         if let actionError {
             Text(actionError).font(.caption).foregroundStyle(.red)
         }
         HStack {
-            if !Format.costLine(run.cost).isEmpty {
-                Text(Format.costLine(run.cost))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
             Spacer()
             Button("Copy job id") {
                 NSPasteboard.general.clearContents()
@@ -421,7 +436,7 @@ struct RunDetailView: View {
                     .controlSize(.small)
                     .help("Send a follow-up message to this running job (R38)")
                     .sheet(isPresented: $showSend) {
-                        SendInputSheet(runID: run.id, spec: detail?.selfJob?.spec)
+                        SendInputSheet(runID: run.id, spec: detail.selfJob?.spec)
                     }
                 Button("Cancel Run…", role: .destructive) {
                     confirmCancel = true
@@ -433,7 +448,7 @@ struct RunDetailView: View {
                     Button("Cancel run + sub-jobs", role: .destructive) {
                         perform { try await model.store.cancelRun(id: run.id, tree: true) }
                     }
-                    if (detail?.tree.count ?? 0) > 1 {
+                    if detail.tree.count > 1 {
                         Button("This run only", role: .destructive) {
                             perform { try await model.store.cancelRun(id: run.id, tree: false) }
                         }
@@ -461,6 +476,24 @@ struct RunDetailView: View {
         actionError = nil
         Task { @MainActor in
             do { try await action() } catch { actionError = error.localizedDescription }
+        }
+    }
+}
+
+/// The root of a detached run-detail window: the registry owns the streaming
+/// model (so it keeps streaming while hidden behind another window) and injects
+/// it here. Child runs open their own self-owned detail views.
+struct DetachedRunDetailView: View {
+    @Environment(RunDetailModel.self) private var detail
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                RunDetailView(runID: detail.runID, compact: false, injectedModel: detail)
+            }
+            .navigationDestination(for: String.self) { childID in
+                ScrollView { RunDetailView(runID: childID, compact: false) }
+            }
         }
     }
 }

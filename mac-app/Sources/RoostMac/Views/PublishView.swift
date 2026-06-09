@@ -248,11 +248,8 @@ struct PublishPane: View {
     @ViewBuilder
     private func sitesSection(_ pub: PublishModel) -> some View {
         HStack {
-            Text("PUBLISHED ON THIS CONTROL PLANE")
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(.tertiary)
+            SectionLabel("Published on this control plane")
             if pub.loadingSites { ProgressView().controlSize(.mini) }
-            Spacer()
             Button("Refresh") { Task { await pub.refreshSites() } }
                 .buttonStyle(.link)
                 .font(.caption)
