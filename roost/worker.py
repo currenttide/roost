@@ -56,6 +56,17 @@ CAPACITY_AGENT_TIMEOUT = 30.0    # cap the steward capacity call (fail-safe to 1
 # still delays this job's terminal event (and its lease renews via the heartbeat, not
 # here), so keep it tight; fall back to the mechanical one-liner on timeout.
 DIAGNOSIS_AGENT_TIMEOUT = 20.0   # cap the failure-diagnosis call (fail-safe to mechanical)
+# [R117] Steward-call outcome labels: every `_run_steward_agent` attempt resolves to
+# exactly one of these, so a timeout / spawn failure / bad output is a distinguishable
+# outcome instead of a silent None. Non-ok outcomes increment the worker's consecutive
+# `steward_failures` counter, advertised in heartbeat capabilities (additive, absent
+# when healthy — the R41 `gpu_detection: "failed"` seam) so repeated steward failures
+# on a node are visible from the control plane as the flaky-host signal they are.
+STEWARD_OK = "ok"
+STEWARD_NO_BINARY = "no-binary"          # `claude` not on PATH
+STEWARD_SPAWN_FAILURE = "spawn-failure"  # subprocess exec/IO failed (perms, OS error)
+STEWARD_TIMEOUT = "timeout"              # exceeded timeout_s; process group killed
+STEWARD_BAD_OUTPUT = "bad-output"        # nonzero exit or empty stdout
 # [R72] Cap EACH container-teardown CLI (`docker kill` then `docker rm -f`) on a
 # job we're already killing. Much shorter than the 20s docker-info detection probe:
 # by teardown time the job is over and a wedged daemon won't recover within the
@@ -1176,6 +1187,11 @@ class Worker:
         self._capacity_task: Optional[asyncio.Task] = None  # in-flight bg judgment
         self._stop = asyncio.Event()
         self._heartbeat_failures = 0
+        # [R117] Consecutive steward-agent failures (capacity + diagnosis combined) and
+        # the last failure's outcome label. Reset on any successful steward call; when
+        # > 0 the pair rides in heartbeat capabilities (see _heartbeat_capabilities).
+        self._steward_failures = 0
+        self._steward_last_outcome = STEWARD_OK
         # job_id -> {"process", "is_docker", "cancelled"} for jobs executing now,
         # so a server-side cancel (delivered via the heartbeat response) can tear
         # them down — including the sibling docker container of a kind:docker job.
@@ -1342,6 +1358,20 @@ class Worker:
         await self._register_legacy()
         print(f"[roost] capabilities: {json.dumps(self.capabilities, sort_keys=True)}", flush=True)
 
+    def _heartbeat_capabilities(self) -> dict[str, Any]:
+        """Capabilities payload for one heartbeat POST: static caps + live load, plus
+        ([R117], additive — absent when healthy, mirroring R41's `gpu_detection`
+        seam) the consecutive steward-failure count and last failure label so the
+        control plane can surface a node whose steward agent keeps failing."""
+        caps: dict[str, Any] = {
+            **self.capabilities,
+            "load": load_snapshot(self._running, self._capacity),
+        }
+        if self._steward_failures:
+            caps["steward_failures"] = self._steward_failures
+            caps["steward_last_error"] = self._steward_last_outcome
+        return caps
+
     async def heartbeat_forever(self) -> None:
         while not self._stop.is_set():
             try:
@@ -1352,10 +1382,7 @@ class Worker:
                 # heartbeat immediately using the cached value (fail-safe 1 until the
                 # first judgment lands).
                 self._maybe_spawn_capacity_refresh()
-                caps_with_load = {
-                    **self.capabilities,
-                    "load": load_snapshot(self._running, self._capacity),
-                }
+                caps_with_load = self._heartbeat_capabilities()
                 r = await self.client.post(
                     f"/workers/{self.worker_id}/heartbeat",
                     json={"capabilities": caps_with_load},
@@ -1424,9 +1451,45 @@ class Worker:
         """Run a one-shot haiku steward agent (fresh context) and return its result
         text, or None if claude is absent / the call fails / times out / yields no
         result. Callers MUST fall back deterministically on None — the steward never
-        blocks the worker. Uses --output-format json (single JSON object on stdout)."""
+        blocks the worker. Uses --output-format json (single JSON object on stdout).
+
+        [R117] Every attempt resolves to a structured outcome (STEWARD_* label) via
+        _steward_attempt; failures are never silent — each is logged loudly and counted
+        in the consecutive `steward_failures` aggregate the heartbeat advertises."""
+        text, outcome, detail = await self._steward_attempt(prompt, timeout_s=timeout_s)
+        self._note_steward_outcome(label, outcome, detail)
+        return text
+
+    def _note_steward_outcome(self, label: str, outcome: str, detail: str) -> None:
+        """[R117] Record one steward attempt: success resets the consecutive-failure
+        counter; any failure increments it, remembers the outcome label, and emits one
+        loud structured log line per occurrence (the R41 GPU_DETECTION_FAILED
+        precedent). Purely observational — callers still get None and fall back to the
+        same deterministic heuristics as before."""
+        if outcome == STEWARD_OK:
+            self._steward_failures = 0
+            self._steward_last_outcome = STEWARD_OK
+            return
+        self._steward_failures += 1
+        self._steward_last_outcome = outcome
+        print(
+            f"[roost] STEWARD_AGENT_FAILED label={label} outcome={outcome} "
+            f"consecutive={self._steward_failures}"
+            + (f" detail={json.dumps(detail)}" if detail else "")
+            + " -- steward judgment unavailable; deterministic fallback in use. "
+            "Repeated failures are advertised as `steward_failures` in this "
+            "worker's heartbeat capabilities.",
+            flush=True,
+        )
+
+    async def _steward_attempt(
+        self, prompt: str, *, timeout_s: float,
+    ) -> tuple[Optional[str], str, str]:
+        """[R117] One steward subprocess attempt → (result_text, outcome, detail).
+        ``outcome`` is a STEWARD_* label; ``result_text`` is non-None iff the outcome
+        is STEWARD_OK. Never raises into the caller."""
         if shutil.which("claude") is None:
-            return None
+            return None, STEWARD_NO_BINARY, "claude not on PATH"
         argv = [
             "claude", "-p", prompt,
             "--model", steward.STEWARD_MODEL,
@@ -1445,8 +1508,8 @@ class Worker:
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                 start_new_session=True,
             )
-        except (FileNotFoundError, PermissionError, OSError):
-            return None
+        except (FileNotFoundError, PermissionError, OSError) as e:
+            return None, STEWARD_SPAWN_FAILURE, f"{type(e).__name__}: {e}"
         try:
             out, _err = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
         except asyncio.TimeoutError:
@@ -1458,22 +1521,23 @@ class Worker:
                 await proc.wait()
             except Exception:  # noqa: BLE001
                 pass
-            return None
-        except Exception:  # noqa: BLE001 — steward must never raise into the worker
-            return None
+            return None, STEWARD_TIMEOUT, f"timeout_s={timeout_s}"
+        except Exception as e:  # noqa: BLE001 — steward must never raise into the worker
+            return None, STEWARD_SPAWN_FAILURE, f"{type(e).__name__}: {e}"
         if proc.returncode != 0:
-            return None
+            return None, STEWARD_BAD_OUTPUT, f"exit_code={proc.returncode}"
         text = (out or b"").decode("utf-8", errors="replace").strip()
         if not text:
-            return None
+            return None, STEWARD_BAD_OUTPUT, "empty stdout"
         # `--output-format json` wraps the agent reply: {"type":"result","result": "..."}.
         try:
             obj = json.loads(text)
             if isinstance(obj, dict) and obj.get("result") is not None:
-                return str(obj["result"])
+                return str(obj["result"]), STEWARD_OK, ""
         except (json.JSONDecodeError, TypeError):
             pass
-        return text  # not the wrapper shape — let the caller parse the raw text
+        # Not the wrapper shape — let the caller parse the raw text.
+        return text, STEWARD_OK, ""
 
     async def _judge_capacity(self) -> int:
         """Ask the steward agent for this box's max concurrency, cache it, and return
