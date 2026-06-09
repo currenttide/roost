@@ -57,6 +57,13 @@ SWEEPER_INTERVAL = 5.0
 # How long a queued job will wait for a better-fit worker to poll before any
 # capable worker may take it (placement grace window, Decision V2-2/V2-4).
 PLACEMENT_GRACE = 3.0
+# [R116] Assignment-scan batch size: _try_assign_one walks the queued backlog
+# in bounded, seek-paginated batches (created_at, id ascending — today's visit
+# order) instead of materializing EVERY queued row per poll. The common poll
+# touches one batch; later batches are fetched only while earlier ones yield
+# nothing, so the full queue is still covered (identical winner + the
+# anti-starvation override still reaches old jobs beyond the first window).
+ASSIGN_SCAN_BATCH = 200
 # Bare-worker (kind: auto): a worker permanently skips a task it already declined (a
 # poor fit won't become a good one), so the task waits for a capable node. It's
 # escalated to failed only when every currently-online capable worker has declined
@@ -1537,62 +1544,92 @@ def _try_assign_one(db_path: Path, worker_id: str) -> Optional[dict]:
                 w["capabilities"]["load"]["capacity"] = w_cap
                 others.append(w)
 
-            rows = conn.execute(
-                "SELECT * FROM jobs WHERE state='queued' ORDER BY created_at ASC"
-            ).fetchall()
+            # [R116] Bounded scan: walk the queued backlog in seek-paginated
+            # batches of ASSIGN_SCAN_BATCH ordered by (created_at, id) — the
+            # same created_at-ascending visit order as the previous unbounded
+            # fetch (id only breaks created_at ties, which SQLite previously
+            # left unspecified). Because the next batch is fetched ONLY while
+            # every earlier row was skipped, the first job this loop would have
+            # chosen before is still the first job it chooses now — for any
+            # queue size, not just under the batch size — and the
+            # anti-starvation override still reaches an old job beyond the
+            # first window. The common poll fetches a single bounded batch
+            # instead of materializing every queued row; a full-queue walk
+            # happens only when nothing earlier is takeable (exactly the case
+            # the old code paid for on every poll).
             chosen = None
-            for row in rows:
-                requires = json.loads(row["requires"])
-                if not matches(me["capabilities"], requires):
-                    continue
-                spec = json.loads(row["spec"])
-                # Hard worker-pin (`target`): a job that names a target may be
-                # taken ONLY by the worker whose id == target, or whose name ==
-                # target while it is not offline. Every other worker skips it
-                # unconditionally (never falls through on placement-grace), so a
-                # pinned job stays queued until its target polls — and if the
-                # target doesn't exist / is offline, it simply waits.
-                target = spec.get("target")
-                if target is not None:
-                    is_target = me_row["id"] == target or (
-                        me_row["name"] == target and me_row["status"] != "offline"
-                    )
-                    if not is_target:
+            seek = None  # (created_at, id) cursor of the last row seen
+            while chosen is None:
+                if seek is None:
+                    rows = conn.execute(
+                        "SELECT * FROM jobs WHERE state='queued' "
+                        "ORDER BY created_at ASC, id ASC LIMIT ?",
+                        (ASSIGN_SCAN_BATCH,),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        "SELECT * FROM jobs WHERE state='queued' AND "
+                        "(created_at > ? OR (created_at = ? AND id > ?)) "
+                        "ORDER BY created_at ASC, id ASC LIMIT ?",
+                        (seek[0], seek[0], seek[1], ASSIGN_SCAN_BATCH),
+                    ).fetchall()
+                if not rows:
+                    break
+                seek = (rows[-1]["created_at"], rows[-1]["id"])
+                for row in rows:
+                    requires = json.loads(row["requires"])
+                    if not matches(me["capabilities"], requires):
                         continue
-                # Grace runs from the LAST decline-requeue when there is one
-                # (R19): a decline hands the job back for a fresh competitive
-                # placement round — without this, any job older than the grace
-                # window re-enters with anti-starvation pre-armed and the
-                # first poller takes it regardless of fit, forever.
-                waited = now - (row["requeued_at"] or row["created_at"] or now)
-                # bare-worker (kind: auto): never re-grab a task this worker already
-                # declined — a poor fit won't become a good one. The task waits for a
-                # capable node; it only fails once ALL capable nodes have declined.
-                decliners = _decliner_set(row["declined_by"])
-                if worker_id in decliners:
-                    continue
-                job = {"prefer": spec.get("prefer"), "requires": requires}
-                if waited >= PLACEMENT_GRACE:
-                    chosen = row  # don't starve: take it regardless of fit
-                    break
-                my_score = placement_score(me, job, now=now)
-                # Best competing fit among *capable* idle others. Decliners are
-                # NOT competitors (R19): they can never take this job, so
-                # deferring to one would deadlock the handoff until the grace
-                # window expires — among equals the handoff stays immediate.
-                best_other = max(
-                    (
-                        placement_score(w, job, now=now)
-                        for w in others
-                        if w["id"] not in decliners
-                        and matches(w["capabilities"], requires)
-                    ),
-                    default=float("-inf"),
-                )
-                if my_score >= best_other - 1e-9:
-                    chosen = row
-                    break
-                # else: a better-fit worker exists and is expected to poll; skip.
+                    spec = json.loads(row["spec"])
+                    # Hard worker-pin (`target`): a job that names a target may be
+                    # taken ONLY by the worker whose id == target, or whose name ==
+                    # target while it is not offline. Every other worker skips it
+                    # unconditionally (never falls through on placement-grace), so a
+                    # pinned job stays queued until its target polls — and if the
+                    # target doesn't exist / is offline, it simply waits.
+                    target = spec.get("target")
+                    if target is not None:
+                        is_target = me_row["id"] == target or (
+                            me_row["name"] == target and me_row["status"] != "offline"
+                        )
+                        if not is_target:
+                            continue
+                    # Grace runs from the LAST decline-requeue when there is one
+                    # (R19): a decline hands the job back for a fresh competitive
+                    # placement round — without this, any job older than the grace
+                    # window re-enters with anti-starvation pre-armed and the
+                    # first poller takes it regardless of fit, forever.
+                    waited = now - (row["requeued_at"] or row["created_at"] or now)
+                    # bare-worker (kind: auto): never re-grab a task this worker already
+                    # declined — a poor fit won't become a good one. The task waits for a
+                    # capable node; it only fails once ALL capable nodes have declined.
+                    decliners = _decliner_set(row["declined_by"])
+                    if worker_id in decliners:
+                        continue
+                    job = {"prefer": spec.get("prefer"), "requires": requires}
+                    if waited >= PLACEMENT_GRACE:
+                        chosen = row  # don't starve: take it regardless of fit
+                        break
+                    my_score = placement_score(me, job, now=now)
+                    # Best competing fit among *capable* idle others. Decliners are
+                    # NOT competitors (R19): they can never take this job, so
+                    # deferring to one would deadlock the handoff until the grace
+                    # window expires — among equals the handoff stays immediate.
+                    best_other = max(
+                        (
+                            placement_score(w, job, now=now)
+                            for w in others
+                            if w["id"] not in decliners
+                            and matches(w["capabilities"], requires)
+                        ),
+                        default=float("-inf"),
+                    )
+                    if my_score >= best_other - 1e-9:
+                        chosen = row
+                        break
+                    # else: a better-fit worker exists and is expected to poll; skip.
+                if len(rows) < ASSIGN_SCAN_BATCH:
+                    break  # queue exhausted; no further batches exist
             if chosen is None:
                 conn.execute("ROLLBACK")
                 return None
