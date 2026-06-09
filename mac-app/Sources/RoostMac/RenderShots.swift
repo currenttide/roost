@@ -117,20 +117,21 @@ enum RenderShots {
         let root = view()
             .frame(width: w, height: h)
             .background(Color(nsColor: .windowBackgroundColor))
-        let hosting = NSHostingView(rootView: root)
-        hosting.frame = NSRect(x: 0, y: 0, width: w, height: h)
-        // A real (off-screen) window so layout, ScrollView content, Tables,
-        // Menus and symbols all materialize the way they do on screen. Titled
-        // (not borderless): NavigationSplitView only populates its sidebar
-        // column inside a normal titled window.
-        let window = NSWindow(
-            contentRect: hosting.frame,
-            styleMask: [.titled, .resizable], backing: .buffered, defer: false)
-        window.contentView = hosting
+        // Host through NSHostingController in a real (off-screen) titled window
+        // — the exact hosting path WindowManager uses for the app's windows —
+        // so layout, ScrollView content, Tables, NavigationSplitView columns,
+        // Menus and symbols all materialize the way they do on screen.
+        let controller = NSHostingController(rootView: root)
+        let window = NSWindow(contentViewController: controller)
+        window.styleMask = [.titled, .resizable]
+        window.setContentSize(NSSize(width: w, height: h))
         window.orderBack(nil)          // realized but never shown to a user
         window.displayIfNeeded()
         // Let layout + .task/.onAppear loads (pane fetches, log streams) settle.
         pump(until: { false }, seconds: 1.5)
+        guard let hosting = window.contentView else {
+            log("FAILED to get contentView for \(name)"); return
+        }
         hosting.layoutSubtreeIfNeeded()
         window.displayIfNeeded()
         guard let rep = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) else {
