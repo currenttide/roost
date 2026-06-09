@@ -2885,3 +2885,25 @@ Entries are written by the loop; humans read, never need to edit.
 - WAKE: max-interval; repo changed (human commits/UAT) → drift sweep + hunt over
   the change; unchanged → no-op re-arm.
 - Models: orchestrator claude-opus-4-8[1m]
+
+## 2026-06-09 — R113: distilled fixture expansion (retroactive bookkeeping)
+- Verdict: shipped *(retro-journaled — the implementing session merged the PR but ended before bookkeeping)*
+- Branch/PR: loop/r113 / PR #124 (56f4e37, merged to master 2026-06-08)
+- What changed: cases.json expanded across SPEC branches + adversarial shapes; 3
+  cross-platform divergences found and fixed (outliers aligned to SPEC) per the PR.
+- Evidence: PR #124 merged; full-suite re-verified on master today (see next entry).
+- Models: per the PR (this entry is orchestrator bookkeeping only).
+
+## 2026-06-09 — Human-directed: production-review fixes (R114–R118) + mac/mobile focus plan (R119–R124)
+- The user reviewed the repo in-session and directed "fix all" on five findings →
+  R114–R118 promoted `human-promoted` (R114 is security-adjacent but explicitly
+  human-directed in-session; PRs must flag it). Dispatching per protocol: one
+  worktree agent for R114+R115+R116 sequentially (all server.py — same-file rule,
+  3 separate PRs), one for R117 (worker.py), one for R118 (tests-only). Judges
+  sonnet; auto-merge on approval.
+- The user further directed a mac-app + mobile-app feature focus → R119–R124
+  planned and ranked (R119 = verify+merge the pushed `mac-app-redesign` branch
+  fb6b95a on the Mac node first; it re-bases the mac surface).
+- Housekeeping: LOOP/repro-a1-hunt10.py deleted (R100 promoted both confirmed
+  findings into tests/test_schedules.py; 7 hypotheses cleared inline).
+- Models: orchestrator claude-opus-4-8[1m]

@@ -484,9 +484,71 @@ Done-when: publishBundle degrades across CP versions; new RoostKit methods + a P
 
 ## Human-directed continuation 2026-06-08 — harden the distilled cross-platform contract
 
-### R113. Expand distilled golden fixtures to cover SPEC branches + adversarial shapes; verify all 3 platforms agree — `open` `self-promoted` `feature`
+### R113. Expand distilled golden fixtures to cover SPEC branches + adversarial shapes; verify all 3 platforms agree — `done` *(2026-06-09 retro-bookkeeping: shipped 2026-06-08, PR #124 — 3 cross-platform divergences fixed; implementing session ended before journaling)* `self-promoted` `feature`
 Surface: cross-platform/robustness. R111 proved the 3 distilled implementations (Python `distill_log_line`, iOS `DistilledLine.from`, Android `DistilledLine.from`) CAN diverge on inputs the 17 golden fixtures (`mobile-app/fixtures/distilled/cases.json`) don't cover — the non-dict-`message` crash was Python-only and the fixtures missed it. Systematically expand the shared golden fixtures so EVERY SPEC.md branch + the adversarial shapes the hunt cleared (non-dict content blocks, tool_use missing name/input, tool_result number/null/odd-list, unknown top-level type, non-str text/hint coercion, falsy-vs-truthy message boundary, thinking/signature suppression, 72/200-char truncation boundaries, unicode/control chars, malformed/truncated JSON passthrough) are pinned as golden cases — then run the SAME expanded cases.json through all THREE fixture tests to prove they agree. Any divergence found = a real cross-platform bug → fix the outlier to match SPEC (repro-first if it's a crash).
 Done-when: cases.json expanded to cover the SPEC branches + the cleared-hypothesis adversarial shapes (document the coverage mapping: case → SPEC rule); all three fixture tests (pytest `tests/test_distilled.py`, iOS `swift test` via /tmp/swift-toolchain + Mac node, Android kotlinc+JUnit) load the expanded file and pass — i.e. all 3 platforms produce identical distilled output for every case; any divergence fixed (outlier → SPEC) with a repro if it's a crash; fixture-shape/drift guard green; pytest green. Cap render claims honestly; the fixture agreement across 3 harnesses IS the deliverable.
+
+## Human-directed 2026-06-09 — production-review fixes (in-session repo review)
+
+The user reviewed the repo with the orchestrator (2026-06-09) and directed: fix all
+five flagged findings. R114 is security-adjacent but EXPLICITLY human-directed in
+this session — the standing security-session split governs loop *self*-promotion,
+not direct human orders; the PR must still flag the security relevance.
+
+### R114. Auth-disabled CP silently accepts worker-plane requests — loud guard — `open` `human-promoted`
+Surface: backend/operability (security-adjacent, human-directed). server.py:~2920: when no shared token is configured (`principal.kind == "none"`), `require_worker`/`require_matching_worker` pass ANY request — an operator who forgets the token opens the worker plane (poll/heartbeat/events/results) to the LAN: job theft, result corruption. The code comment acknowledges the fallback; nothing warns the operator.
+Done-when: a CP started with auth disabled on a NON-loopback bind either refuses to start or requires an explicit opt-in (e.g. `ROOST_INSECURE_NO_AUTH=1`) — pick the seam where the bind host is actually known, justify; loopback/dev zero-config keeps working unchanged (quickstart + the entire TestClient suite stay green); an unmissable startup log line in the insecure-opt-in case; DEPLOY.md + the config reference document the rule; tests for guarded/opt-in/loopback paths; pytest green + live smoke (scratch CP).
+
+### R115. Sweeper exceptions swallowed — log + surface a failure counter — `open` `human-promoted`
+Surface: backend/operability. server.py:~2258: the sweeper's lease-expiry transaction (and sibling sweep phases) catch bare `Exception`, roll back, and continue silently — a persistent DB error means jobs stop being requeued with ZERO operator signal. (Distinct from the R12-cleared rollback-then-reraise guards — these swallow.)
+Done-when: every sweep-phase exception is logged with phase context (rate-limited/deduped so a persistent error doesn't flood); a sweeper-failure counter exposed on /metrics (additive, R35 hand-rolled style); a test injects a sweep-phase failure and asserts the log + counter + that the sweeper survives and later iterations still run; audit the other bare-`except` swallows in server.py's periodic paths (notify/prune/schedule tick) for the same treatment where cheap; pytest green.
+
+### R116. Assignment scan unbounded — LIMIT with provably-unchanged semantics — `open` `human-promoted`
+Surface: backend/robustness. server.py:~1525: `_try_assign_one` fetches ALL queued jobs and scores each against workers — every poll/assignment pass is O(queue), stacking poll latency and the sweep cadence on a large backlog.
+Done-when: the queued-jobs fetch is bounded (LIMIT whose ordering preserves today's priority/anti-starvation semantics — document why the same job wins for queues under the limit, and prove the anti-starvation override still fires for an old job that a naive LIMIT window would miss); existing placement/decline/grace tests untouched and green; a test with > LIMIT queued jobs proves continued progress (all eventually assigned); pytest green + live smoke.
+
+### R117. Steward timeout/failure invisible — structured signal — `open` `human-promoted`
+Surface: worker/operability. worker.py:1421-1476: `_run_steward_agent` returns `None` on timeout or failure; callers silently fall back to the heuristic. Repeated steward timeouts on a node are exactly the flaky-host signal an orchestrator should surface, and a diagnosis silently becomes "no diagnosis".
+Done-when: timeout / spawn-failure / bad-output are distinguishable outcomes (structured return or equivalent) with a loud worker log per occurrence; a visible aggregate signal (e.g. consecutive-failure count in the worker's advertised state/heartbeat or a worker event — pick the additive seam consistent with R41's `gpu_detection` precedent, justify); heuristic fallback behavior itself unchanged; tests for timeout vs missing-binary vs success; pytest green.
+
+### R118. Recovery-path tests: CP restart over stale leases + concurrent-assignment race — `open` `human-promoted`
+Surface: tests. The two most production-critical untested scenarios (review 2026-06-09): no test simulates a control-plane process restart finding stale leases in its DB; no test forces concurrent polls competing for one queued job.
+Done-when: (a) a test boots a CP app over a DB file, assigns + leases a job, tears the app down, advances past LEASE_TTL, boots a FRESH app instance over the SAME file, and proves the sweeper requeues (attempt accounting per R19 semantics); (b) a concurrency test fires N simultaneous polls at one queued job and proves exactly-one assignment with consistent bookkeeping (async gather against the real app, no sleeps-as-sync); tests-only PR (a real bug found = repro note for the next cycle — scope discipline); deterministic under repetition and xdist (R45 precedent); pytest green.
+
+## Human-directed 2026-06-09 — mac-app + mobile-app focus (R119–R124)
+
+User direction (2026-06-09): after R114–R118, feature focus shifts to the mac app
+and the mobile apps. The fleet has mac-mini-m4 (Xcode 26.2, iPhone 17 Pro sim,
+Pixel_8 AVD) — all UI evidence paths proven (R50 iOS sim / R74 Android emulator /
+R84 XCUITest headless / R73 mac build). Order: R119 first (it re-bases the whole
+mac-app surface), then R120; R121–R123 parallel-safe (different surfaces); R124 last.
+
+### R119. Verify + merge the mac-app multi-window redesign (branch `mac-app-redesign`) — `open` `human-promoted` `feature`
+Surface: mac-app/feature. fb6b95a (pushed) restructures the app ground-up (WindowKind registry, console PTY ownership fix, DesignSystem declutter); the commit honestly states "Not yet compiled on macOS". RoostKit untouched per the commit message — verify.
+Done-when: branch rebased on master if needed; Linux RoostKit `swift test` green; Mac-node (`mac-mini-m4`) `swift build` + `swift test` green via a roost job; render evidence per the evidence table (headless RenderShots pattern if R120 lands first, else capped honestly); judge reviews the full diff; PR from the branch merged (squash); pytest green (server untouched).
+
+### R120. Commit the headless SwiftUI render harness as a supported mac-app test utility — `open` `human-promoted`
+Surface: mac-app/tests. Promotes the standing Proposed item (the product call is now made by the user's mac focus): RenderShots.swift + a 1-line App.swift hook gated on `ROOST_RENDER_DIR`, rendering real views with live `GET /derived` data via `NSHostingView.cacheDisplay` — the only screenshot path on the TCC-less Mac worker.
+Done-when: harness committed + documented (mac-app/README: how to run it via a roost job); produces PNGs of ≥3 key views on mac-mini-m4 as blob artifacts linked in the PR; future mac-app PRs can cite it as render evidence; Linux swift test still green; pytest green.
+
+### R121. Phones: fleet/workers screen (both platforms) — `open` `human-promoted` `feature`
+Surface: mobile/feature. Top remaining UAT gap: no workers/GPU view on the phones — an operator can't answer "is my fleet up" from the couch. Server `GET /workers` exists; verify the mobile token scope reaches it (if not, that's an additive scope decision documented in API.md).
+Done-when: API.md gains the workers surface (additive) + golden fixtures via record_fixtures.py; iOS + Android Fleet screens (name/status/caps/load/last-seen, offline pill consistent with R75's staleness pattern) following the established screen/sheet patterns; pure logic Linux-tested on both harnesses; emulator + sim screenshots per the proven paths; pytest green.
+
+### R122. Phones: failed-agent rows render raw JSON → distilled failure rendering — `open` `human-promoted` `feature`
+Surface: mobile/UX. UAT P3 carryover, now cheap: R107's distilled SPEC + fixtures exist; failure results on the phones still show raw JSON walls.
+Done-when: failure-result rendering on both platforms reuses the distilled transform/truncation rules (SPEC.md cross-ref; new golden cases only if a new SPEC branch is exercised — values-only additive regen); Linux-harness tests on both platforms; screenshots per evidence paths; pytest green.
+
+### R123. Android: keyboard occludes Publish/Dispatch/Pair CTAs — `open` `human-promoted`
+Surface: mobile/Android/UX. UAT P3: the IME pushes the primary CTA off-screen on the three input-heavy sheets (R74 fixed the inset root cause for the TopAppBar; the IME case remains).
+Done-when: imePadding/scroll behavior fixed app-wide (the three known sheets + audit siblings); Linux-testable state logic asserted where any exists; emulator screenshots keyboard-up per the R74 path; pytest green.
+
+### R124. mac-app: schedule-create + single-instance guard + version single-sourcing — `open` `human-promoted` `feature`
+Surface: mac-app/feature. Bundle of the judge-sanctioned R62 deferral (schedule CREATE from the menu bar; list/toggle landed) + two UAT nits: a second app launch should focus the running instance, and Info.plist hardcodes 0.1.0 while the CP self-reports `__version__` (single-source per R32 precedent — pick the seam, justify).
+Done-when: create-schedule UI per existing sheet patterns with RoostKit logic Linux-tested; single-instance guard + version fix; Mac-node build + swift test green; render evidence per the R120 harness or capped honestly; pytest green.
+
+Device-only push transport (R55/R67 leftovers) stays capped — requires physical
+devices the fleet doesn't have; revisit if hardware appears.
 
 ## Replenishment 2026-06-08 — hunt fresh distilled code + drift sweep #111-121
 
