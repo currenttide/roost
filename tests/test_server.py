@@ -2819,3 +2819,113 @@ def test_prefix_lookup_stream_resolves_and_rejects(client: TestClient):
     # Too-short prefix -> 400 before streaming.
     r = client.get(f"/jobs/{job_id[:3]}/stream")
     assert r.status_code == 400, r.text
+
+
+# ---------- sweep-phase failure signal (R115) ----------
+
+
+def _reset_sweep_failure_state(monkeypatch):
+    """Fresh process-local failure state so tests don't see each other."""
+    monkeypatch.setattr(
+        server, "_SWEEP_FAILURES", {p: 0 for p in server._SWEEP_PHASES})
+    monkeypatch.setattr(server, "_SWEEP_FAILURE_LOG_STATE", {})
+
+
+def test_note_sweep_failure_logs_with_phase_and_dedups(monkeypatch, capsys):
+    """[R115] every failure is counted; an identical repeating error logs once
+    per window (not once per tick), a changed error logs immediately, and the
+    post-window summary carries the suppressed-repeat count."""
+    _reset_sweep_failure_state(monkeypatch)
+    err = sqlite3.OperationalError("database is locked")
+    server._note_sweep_failure("sweep", err)
+    server._note_sweep_failure("sweep", err)
+    server._note_sweep_failure("sweep", err)
+    assert server._SWEEP_FAILURES["sweep"] == 3
+    out = capsys.readouterr().out
+    assert "[roost] sweep error" in out
+    assert out.count("database is locked") == 1  # deduped inside the window
+
+    # A different error in the same phase logs immediately.
+    server._note_sweep_failure("sweep", RuntimeError("disk gone"))
+    assert "disk gone" in capsys.readouterr().out
+
+    # Same error again, suppressed twice, then the window elapses → one summary
+    # line including how many repeats were suppressed.
+    server._note_sweep_failure("sweep", RuntimeError("disk gone"))
+    server._note_sweep_failure("sweep", RuntimeError("disk gone"))
+    assert capsys.readouterr().out == ""  # both inside the window: quiet
+    server._SWEEP_FAILURE_LOG_STATE["sweep"][1] -= (
+        server._SWEEP_FAILURE_LOG_INTERVAL + 1)
+    server._note_sweep_failure("sweep", RuntimeError("disk gone"))
+    out = capsys.readouterr().out
+    assert "disk gone" in out
+    assert "repeated 2 more times" in out
+    # Phases are independent: a failure in one never silences another.
+    server._note_sweep_failure("log_prune", RuntimeError("disk gone"))
+    assert "[roost] log_prune error" in capsys.readouterr().out
+    assert server._SWEEP_FAILURES["sweep"] == 7
+    assert server._SWEEP_FAILURES["log_prune"] == 1
+
+
+def test_sweep_loop_survives_phase_failure_and_signals(monkeypatch, capsys, tmp_path):
+    """[R115] inject a persistent _sweep() failure: the loop logs it (deduped),
+    counts it, keeps running later iterations, and sibling phases (schedule
+    tick) still execute."""
+    import asyncio
+
+    _reset_sweep_failure_state(monkeypatch)
+    db = tmp_path / "r115.db"
+    server._init_db(db)
+    monkeypatch.setattr(server, "SWEEPER_INTERVAL", 0.01)
+    calls = {"n": 0}
+
+    def boom(db_path):
+        calls["n"] += 1
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(server, "_sweep", boom)
+    beats_before = server._PROCESS_COUNTERS["schedule_beats_total"]
+
+    async def drive():
+        task = asyncio.create_task(server._sweep_loop(db))
+        for _ in range(500):
+            await asyncio.sleep(0.01)
+            if calls["n"] >= 3:
+                break
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(drive())
+
+    assert calls["n"] >= 3, "sweeper must survive failures and keep iterating"
+    assert server._SWEEP_FAILURES["sweep"] == calls["n"]
+    # Sibling phase still ran every iteration despite the sweep failing.
+    assert server._PROCESS_COUNTERS["schedule_beats_total"] > beats_before
+    out = capsys.readouterr().out
+    assert "[roost] sweep error" in out and "database is locked" in out
+    assert out.count("database is locked") == 1  # rate-limited, not per-tick
+
+
+def test_metrics_exposes_sweep_failures_counter(client: TestClient, monkeypatch):
+    """[R115] /metrics exposes roost_sweep_failures_total with a stable phase
+    label set (zeros when clean) in the hand-rolled R35 style."""
+    _reset_sweep_failure_state(monkeypatch)
+    body = client.get("/metrics").text
+    metrics = _parse_prometheus(body)
+    samples = metrics["roost_sweep_failures_total"]["samples"]
+    assert metrics["roost_sweep_failures_total"]["type"] == "counter"
+    # All phases present as zero-valued series before any failure.
+    for phase in server._SWEEP_PHASES:
+        assert samples['{phase="%s"}' % phase] == 0
+
+    server._note_sweep_failure("sweep", RuntimeError("x"))
+    server._note_sweep_failure("sweep", RuntimeError("x"))
+    server._note_sweep_failure("notify", RuntimeError("y"))
+    samples = _parse_prometheus(
+        client.get("/metrics").text)["roost_sweep_failures_total"]["samples"]
+    assert samples['{phase="sweep"}'] == 2
+    assert samples['{phase="notify"}'] == 1
+    assert samples['{phase="blob_prune"}'] == 0

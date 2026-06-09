@@ -420,8 +420,8 @@ def _tick_schedules(db_path: Path) -> int:
                 new_job_id = job["id"]
                 launched += 1
             except Exception as e:  # noqa: BLE001 — never break the sweep loop
-                print(f"[roost] schedule {sched['id']} enqueue error: {e}",
-                      flush=True)
+                _note_sweep_failure(
+                    "schedule_enqueue", e, context=f"schedule {sched['id']}: ")
         with _connect(db_path) as conn:
             if new_job_id is not None:
                 conn.execute(
@@ -976,11 +976,9 @@ async def _post_notification(
                     flush=True,
                 )
     except Exception as e:  # noqa: BLE001 — intentional: notify must never escape
-        print(
-            f"[roost] notify: post to endpoint failed for job "
-            f"{body.get('job_id')}: {type(e).__name__}: {e}",
-            flush=True,
-        )
+        _note_sweep_failure(
+            "notify", e,
+            context=f"post to endpoint failed for job {body.get('job_id')}: ")
 
 
 def _derive_run(
@@ -2274,6 +2272,61 @@ _PROCESS_COUNTERS: dict[str, float] = {
     "schedule_beats_total": 0.0,  # sweep-loop schedule ticks since this process started
 }
 
+# [R115] Background-phase failure accounting. Every best-effort periodic path
+# (the _sweep_loop phases, the per-schedule enqueue, terminal-job notify)
+# reports its swallowed exceptions here, so a persistent DB error — e.g. the
+# lease-expiry transaction rolling back every sweep, meaning jobs silently stop
+# being requeued — is an operator-visible signal (log + /metrics counter)
+# instead of nothing. Process-local like schedule_beats_total (resets on CP
+# restart; the DB has no record of these).
+_SWEEP_PHASES = (
+    "sweep",             # _sweep(): stale workers, lease expiry/requeue, worker prune
+    "schedule_tick",     # _tick_schedules() as a whole
+    "schedule_enqueue",  # one schedule's job insert inside the tick
+    "narrate",           # _narrate_pass (only runs when ROOST_NARRATE=1)
+    "log_prune",         # _prune_logs retention pass
+    "blob_prune",        # expired staged-blob prune
+    "notify",            # fire-and-forget terminal-job notification POST
+)
+_SWEEP_FAILURES: dict[str, int] = {p: 0 for p in _SWEEP_PHASES}
+
+# Log dedup/rate-limit state: phase -> [signature, last_logged_at, suppressed].
+# A failure logs immediately the first time (or whenever the error changes);
+# the SAME error repeating logs at most once per _SWEEP_FAILURE_LOG_INTERVAL
+# (with a suppressed-repeat count) so a persistent error every 5s sweep tick
+# doesn't flood the log while still being unmissable.
+_SWEEP_FAILURE_LOG_STATE: dict[str, list] = {}
+_SWEEP_FAILURE_LOG_INTERVAL = 60.0
+
+
+def _note_sweep_failure(phase: str, exc: BaseException, context: str = "") -> None:
+    """Count + log a swallowed background-phase failure (see [R115] above).
+
+    Increments the per-phase counter exposed as roost_sweep_failures_total and
+    logs with phase context, deduped: an identical repeating error is summarized
+    at most once per _SWEEP_FAILURE_LOG_INTERVAL instead of once per tick."""
+    _SWEEP_FAILURES[phase] = _SWEEP_FAILURES.get(phase, 0) + 1
+    sig = f"{context}{type(exc).__name__}: {exc}"
+    now = time.time()
+    state = _SWEEP_FAILURE_LOG_STATE.get(phase)
+    if state is not None and state[0] == sig:
+        if now - state[1] < _SWEEP_FAILURE_LOG_INTERVAL:
+            state[2] += 1  # same error inside the window: count, stay quiet
+            return
+        suppressed = state[2]
+    else:
+        suppressed = 0  # first occurrence, or the error changed: log now
+    suffix = (
+        f" (repeated {suppressed} more times in the last "
+        f"{int(_SWEEP_FAILURE_LOG_INTERVAL)}s)" if suppressed else ""
+    )
+    print(
+        f"[roost] {phase} error (total {_SWEEP_FAILURES[phase]}): {sig}{suffix}",
+        flush=True,
+    )
+    _SWEEP_FAILURE_LOG_STATE[phase] = [sig, now, 0]
+
+
 # All job states we always emit a series for, so a scraper sees a stable set of
 # label values (0 when none) rather than series appearing/disappearing.
 _JOB_STATES = ("queued", "assigned", "running", "succeeded", "failed", "cancelled")
@@ -2348,6 +2401,14 @@ def _collect_metrics(db_path: Path) -> dict[str, Any]:
         "schedules_enabled": schedules_enabled,
         "lease_expirations_total": lease_expirations,
         "schedule_beats_total": int(_PROCESS_COUNTERS["schedule_beats_total"]),
+        # Stable label set: every known phase always gets a series (0 when
+        # clean), plus any future/unknown phase that recorded a failure so a
+        # count is never silently dropped.
+        "sweep_failures": {
+            p: int(_SWEEP_FAILURES.get(p, 0))
+            for p in (*_SWEEP_PHASES,
+                      *sorted(set(_SWEEP_FAILURES) - set(_SWEEP_PHASES)))
+        },
     }
 
 
@@ -2438,6 +2499,18 @@ def _render_metrics(m: dict[str, Any]) -> str:
         "Schedule sweep ticks since this process started (process-local; "
         "resets on control-plane restart).",
         [("", m["schedule_beats_total"])],
+    )
+    block(
+        "roost_sweep_failures_total",
+        "counter",
+        "Swallowed background-phase failures by phase (sweep / schedule_tick / "
+        "schedule_enqueue / narrate / log_prune / blob_prune / notify) since "
+        "this process started (process-local; resets on control-plane restart). "
+        "A growing 'sweep' value means leases are NOT being expired/requeued.",
+        [
+            (f'phase="{_escape_label_value(p)}"', v)
+            for p, v in m["sweep_failures"].items()
+        ],
     )
     return "\n".join(out) + "\n"
 
@@ -4064,21 +4137,21 @@ async def _sweep_loop(db_path: Path) -> None:
     while True:
         try:
             await asyncio.to_thread(_sweep, db_path)
-        except Exception as e:  # noqa: BLE001
-            print(f"[roost] sweeper error: {e}", flush=True)
+        except Exception as e:  # noqa: BLE001 — counted+logged, loop survives
+            _note_sweep_failure("sweep", e)
         # Schedule tick: enqueue jobs for due interval schedules (R8).
         try:
             await asyncio.to_thread(_tick_schedules, db_path)
             # Process-local beat counter for /metrics (resets on restart; the DB
             # has no monotonic tick record). One increment per sweep tick.
             _PROCESS_COUNTERS["schedule_beats_total"] += 1
-        except Exception as e:  # noqa: BLE001
-            print(f"[roost] schedule tick error: {e}", flush=True)
+        except Exception as e:  # noqa: BLE001 — counted+logged, loop survives
+            _note_sweep_failure("schedule_tick", e)
         if narrate:
             try:
                 await _narrate_pass(db_path, narrate_interval)
-            except Exception as e:  # noqa: BLE001
-                print(f"[roost] narration error: {e}", flush=True)
+            except Exception as e:  # noqa: BLE001 — counted+logged, loop survives
+                _note_sweep_failure("narrate", e)
         # Throttled, best-effort log retention (M1): never let a prune error
         # break the sweep loop.
         now = time.time()
@@ -4088,16 +4161,16 @@ async def _sweep_loop(db_path: Path) -> None:
                 await asyncio.to_thread(
                     _prune_logs, db_path, LOG_MAX_AGE_SEC, LOG_MAX_ROWS_PER_JOB
                 )
-            except Exception as e:  # noqa: BLE001
-                print(f"[roost] log prune error: {e}", flush=True)
+            except Exception as e:  # noqa: BLE001 — counted+logged, loop survives
+                _note_sweep_failure("log_prune", e)
             # Expired staged blobs ride the same throttle (file + row).
             try:
                 def _prune_blobs() -> None:
                     with _connect(db_path) as conn:
                         blobstore.prune_expired(db_path, conn)
                 await asyncio.to_thread(_prune_blobs)
-            except Exception as e:  # noqa: BLE001
-                print(f"[roost] blob prune error: {e}", flush=True)
+            except Exception as e:  # noqa: BLE001 — counted+logged, loop survives
+                _note_sweep_failure("blob_prune", e)
         try:
             await asyncio.sleep(SWEEPER_INTERVAL)
         except asyncio.CancelledError:
