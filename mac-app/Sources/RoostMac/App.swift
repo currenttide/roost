@@ -15,6 +15,7 @@ import AppKit
 @MainActor
 enum RoostMain {
     static func main() {
+        if RenderShots.runIfRequested() { return }  // headless render harness (R120)
         let app = NSApplication.shared
         let delegate = AppDelegate()
         app.delegate = delegate
