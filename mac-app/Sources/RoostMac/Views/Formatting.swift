@@ -84,6 +84,31 @@ extension Run {
         }
     }
 
+    /// Plain-language status word for the detail header (leads with the answer).
+    var statusWord: String {
+        switch health.status {
+        case "verified": return "Verified"
+        case "done": return "Succeeded"
+        case "unverified": return "Succeeded"
+        case "failed": return "Failed"
+        case "cancelled": return "Cancelled"
+        case "running", "stuck?": return "Running"
+        case "queued", "waiting", "unplaceable": return "Queued"
+        case "verifying": return "Verifying"
+        case "self-healing": return "Self-healing"
+        default: return phase.capitalized
+        }
+    }
+
+    /// A single short attention pill, or nil when the run needs no callout.
+    var attention: String? {
+        if health.status == "stuck?" { return "may be stuck" }
+        if state == "queued", (capableWorkers ?? 1) == 0 { return "no capable worker online" }
+        if health.status == "unplaceable" { return "unplaceable" }
+        if health.status == "unverified" { return "not verified" }
+        return nil
+    }
+
     /// One compact metadata line for list rows.
     func metaLine(workerName: String?) -> String {
         var parts: [String] = [phase]

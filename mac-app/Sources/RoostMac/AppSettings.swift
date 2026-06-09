@@ -49,7 +49,9 @@ final class AppSettings {
         let d = UserDefaults.standard
         urlString = d.string(forKey: "connection.url") ?? ""
         hasCompletedOnboarding = d.bool(forKey: "onboarding.done")
-        showDockIcon = d.bool(forKey: "general.dockIcon")
+        // A multi-window app wants a Dock presence; default on (still toggleable).
+        showDockIcon = d.object(forKey: "general.dockIcon") == nil
+            ? true : d.bool(forKey: "general.dockIcon")
         hotkeyEnabled = d.object(forKey: "general.hotkey") == nil
             ? true : d.bool(forKey: "general.hotkey")
         notifyTerminal = d.object(forKey: "notify.terminal") == nil

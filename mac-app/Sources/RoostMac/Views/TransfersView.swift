@@ -101,7 +101,7 @@ struct SendFileSheet: View {
                     destination: "\(dir)/\(file.lastPathComponent)")
             }
         }
-        model.openMainWindow?(nil)  // transfers progress lives in the window
+        model.openFleet(.transfers)  // transfers progress lives in the Fleet window
         dismiss()
     }
 }
@@ -145,7 +145,7 @@ struct FetchFileSheet: View {
             for: .downloadsDirectory, in: .userDomainMask).first
         guard panel.runModal() == .OK, let url = panel.url else { return }
         model.transfers.fetch(remotePath: remotePath, from: worker, saveTo: url)
-        model.openMainWindow?(nil)
+        model.openFleet(.transfers)
         dismiss()
     }
 }
@@ -302,7 +302,7 @@ private struct TransferRow: View {
                 .controlSize(.small)
             }
             if let jobID = transfer.jobID {
-                Button("Run ↗") { model.openMainWindow?(jobID) }
+                Button("Run ↗") { model.openRun(jobID) }
                     .buttonStyle(.link)
                     .font(.caption)
             }

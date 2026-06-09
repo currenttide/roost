@@ -3,11 +3,17 @@ import AppKit
 import Foundation
 import Observation
 import RoostKit
+import SwiftTerm
+import SwiftUI
 
 /// The Console's brain (DESIGN.md §13): discovers binaries, generates the
-/// fleet wiring (env, MCP config, workspace CLAUDE.md), and tracks the PTY
-/// session's lifecycle. The terminal view itself is SwiftTerm, hosted by
-/// ConsoleHostView.
+/// fleet wiring (env, MCP config, workspace CLAUDE.md), and OWNS the terminal
+/// view + PTY for the app's lifetime.
+///
+/// Redesign: the `LocalProcessTerminalView` is retained here and hosted as the
+/// raw contentView of the Console window — it is never wrapped in
+/// `NSViewRepresentable`, so navigation and window hide/show can't tear down
+/// the live Claude session. Restart is explicit and imperative.
 @MainActor
 @Observable
 final class ConsoleSession {
@@ -25,19 +31,50 @@ final class ConsoleSession {
     private unowned let model: AppModel
 
     private(set) var state: State = .idle
-    /// Bumped to force the host NSView (and its PTY) to be recreated.
-    private(set) var generation = 0
     /// Deep-linked prompt to type (not submit) once the session is up.
     private(set) var queuedPrompt: String?
 
-    /// Filled by ConsoleHostView so the session can type into the PTY.
-    @ObservationIgnored var sendText: ((String) -> Void)?
+    /// Filled when the terminal is (re)built so the session can type into the PTY.
+    @ObservationIgnored private var sendText: ((String) -> Void)?
+
+    @ObservationIgnored private var _container: ConsoleContainerView?
+    @ObservationIgnored private var terminalView: LocalProcessTerminalView?
+    @ObservationIgnored private let processDelegate = ConsoleProcessDelegate()
 
     init(model: AppModel) {
         self.model = model
+        processDelegate.session = self
+    }
+
+    /// The Console window's contentView: a container holding the SwiftUI header
+    /// strip over the retained terminal. Built (and the PTY started) on first
+    /// access; reused forever after.
+    var contentView: NSView {
+        if let _container { return _container }
+        let container = ConsoleContainerView(
+            headerHost: NSHostingView(rootView: ConsoleHeader().environment(model)))
+        _container = container
+        startTerminal()
+        return container
     }
 
     // MARK: lifecycle
+
+    private func startTerminal() {
+        let term = LocalProcessTerminalView(frame: .zero)
+        term.processDelegate = processDelegate
+        term.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+
+        let launch = makeLaunch()
+        sendText = { [weak term] text in term?.send(txt: text) }
+        term.startProcess(
+            executable: "/bin/zsh",
+            args: ["-lc", launch.script],
+            environment: launch.environment)
+        terminalView = term
+        _container?.setTerminal(term)
+        markRunning(kind: launch.kind)
+    }
 
     func markRunning(kind: Kind) {
         state = .running(kind: kind)
@@ -56,9 +93,19 @@ final class ConsoleSession {
         state = .ended(exitCode: exitCode)
     }
 
+    /// Explicit restart: SIGTERM the old child deterministically, then build a
+    /// fresh terminal + PTY in place (the window is untouched).
     func restart() {
-        generation += 1
+        terminalView?.terminate()
+        terminalView = nil
         state = .idle
+        startTerminal()
+    }
+
+    /// App quit: kill the child so no orphaned agent is left behind.
+    func shutdown() {
+        terminalView?.terminate()
+        terminalView = nil
     }
 
     func queue(prompt: String) {
@@ -67,6 +114,14 @@ final class ConsoleSession {
             queuedPrompt = nil
             sendText?(prompt)
         }
+    }
+
+    var isConfigured: Bool { model.store.isConfigured }
+
+    func openWorkspaceFolder() {
+        NSWorkspace.shared.open(
+            FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("RoostConsole"))
     }
 
     // MARK: what to launch
@@ -222,6 +277,59 @@ final class ConsoleSession {
 
     private func shQuote(_ s: String) -> String {
         "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+}
+
+/// Container for the Console window: a fixed-height SwiftUI header over the
+/// terminal, laid out with Auto Layout. The terminal is swapped on Restart;
+/// the header host is permanent.
+final class ConsoleContainerView: NSView {
+    private let headerHost: NSView
+    private var terminal: NSView?
+
+    init(headerHost: NSView) {
+        self.headerHost = headerHost
+        super.init(frame: NSRect(x: 0, y: 0, width: 820, height: 560))
+        headerHost.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(headerHost)
+        NSLayoutConstraint.activate([
+            headerHost.topAnchor.constraint(equalTo: topAnchor),
+            headerHost.leadingAnchor.constraint(equalTo: leadingAnchor),
+            headerHost.trailingAnchor.constraint(equalTo: trailingAnchor),
+            headerHost.heightAnchor.constraint(equalToConstant: 32),
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    func setTerminal(_ view: NSView) {
+        terminal?.removeFromSuperview()
+        terminal = view
+        view.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(view)
+        NSLayoutConstraint.activate([
+            view.topAnchor.constraint(equalTo: headerHost.bottomAnchor),
+            view.leadingAnchor.constraint(equalTo: leadingAnchor),
+            view.trailingAnchor.constraint(equalTo: trailingAnchor),
+            view.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+    }
+}
+
+/// Bridges SwiftTerm's process-termination callback back to the session.
+@MainActor
+final class ConsoleProcessDelegate: NSObject, LocalProcessTerminalViewDelegate {
+    weak var session: ConsoleSession?
+
+    nonisolated func sizeChanged(
+        source: LocalProcessTerminalView, newCols: Int, newRows: Int) {}
+    nonisolated func setTerminalTitle(
+        source: LocalProcessTerminalView, title: String) {}
+    nonisolated func hostCurrentDirectoryUpdate(
+        source: TerminalView, directory: String?) {}
+    nonisolated func processTerminated(source: TerminalView, exitCode: Int32?) {
+        Task { @MainActor in self.session?.markEnded(exitCode: exitCode) }
     }
 }
 #endif

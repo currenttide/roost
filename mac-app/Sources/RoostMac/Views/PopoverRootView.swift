@@ -2,8 +2,9 @@
 import RoostKit
 import SwiftUI
 
-/// Popover content (DESIGN.md §2.2): header · goal box · active · recent ·
-/// workers · footer, with run detail pushed on a NavigationStack.
+/// Ambient menu-bar popover (redesign §Ambient popover): verdict · goal box ·
+/// a few active runs · footer. Glance, type a goal, go — workers, recent runs,
+/// and run detail live in the windows now.
 struct PopoverRootView: View {
     @Environment(AppModel.self) private var model
 
@@ -32,10 +33,8 @@ private struct ConnectPromptView: View {
             Text("Connect to a control plane to see your fleet.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Button("Connect…") {
-                model.openOnboardingWindow?()
-            }
-            .keyboardShortcut(.defaultAction)
+            Button("Connect…") { model.openOnboarding() }
+                .keyboardShortcut(.defaultAction)
         }
         .padding(24)
     }
@@ -43,37 +42,24 @@ private struct ConnectPromptView: View {
 
 struct FleetPopoverView: View {
     @Environment(AppModel.self) private var model
-    @State private var path: [String] = []  // run ids
 
-    private static let maxActive = 3
-    private static let maxRecent = 4
-    private static let maxWorkers = 6
+    private static let maxActive = 4
 
     var body: some View {
-        @Bindable var transfers = model.transfers
-        NavigationStack(path: $path) {
-            VStack(alignment: .leading, spacing: 0) {
-                header
-                Divider()
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 14) {
-                        GoalBoxView()
-                        staleBanner
-                        runSections
-                        workerSection
-                    }
-                    .padding(12)
+        VStack(alignment: .leading, spacing: 0) {
+            header
+            Divider()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    GoalBoxView()
+                    staleBanner
+                    activeSection
                 }
-                .frame(maxHeight: 480)
-                Divider()
-                footer
+                .padding(12)
             }
-            .navigationDestination(for: String.self) { runID in
-                RunDetailView(runID: runID, compact: true)
-            }
-        }
-        .sheet(item: $transfers.pendingSend) { pending in
-            SendFileSheet(pending: pending)
+            .frame(maxHeight: 420)
+            Divider()
+            footer
         }
     }
 
@@ -94,9 +80,10 @@ struct FleetPopoverView: View {
             .font(.caption)
             .foregroundStyle(.secondary)
             Menu {
-                Button("Open Roost") { model.openMainWindow?(nil) }
+                Button("Open Roost") { model.openWorkspace() }
                     .keyboardShortcut("o")
-                Button("Settings…") { model.openSettingsWindow?() }
+                Button("Fleet") { model.openFleet() }
+                Button("Settings…") { model.openSettings() }
                 Divider()
                 Button("Quit Roost") { NSApp.terminate(nil) }
                     .keyboardShortcut("q")
@@ -143,7 +130,7 @@ struct FleetPopoverView: View {
             banner(
                 icon: "key.slash",
                 text: "Unauthorized — the token may have been rotated.",
-                action: ("Reconnect…", { model.openOnboardingWindow?() }))
+                action: ("Reconnect…", { model.openOnboarding() }))
         case .ok, .never:
             EmptyView()
         }
@@ -163,18 +150,23 @@ struct FleetPopoverView: View {
         .background(.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
     }
 
-    // MARK: run sections
+    // MARK: active runs
 
     @ViewBuilder
-    private var runSections: some View {
-        let store = model.store
-        let active = store.activeRuns
-        let pendingOptimistic = store.optimisticRuns
+    private var activeSection: some View {
+        let active = model.store.activeRuns
+        let pending = model.store.optimisticRuns
             .filter { opt in !active.contains { $0.id == opt.id } }
 
-        if !active.isEmpty || !pendingOptimistic.isEmpty {
-            section("ACTIVE") {
-                ForEach(pendingOptimistic, id: \.id) { opt in
+        if active.isEmpty && pending.isEmpty {
+            Text("No active runs. Type a goal above to put your fleet to work.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.vertical, 4)
+        } else {
+            VStack(alignment: .leading, spacing: 6) {
+                SectionLabel("Active")
+                ForEach(pending, id: \.id) { opt in
                     HStack(spacing: 6) {
                         ProgressView().controlSize(.mini)
                         Text(opt.goal).font(.callout).lineLimit(1)
@@ -184,78 +176,35 @@ struct FleetPopoverView: View {
                     .padding(.vertical, 2)
                 }
                 ForEach(active.prefix(Self.maxActive)) { run in
-                    runRow(run)
+                    Button { model.openRun(run.id) } label: {
+                        Card {
+                            RunRowView(run: run,
+                                       workerName: model.store.worker(id: run.worker)?.name)
+                        }
+                    }
+                    .buttonStyle(.plain)
                 }
-                showAll(count: active.count, over: Self.maxActive)
-            }
-        }
-
-        let recent = store.recentRuns
-        if !recent.isEmpty {
-            section("RECENT") {
-                ForEach(recent.prefix(Self.maxRecent)) { run in
-                    runRow(run)
+                if active.count > Self.maxActive {
+                    Button("show all \(active.count) in Roost →") { model.openWorkspace() }
+                        .buttonStyle(.link)
+                        .font(.caption)
                 }
-                showAll(count: recent.count, over: Self.maxRecent)
             }
-        }
-    }
-
-    private func runRow(_ run: Run) -> some View {
-        Button {
-            path.append(run.id)
-        } label: {
-            RunRowView(run: run, workerName: model.store.worker(id: run.worker)?.name)
-        }
-        .buttonStyle(.plain)
-    }
-
-    @ViewBuilder
-    private func showAll(count: Int, over limit: Int) -> some View {
-        if count > limit {
-            Button("show all \(count) →") { model.openMainWindow?(nil) }
-                .buttonStyle(.link)
-                .font(.caption)
-        }
-    }
-
-    // MARK: workers
-
-    @ViewBuilder
-    private var workerSection: some View {
-        let workers = model.store.workers
-        if !workers.isEmpty {
-            section("WORKERS") {
-                ForEach(workers.prefix(Self.maxWorkers)) { worker in
-                    WorkerRowView(worker: worker)
-                        .workerDropTarget(worker, model: model)  // drag a file on = send it
-                }
-                showAll(count: workers.count, over: Self.maxWorkers)
-            }
-        }
-    }
-
-    private func section(
-        _ title: String, @ViewBuilder content: () -> some View
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title)
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(.tertiary)
-            content()
         }
     }
 
     // MARK: footer
 
     private var footer: some View {
-        HStack {
-            Button("Open Roost ⌘O") { model.openMainWindow?(nil) }
+        HStack(spacing: 12) {
+            Button("Open Roost ⌘O") { model.openWorkspace() }
                 .buttonStyle(.link)
                 .keyboardShortcut("o")
             Button("Console ⌘T") { model.openConsole() }
                 .buttonStyle(.link)
                 .keyboardShortcut("t")
+            Button("Fleet") { model.openFleet() }
+                .buttonStyle(.link)
             Spacer()
             if let updated = model.store.lastUpdated {
                 Text("updated \(Format.timeAgo(updated.timeIntervalSince1970))")
@@ -266,94 +215,6 @@ struct FleetPopoverView: View {
         .font(.caption)
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
-    }
-}
-
-// MARK: - rows
-
-struct RunRowView: View {
-    let run: Run
-    let workerName: String?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack(spacing: 6) {
-                Text(run.isTerminal ? run.verdictGlyph : "◉")
-                    .foregroundStyle(run.statusColor)
-                    .accessibilityLabel(run.health.status)
-                Text(run.displayGoal.isEmpty ? run.id : run.displayGoal)
-                    .font(.callout)
-                    .lineLimit(1)
-                Spacer(minLength: 0)
-            }
-            HStack(spacing: 6) {
-                Text(run.metaLine(workerName: workerName))
-                if run.isActive, let progress = run.progress {
-                    ProgressView(value: Double(progress), total: 100)
-                        .controlSize(.small)
-                        .frame(width: 70)
-                    Text("\(progress)%")
-                }
-            }
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .padding(.leading, 18)
-
-            subtitle
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .padding(.leading, 18)
-        }
-        .contentShape(Rectangle())
-        .padding(.vertical, 2)
-    }
-
-    // narration while active; cost / verdict / diagnosis when terminal —
-    // render only what the backend provided, never invent (§2.2).
-    @ViewBuilder
-    private var subtitle: some View {
-        if run.isActive {
-            if let narration = run.narration, !narration.isEmpty {
-                Text("“\(narration)”").italic()
-            }
-        } else if run.state == "failed" {
-            if let why = run.diagnosis ?? run.result, !why.isEmpty {
-                Text("“\(why)”").italic()
-            }
-        } else {
-            let pieces = [
-                run.verified == true ? "verified ✓" : nil,
-                Format.costLine(run.cost).isEmpty ? nil : Format.costLine(run.cost),
-            ].compactMap { $0 }
-            if !pieces.isEmpty {
-                Text(pieces.joined(separator: " · "))
-            }
-        }
-    }
-}
-
-struct WorkerRowView: View {
-    let worker: Worker
-
-    var body: some View {
-        HStack(spacing: 6) {
-            StatusDot(
-                color: worker.statusColor,
-                label: "\(worker.name) \(worker.status.rawValue)",
-                filled: worker.status != .offline)
-            Text(worker.name)
-                .font(.callout)
-                .lineLimit(1)
-            Text(worker.statusLine)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Spacer()
-            Text(worker.headline)
-                .font(.caption)
-                .foregroundStyle(.tertiary)
-                .lineLimit(1)
-        }
     }
 }
 #endif

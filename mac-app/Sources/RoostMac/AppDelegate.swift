@@ -3,7 +3,7 @@ import AppKit
 import RoostKit
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var model: AppModel!
     private var statusItem: StatusItemController!
     private var windows: WindowManager!
@@ -17,17 +17,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         buildMainMenu()
 
         windows = WindowManager(model: model)
+        model.router = windows
         statusItem = StatusItemController(model: model)
         notifications = NotificationManager(settings: model.settings)
         hotkey = HotkeyManager { [weak self] in
             self?.statusItem.showPopover()
         }
 
-        // wiring
+        // Poll cadence follows the popover OR any archetype window being visible
+        // (a detached run-detail window on a second monitor must keep 2 s).
         let recomputeVisibility = { [weak self] in
             guard let self else { return }
             self.model.store.uiVisible =
-                self.statusItem.isPopoverShown || self.windows.isMainWindowVisible
+                self.statusItem.isPopoverShown || self.windows.anyWindowVisible
         }
         statusItem.onVisibilityChange = recomputeVisibility
         windows.onVisibilityChange = recomputeVisibility
@@ -36,16 +38,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.notifications.handle(diff)
         }
         notifications.openRun = { [weak self] runID in
-            self?.windows.showMain(selecting: runID)
-        }
-        model.openMainWindow = { [weak self] runID in
-            self?.windows.showMain(selecting: runID)
-        }
-        model.openSettingsWindow = { [weak self] in
-            self?.windows.showSettings()
-        }
-        model.openOnboardingWindow = { [weak self] in
-            self?.windows.showOnboarding()
+            self?.model.openRun(runID)
         }
 
         // react to settings toggles (hotkey on/off, poll cadence)
@@ -62,25 +55,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task { await self.model.updates.check() }  // silent daily, if configured
 
         if !model.settings.hasCompletedOnboarding {
-            windows.showOnboarding()
+            windows.open(.onboarding)
         }
     }
 
-    /// Dock-icon mode: clicking the Dock icon opens the main window.
+    /// Kill the Console PTY on quit so no orphaned agent is left behind.
+    func applicationWillTerminate(_ notification: Notification) {
+        model?.console.shutdown()
+    }
+
+    /// Dock-icon mode: clicking the Dock icon opens the Workspace.
     func applicationShouldHandleReopen(
         _ sender: NSApplication, hasVisibleWindows flag: Bool
     ) -> Bool {
-        if !flag { windows.showMain() }
+        if !flag { windows.open(.workspace) }
         return true
     }
 
     // MARK: main menu
-    // A minimal menu so standard shortcuts work everywhere (⌘C/⌘V in the
-    // token field, ⌘W, ⌘Q) — LSUIElement apps get none for free.
+    // A full menu so standard shortcuts work everywhere (⌘C/⌘V, ⌘W, ⌘Q) and the
+    // multi-window app gets a proper Window menu — LSUIElement apps get none free.
 
     private func buildMainMenu() {
         let main = NSMenu()
 
+        // App menu
         let appItem = NSMenuItem()
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "About Roost",
@@ -96,19 +95,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appItem.submenu = appMenu
         main.addItem(appItem)
 
+        // File menu — the window-opening verbs
         let fileItem = NSMenuItem()
         let fileMenu = NSMenu(title: "File")
         fileMenu.addItem(withTitle: "Open Roost",
-                         action: #selector(openMainAction), keyEquivalent: "o")
-            .target = self
+                         action: #selector(openWorkspaceAction), keyEquivalent: "o").target = self
         fileMenu.addItem(withTitle: "Console",
-                         action: #selector(openConsoleAction), keyEquivalent: "t")
-            .target = self
+                         action: #selector(openConsoleAction), keyEquivalent: "t").target = self
+        fileMenu.addItem(withTitle: "Fleet",
+                         action: #selector(openFleetAction), keyEquivalent: "").target = self
+        fileMenu.addItem(.separator())
+        let newWin = fileMenu.addItem(
+            withTitle: "Open Run in New Window",
+            action: #selector(openRunInNewWindowAction), keyEquivalent: "O")
+        newWin.keyEquivalentModifierMask = [.command, .shift]
+        newWin.target = self
+        fileMenu.addItem(.separator())
         fileMenu.addItem(withTitle: "Close Window",
                          action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         fileItem.submenu = fileMenu
         main.addItem(fileItem)
 
+        // Edit menu
         let editItem = NSMenuItem()
         let editMenu = NSMenu(title: "Edit")
         editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
@@ -122,19 +130,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         editItem.submenu = editMenu
         main.addItem(editItem)
 
+        // Window menu — AppKit appends the live window list once windowsMenu is set
+        let windowItem = NSMenuItem()
+        let windowMenu = NSMenu(title: "Window")
+        windowMenu.addItem(withTitle: "Minimize",
+                           action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        windowMenu.addItem(withTitle: "Zoom",
+                           action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
+        windowMenu.addItem(.separator())
+        windowMenu.addItem(withTitle: "Roost",
+                           action: #selector(openWorkspaceAction), keyEquivalent: "1").target = self
+        windowMenu.addItem(withTitle: "Console",
+                           action: #selector(openConsoleAction), keyEquivalent: "2").target = self
+        windowMenu.addItem(withTitle: "Fleet",
+                           action: #selector(openFleetAction), keyEquivalent: "3").target = self
+        windowMenu.addItem(.separator())
+        windowMenu.addItem(withTitle: "Bring All to Front",
+                           action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: "")
+        windowItem.submenu = windowMenu
+        main.addItem(windowItem)
+        NSApp.windowsMenu = windowMenu
+
         NSApp.mainMenu = main
     }
 
-    @objc private func openMainAction() {
-        windows.showMain()
+    // MARK: menu validation
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(openRunInNewWindowAction) {
+            return windows.selectedRunInKeyWindow() != nil
+        }
+        return true
     }
 
-    @objc private func openConsoleAction() {
-        model.openConsole()
-    }
-
-    @objc private func openSettingsAction() {
-        windows.showSettings()
+    @objc private func openWorkspaceAction() { model.openWorkspace() }
+    @objc private func openConsoleAction() { model.openConsole() }
+    @objc private func openFleetAction() { model.openFleet() }
+    @objc private func openSettingsAction() { model.openSettings() }
+    @objc private func openRunInNewWindowAction() {
+        if let runID = windows.selectedRunInKeyWindow() {
+            model.openRun(runID, inNewWindow: true)
+        }
     }
 }
 #endif

@@ -3,30 +3,46 @@ import Foundation
 import Observation
 import RoostKit
 
-/// Main-window sidebar sections.
-enum MainSection: String, CaseIterable, Identifiable {
-    case runs = "Runs"
-    case workers = "Workers"
-    case console = "Console"
+/// Fleet-window segments (Workers is demoted here — DESIGN.md §2.4 / redesign).
+enum FleetSection: String, CaseIterable, Identifiable {
     case transfers = "Transfers"
     case publish = "Publish"
     case schedules = "Schedules"
+    case workers = "Workers"
 
     var id: String { rawValue }
 
     var icon: String {
         switch self {
-        case .runs: "play.circle"
-        case .workers: "server.rack"
-        case .console: "terminal"
-        case .transfers: "arrow.up.arrow.down.circle"
+        case .transfers: "arrow.up.arrow.down"
         case .publish: "globe"
         case .schedules: "clock.arrow.circlepath"
+        case .workers: "server.rack"
         }
     }
 }
 
-/// Root object graph, owned by the AppDelegate and injected into every view.
+/// Per-window state for the Workspace window (Runs). Lives for that window's
+/// lifetime — each window owns its own selection so multiple monitors don't
+/// fight over one global selection (redesign §Architecture).
+@MainActor
+@Observable
+final class WorkspaceModel {
+    var selectedRunID: String?
+    var stateFilter = "all"   // all · active · failed
+}
+
+/// Per-window state for the Fleet window (which segment is showing).
+@MainActor
+@Observable
+final class FleetWindowModel {
+    var section: FleetSection = .transfers
+    init(section: FleetSection = .transfers) { self.section = section }
+}
+
+/// Root object graph, owned by the AppDelegate and injected into every window.
+/// Holds only SHARED fleet truth; per-window selection/section state lives in
+/// WorkspaceModel / FleetWindowModel, owned by the window registry.
 @MainActor
 @Observable
 final class AppModel {
@@ -36,18 +52,9 @@ final class AppModel {
     @ObservationIgnored private(set) var transfers: TransferManager!
     @ObservationIgnored private(set) var console: ConsoleSession!
 
-    /// Deep-link target: set when a notification or popover row asks the main
-    /// window to show a specific run.
-    var selectedRunID: String?
-
-    /// Which main-window section is showing; deep links steer this.
-    var mainSection: MainSection = .runs
-
-    // Window-opening hooks, filled in by the AppDelegate so SwiftUI views can
-    // reach AppKit windows without knowing about them.
-    @ObservationIgnored var openMainWindow: ((String?) -> Void)?
-    @ObservationIgnored var openSettingsWindow: (() -> Void)?
-    @ObservationIgnored var openOnboardingWindow: (() -> Void)?
+    /// The window registry / router, wired by the AppDelegate after creation.
+    /// Views open windows through the thin façade methods below.
+    @ObservationIgnored var router: WindowManager!
 
     init() {
         settings = AppSettings()
@@ -59,13 +66,29 @@ final class AppModel {
         console = ConsoleSession(model: self)
     }
 
-    /// Open the main window at the Console, optionally with a prepared prompt
-    /// typed (not submitted) into the session.
+    // MARK: window façade (views call these; routing lives in WindowManager)
+
+    func openWorkspace() { router.open(.workspace) }
+
+    /// Focus the Workspace and select a run (deep links, popover taps).
+    func openRun(_ runID: String, inNewWindow: Bool = false) {
+        router.openRun(runID, inNewWindow: inNewWindow)
+    }
+
+    /// Open the Console window, optionally with a prepared prompt typed (not
+    /// submitted) into the session.
     func openConsole(prompt: String? = nil) {
         if let prompt { console.queue(prompt: prompt) }
-        mainSection = .console
-        openMainWindow?(nil)
+        router.open(.console)
     }
+
+    func openFleet(_ section: FleetSection? = nil) {
+        router.openFleet(section)
+    }
+
+    func openSettings() { router.open(.settings) }
+    func openOnboarding() { router.open(.onboarding) }
+    func dismissOnboarding() { router.close(.onboarding) }
 
     /// (Re)connect after onboarding or a settings change.
     func applyConnection(urlString: String, token: String?) {
