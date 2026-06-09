@@ -91,9 +91,14 @@ launched with `ROOST_RENDER_DIR` set it skips the normal app, pulls one live
 `GET /derived` snapshot from the control plane, and renders the real SwiftUI
 windows — popover, Workspace, the four Fleet panes, run detail, onboarding,
 settings — to PNGs off-screen via `NSHostingView.cacheDisplay`. Real views,
-real fleet data, no display or TCC grant needed. (The Console is the one
-surface it can't show: its terminal is a raw PTY-backed NSView that only draws
-on a real screen.)
+real fleet data, no display or TCC grant needed.
+
+Known headless limits (0-display, not app bugs): the Console terminal is a raw
+PTY-backed NSView that only draws on a real screen; the Settings grouped
+`Form` hangs under off-screen hosting (the driver's watchdog contains it); and
+the Workspace window's `NavigationSplitView` sidebar column renders blank —
+its content (goal box + run rows) is covered by the popover shot, and the
+detail pane renders fully.
 
 Run it via a roost job from anywhere:
 
