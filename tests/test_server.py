@@ -2929,3 +2929,76 @@ def test_metrics_exposes_sweep_failures_counter(client: TestClient, monkeypatch)
     assert samples['{phase="sweep"}'] == 2
     assert samples['{phase="notify"}'] == 1
     assert samples['{phase="blob_prune"}'] == 0
+
+
+# ---------- bounded assignment scan (R116) ----------
+
+
+def test_assignment_scan_bounded_makes_progress_beyond_batch(
+    client: TestClient, monkeypatch
+):
+    """[R116] with more queued jobs than one scan batch, every job is still
+    assigned (the scan seek-paginates instead of truncating) and the winner
+    order is unchanged: oldest created_at first."""
+    monkeypatch.setattr(server, "ASSIGN_SCAN_BATCH", 4)
+    db = client.app.state.db_path
+    wid, _ = _enroll_worker(client, {"tools": ["python3"]})
+    now = time.time()
+    n = 11  # > 2 full batches of 4
+    with server._connect(db) as conn:
+        for i in range(n):
+            conn.execute(
+                "INSERT INTO jobs(id, spec, requires, state, created_at) "
+                "VALUES (?,?,?,?,?)",
+                (f"r116-{i:02d}", "{}", "{}", "queued", now - 50 + i),
+            )
+    assigned = []
+    for _ in range(n):
+        got = server._try_assign_one(db, wid)
+        assert got is not None, f"scan stalled after {len(assigned)} assignments"
+        assigned.append(got["id"])
+        # Finish the job so the worker has a free slot for the next poll.
+        with server._connect(db) as conn:
+            conn.execute(
+                "UPDATE jobs SET state='succeeded' WHERE id=?", (got["id"],))
+            server._refresh_worker_status(conn, wid)
+    assert assigned == [f"r116-{i:02d}" for i in range(n)]  # all, oldest-first
+    assert server._try_assign_one(db, wid) is None  # queue fully drained
+
+
+def test_anti_starvation_override_reaches_job_beyond_first_batch(
+    client: TestClient, monkeypatch
+):
+    """[R116] every job a naive LIMIT window would return can be untakeable
+    (hard-pinned to an absent target); an old takeable job beyond that window
+    must still be found and taken via the anti-starvation override."""
+    monkeypatch.setattr(server, "ASSIGN_SCAN_BATCH", 3)
+    db = client.app.state.db_path
+    wid, _ = _enroll_worker(client, {"tools": ["python3"]})
+    now = time.time()
+    with server._connect(db) as conn:
+        # Seven OLDER jobs pinned to a worker that doesn't exist: they fill the
+        # first two windows entirely and this worker skips them unconditionally.
+        for i in range(7):
+            conn.execute(
+                "INSERT INTO jobs(id, spec, requires, state, created_at) "
+                "VALUES (?,?,?,?,?)",
+                (f"pin-{i}", json.dumps({"target": "ghost"}), "{}", "queued",
+                 now - 500 + i),
+            )
+        # One takeable job, youngest by created_at (beyond the first window)
+        # but far past PLACEMENT_GRACE → the override must fire for it.
+        conn.execute(
+            "INSERT INTO jobs(id, spec, requires, state, created_at) "
+            "VALUES (?,?,?,?,?)",
+            ("starving", "{}", "{}", "queued", now - 400),
+        )
+    got = server._try_assign_one(db, wid)
+    assert got is not None, "bounded scan stranded a takeable starving job"
+    assert got["id"] == "starving"
+    # The pinned jobs stay queued, waiting for their target — exactly as before.
+    with server._connect(db) as conn:
+        left = conn.execute(
+            "SELECT COUNT(*) AS n FROM jobs WHERE state='queued'"
+        ).fetchone()["n"]
+    assert left == 7
