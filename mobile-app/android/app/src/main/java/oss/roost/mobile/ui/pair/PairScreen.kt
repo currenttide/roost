@@ -7,7 +7,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -52,10 +54,14 @@ fun PairScreen(
     LaunchedEffect(state.paired) { if (state.paired) onPaired() }
 
     Scaffold { pad ->
+        // R123: the app-root imePadding (Theme.kt) shrinks this screen above the
+        // keyboard; the scroll lets the centered content (multi-line paste field +
+        // Pair CTA) stay reachable in the reduced viewport instead of clipping.
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(pad)
+                .verticalScroll(rememberScrollState())
                 .padding(24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center,
