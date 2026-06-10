@@ -98,3 +98,82 @@ public enum ScheduleInterval {
         return "in \(format(delta.rounded()))"
     }
 }
+
+/// The interval presets the create sheet offers as quick chips, mirroring the
+/// cadences `roost schedule --every` documents (30m / 6h / 1d) plus the floor and
+/// a few common middles — byte-for-byte the iOS preset row (R61). Each is a valid
+/// `every` string by construction.
+public enum ScheduleIntervalPreset {
+    /// Ordered presets shown as selectable chips; the raw value is the `every`
+    /// string sent to the server, which is also its compact display.
+    public static let all: [String] = ["30s", "5m", "15m", "30m", "1h", "6h", "12h", "1d"]
+}
+
+/// Pure create-form state for the schedule-create sheet (R124 — the R62
+/// deferral). The decisions — when Create is enabled, what validation message to
+/// show, and the exact `spec` dict sent to `POST /schedules` — live here so the
+/// Linux harness covers them and the SwiftUI sheet stays a dumb shell, mirroring
+/// the SchedulesListState seam (R81) and the iOS SchedulesStore draft (R61).
+public struct ScheduleDraft: Equatable, Sendable {
+    /// The task one-liner the scheduled job runs each interval.
+    public var task: String
+    /// The `every` string sent to the server (seconds or `<N>[smhd]`); seeded to
+    /// the cadence the CLI help leads with, editable, validated against the
+    /// server's grammar.
+    public var every: String
+    /// Optional human label for the schedule.
+    public var name: String
+    /// Agent (`kind: auto`, trust-loop verified) vs raw `command`.
+    public var isCommand: Bool
+
+    public init(task: String = "", every: String = "6h",
+                name: String = "", isCommand: Bool = false) {
+        self.task = task
+        self.every = every
+        self.name = name
+        self.isCommand = isCommand
+    }
+
+    /// Create is allowed once there's a task and a valid interval — exactly the
+    /// conditions under which `POST /schedules` will return 200.
+    public var canCreate: Bool {
+        !trimmedTask.isEmpty && ScheduleInterval.isValid(every)
+    }
+
+    /// Live preview of the interval the server will store, or nil when `every`
+    /// can't be parsed / is below the floor (never show a bogus cadence).
+    public var intervalPreview: String? {
+        guard let sec = ScheduleInterval.parse(every),
+              sec >= ScheduleInterval.minSeconds else { return nil }
+        return ScheduleInterval.format(sec)
+    }
+
+    /// The reason `every` is rejected, or nil when valid (drives the field hint).
+    public var intervalMessage: String? {
+        ScheduleInterval.validationMessage(every)
+    }
+
+    /// The label to send: trimmed, and nil when blank (the server stores NULL,
+    /// matching `roost schedule` without `--name`).
+    public var trimmedName: String? {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    var trimmedTask: String {
+        task.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// The job spec the control plane re-submits each interval. Agent drafts use
+    /// the CLI's exact shape (`roost schedule "<goal>"` → `{"kind": "auto",
+    /// "task": …}` — a worker self-assesses fit and the trust loop verifies);
+    /// command drafts run the line verbatim (`{"kind": "command", "command": …}`,
+    /// the iOS command shape). Always a root job: never parent_job_id/captain_root
+    /// (the server 400s those).
+    public func spec() -> [String: JSONValue] {
+        if isCommand {
+            return ["kind": .string("command"), "command": .string(trimmedTask)]
+        }
+        return ["kind": .string("auto"), "task": .string(trimmedTask)]
+    }
+}

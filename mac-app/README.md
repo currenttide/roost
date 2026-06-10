@@ -89,9 +89,10 @@ supported way to produce **visual** evidence for mac-app PRs is the render
 harness (`Sources/RoostMac/RenderShots.swift`): when the app binary is
 launched with `ROOST_RENDER_DIR` set it skips the normal app, pulls one live
 `GET /derived` snapshot from the control plane, and renders the real SwiftUI
-windows — popover, Workspace, the four Fleet panes, run detail, onboarding,
-settings — to PNGs off-screen via `NSHostingView.cacheDisplay`. Real views,
-real fleet data, no display or TCC grant needed.
+windows — popover, Workspace, the four Fleet panes, the schedule-create sheet,
+run detail, onboarding, settings — to PNGs off-screen via
+`NSHostingView.cacheDisplay`. Real views, real fleet data, no display or TCC
+grant needed.
 
 Known headless limits (0-display, not app bugs): the Console terminal is a raw
 PTY-backed NSView that only draws on a real screen; the Settings grouped

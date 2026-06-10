@@ -5,8 +5,13 @@
     <key>CFBundleName</key><string>Roost</string>
     <key>CFBundleDisplayName</key><string>Roost</string>
     <key>CFBundleIdentifier</key><string>com.roost.mac</string>
-    <key>CFBundleVersion</key><string>1</string>
-    <key>CFBundleShortVersionString</key><string>0.1.0</string>
+    <!-- Version is single-sourced from the repo's pyproject.toml
+         ([project].version — the same number the control plane self-reports as
+         __version__). scripts/build.sh stamps both keys at assembly time; the
+         0.0.0 here is a deliberate "unstamped dev copy" placeholder, never a
+         release number. -->
+    <key>CFBundleVersion</key><string>0.0.0</string>
+    <key>CFBundleShortVersionString</key><string>0.0.0</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleExecutable</key><string>RoostMac</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>

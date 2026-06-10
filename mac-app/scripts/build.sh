@@ -44,6 +44,25 @@ cp "$BIN" "$APP/Contents/MacOS/RoostMac"
 cp Info.plist "$APP/Contents/Info.plist"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
+# Single-source the app version (R124): the canonical number is the repo's
+# pyproject.toml [project].version — the exact value the control plane
+# self-reports as __version__ (R32 precedent). The checked-in Info.plist
+# carries a 0.0.0 placeholder; the real number is stamped HERE, at bundle
+# assembly, because the app is SwiftPM-built (no Xcode project/agvtool to own
+# versioning) and Info.plist is only ever consumed by this copy step — at
+# runtime UpdateChecker and the About panel read CFBundleShortVersionString
+# from the assembled bundle. Fails loudly rather than shipping the placeholder.
+VERSION="$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' ../pyproject.toml | head -1)"
+if [[ -z "$VERSION" ]]; then
+    echo "error: could not read [project].version from ../pyproject.toml" >&2
+    exit 1
+fi
+echo "==> stamping version ${VERSION} (from pyproject.toml)"
+/usr/libexec/PlistBuddy \
+    -c "Set :CFBundleShortVersionString ${VERSION}" \
+    -c "Set :CFBundleVersion ${VERSION}" \
+    "$APP/Contents/Info.plist"
+
 IDENTITY="${CODESIGN_IDENTITY:--}"
 echo "==> codesign (identity: ${IDENTITY})"
 codesign --force --options runtime --sign "$IDENTITY" "$APP"

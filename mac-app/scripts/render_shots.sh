@@ -57,7 +57,7 @@ swift build -c release 2>&1 | tail -2
 BIN="$(swift build -c release --show-bin-path)/RoostMac"
 
 VIEWS=(popover workspace fleet-transfers fleet-publish fleet-schedules
-       fleet-workers run-detail onboarding settings)
+       schedule-create fleet-workers run-detail onboarding settings)
 TIMEOUT="${ROOST_RENDER_TIMEOUT:-90}"
 
 for name in "${VIEWS[@]}"; do

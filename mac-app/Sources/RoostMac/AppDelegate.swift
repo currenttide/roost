@@ -12,6 +12,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var hotkeyWasEnabled: Bool?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Single-instance guard (R124): a second launch should focus the running
+        // Roost, not start a second menu-bar bird. LaunchServices already
+        // enforces this for re-opens of the SAME .app bundle, but a copy at
+        // another path (or a directly exec'd binary) slips through. The decision
+        // (which process survives — seniority by launch date, raced launches
+        // converge on one winner) is RoostKit's `SingleInstance`, Linux-tested;
+        // only the AppKit glue lives here. Dev runs (`swift run`) have no bundle
+        // identifier and skip the guard. Runs before any state is built so the
+        // yielding process touches nothing.
+        if let bundleID = Bundle.main.bundleIdentifier {
+            let peers = NSRunningApplication
+                .runningApplications(withBundleIdentifier: bundleID)
+                .filter { !$0.isTerminated }
+            if let winner = SingleInstance.instanceToYieldTo(
+                selfPID: ProcessInfo.processInfo.processIdentifier,
+                instances: peers.map {
+                    .init(pid: $0.processIdentifier, launchedAt: $0.launchDate)
+                }) {
+                peers.first { $0.processIdentifier == winner }?
+                    .activate(options: [.activateAllWindows])
+                NSApp.terminate(nil)
+                return
+            }
+        }
+
         model = AppModel()
         NSApp.setActivationPolicy(model.settings.showDockIcon ? .regular : .accessory)
         buildMainMenu()

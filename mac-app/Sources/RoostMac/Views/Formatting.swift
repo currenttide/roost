@@ -108,16 +108,6 @@ extension Run {
         if health.status == "unverified" { return "not verified" }
         return nil
     }
-
-    /// One compact metadata line for list rows.
-    func metaLine(workerName: String?) -> String {
-        var parts: [String] = [phase]
-        if let workerName { parts.append(workerName) }
-        parts.append(isTerminal
-            ? Format.timeAgo(finishedAt ?? createdAt)
-            : Format.elapsed(self))
-        return parts.joined(separator: " · ")
-    }
 }
 
 extension Worker {

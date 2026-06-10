@@ -86,6 +86,14 @@ enum RenderShots {
                 }
             }
         }
+        if want("schedule-create") {
+            // The Fleet › Schedules create sheet (R124), rendered standalone the
+            // way sheets must be headlessly (a presented .sheet never material-
+            // izes without a key window). Static form — no snapshot needed.
+            shot(dir, "schedule-create", 480, 360) {
+                CreateScheduleSheet(sched: SchedulesModel(store: model.store))
+            }
+        }
         if want("run-detail"), let run = detailRun {
             shot(dir, "run-detail", 720, 640) {
                 ScrollView { RunDetailView(runID: run.id, compact: false) }
