@@ -97,15 +97,25 @@ data class Health(
     val reason: String?,
 )
 
-/** Worker row (workers.json / derived.workers). */
+/** Worker row (workers.json / derived.workers / GET /workers, API.md §2/§2a). */
 data class Worker(
     val id: String,
     val name: String,
-    val status: String,      // idle | busy | offline | (unknown)
+    val status: String,      // idle | busy | stale | offline | (unknown)
     val lastSeen: Double?,
+    /** In-flight jobs — render "running/capacity" (API.md §2a). */
+    val running: Int? = null,
+    /** Concurrency slots (>= 1); older CPs may omit it. */
+    val capacity: Int? = null,
+    /** Free-form capability map (API.md §2a) — heterogeneous values, carried
+     *  raw and summarized for the Fleet screen by [Fleet.capsSummary]. */
+    val capabilities: Map<String, Any?> = emptyMap(),
 ) {
     /** idle+busy count as live for the "N nodes" chip (API.md §2). */
     val isLive: Boolean get() = status == "idle" || status == "busy"
+
+    /** Best display name (the server may register a worker without one). */
+    val displayName: String get() = name.ifBlank { id }
 }
 
 /**

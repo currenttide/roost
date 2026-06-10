@@ -1,17 +1,17 @@
 {
   "fleet_verdict": {
     "level": "alert",
-    "summary": "1 need attention \u2014 unplaceable: train on the gpu box"
+    "summary": "1 needs attention \u2014 unplaceable: train on the gpu box"
   },
-  "generated_at": 1780863998.5683541,
+  "generated_at": 1781048743.0951767,
   "runs": [
     {
-      "capable_workers": 1,
+      "capable_workers": 2,
       "cost": {
         "cost_est_usd": 0.0,
         "tokens_used": 0
       },
-      "created_at": 1780863998.5579615,
+      "created_at": 1781048743.0583704,
       "decline_count": 0,
       "diagnosis": null,
       "eta_sec": null,
@@ -31,19 +31,19 @@
       "progress": null,
       "queued_sec": 0.0,
       "result": "",
-      "root_job_id": "c6687015bbd3",
-      "run_id": "c6687015bbd3",
+      "root_job_id": "a790778490df",
+      "run_id": "a790778490df",
       "state": "queued",
       "verified": null,
       "worker": null
     },
     {
-      "capable_workers": 1,
+      "capable_workers": 2,
       "cost": {
         "cost_est_usd": 0.0,
         "tokens_used": 0
       },
-      "created_at": 1780863998.5508134,
+      "created_at": 1781048743.050668,
       "decline_count": 0,
       "diagnosis": null,
       "eta_sec": null,
@@ -63,19 +63,19 @@
       "progress": null,
       "queued_sec": 0.0,
       "result": "",
-      "root_job_id": "f74c53ab8359",
-      "run_id": "f74c53ab8359",
+      "root_job_id": "4d2f9692b492",
+      "run_id": "4d2f9692b492",
       "state": "queued",
       "verified": null,
       "worker": null
     },
     {
-      "capable_workers": 1,
+      "capable_workers": 2,
       "cost": {
         "cost_est_usd": 0.0,
         "tokens_used": 0
       },
-      "created_at": 1780863998.5438192,
+      "created_at": 1781048743.0437734,
       "decline_count": 0,
       "diagnosis": null,
       "eta_sec": null,
@@ -95,8 +95,8 @@
       "progress": null,
       "queued_sec": 0.0,
       "result": "",
-      "root_job_id": "9fc3ab1f8f9f",
-      "run_id": "9fc3ab1f8f9f",
+      "root_job_id": "d17ff2b09c7d",
+      "run_id": "d17ff2b09c7d",
       "state": "queued",
       "verified": null,
       "worker": null
@@ -107,7 +107,7 @@
         "cost_est_usd": 0.0,
         "tokens_used": 0
       },
-      "created_at": 1780863998.5368035,
+      "created_at": 1781048743.036525,
       "decline_count": 0,
       "diagnosis": null,
       "eta_sec": null,
@@ -125,10 +125,10 @@
       "narration": null,
       "phase": "queued",
       "progress": null,
-      "queued_sec": 0.0,
+      "queued_sec": 0.1,
       "result": "",
-      "root_job_id": "d2990c6bddcb",
-      "run_id": "d2990c6bddcb",
+      "root_job_id": "4b1f4032153a",
+      "run_id": "4b1f4032153a",
       "state": "queued",
       "verified": null,
       "worker": null
@@ -139,7 +139,7 @@
         "cost_est_usd": 0.0,
         "tokens_used": 0
       },
-      "created_at": 1780863998.5050902,
+      "created_at": 1781048743.0044389,
       "decline_count": 0,
       "diagnosis": null,
       "eta_sec": null,
@@ -151,7 +151,7 @@
         "reason": "uv lock --upgrade ...",
         "status": "running"
       },
-      "idle_sec": 0.0,
+      "idle_sec": 0.1,
       "kind": "claude",
       "last_activity": "uv lock --upgrade ...",
       "narration": "uv lock --upgrade ...",
@@ -159,11 +159,11 @@
       "progress": null,
       "queued_sec": null,
       "result": "",
-      "root_job_id": "b944ac4597c1",
-      "run_id": "b944ac4597c1",
+      "root_job_id": "a4b96ad63db7",
+      "run_id": "a4b96ad63db7",
       "state": "running",
       "verified": null,
-      "worker": "32811c580933"
+      "worker": "a7bb28a6fcf1"
     },
     {
       "capable_workers": null,
@@ -171,12 +171,12 @@
         "cost_est_usd": 0.3073,
         "tokens_used": 48213
       },
-      "created_at": 1780863998.4446578,
+      "created_at": 1781048742.9504285,
       "decline_count": 0,
       "diagnosis": null,
       "eta_sec": null,
       "evidence": "pytest -q: 255 passed",
-      "finished_at": 1780863998.4961178,
+      "finished_at": 1781048742.9958441,
       "goal": "fix the flaky auth test in roost-oss",
       "goal_display": "fix the flaky auth test in roost-oss",
       "health": {
@@ -191,11 +191,11 @@
       "progress": null,
       "queued_sec": null,
       "result": "fixed: tests green",
-      "root_job_id": "4d13a298f1d6",
-      "run_id": "4d13a298f1d6",
+      "root_job_id": "2b7c4c0e87fa",
+      "run_id": "2b7c4c0e87fa",
       "state": "succeeded",
       "verified": true,
-      "worker": "32811c580933"
+      "worker": "a7bb28a6fcf1"
     }
   ],
   "workers": [
@@ -207,16 +207,63 @@
         ]
       },
       "capacity": 1,
-      "enroll_id": "353c569f26efa9ffc7abe20314360157fbf8fc3fb56e0a14dfbde5ba94c4126f",
-      "id": "32811c580933",
-      "last_assigned_at": 1780863998.5128183,
-      "last_seen": 1780863998.5304205,
+      "enroll_id": "290d7c709978bc431b0c792ea7d9b4f522a7515d560ee1abf5aa33f7ba316f21",
+      "id": "a7bb28a6fcf1",
+      "last_assigned_at": 1781048743.0123754,
+      "last_seen": 1781048743.0301383,
       "name": "fixture-node",
       "policy": {},
-      "registered_at": 1780863998.4344032,
+      "registered_at": 1781048742.9413445,
       "revoked": 0,
       "running": 1,
       "status": "busy"
+    },
+    {
+      "capabilities": {
+        "arch": "x86_64",
+        "cpus": 8,
+        "gpu_count": 1,
+        "gpu_vram_gb": 16,
+        "hostname": "gpu-host",
+        "os": "linux",
+        "ram_gb": 64,
+        "tools": [
+          "python3"
+        ]
+      },
+      "capacity": 1,
+      "enroll_id": "dd4b1b4df1727c0298e34bb1001142b561dd78828bbd274caad2f061559c9403",
+      "id": "39c3e4142bdc",
+      "last_assigned_at": null,
+      "last_seen": 1781048743.070638,
+      "name": "fixture-gpu-node",
+      "policy": {},
+      "registered_at": 1781048741.9413445,
+      "revoked": 0,
+      "running": 0,
+      "status": "idle"
+    },
+    {
+      "capabilities": {
+        "arch": "aarch64",
+        "cpus": 2,
+        "hostname": "attic-pi",
+        "os": "linux",
+        "tools": [
+          "python3"
+        ]
+      },
+      "capacity": 1,
+      "enroll_id": "dc15f2ca82f5dfef49f15cd8345b06c88d481bcd876bca8043123d34137d73c8",
+      "id": "9b9e68e4c42e",
+      "last_assigned_at": null,
+      "last_seen": 1781048143.0888736,
+      "name": "fixture-offline-node",
+      "policy": {},
+      "registered_at": 1781048740.9413445,
+      "revoked": 0,
+      "running": 0,
+      "status": "offline"
     }
   ]
 }

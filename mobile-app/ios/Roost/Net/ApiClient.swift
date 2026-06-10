@@ -142,6 +142,12 @@ struct ApiClient {
         try await sendData(request("derived", query: [.init(name: "limit", value: String(limit))]))
     }
 
+    /// Fleet list (API.md §2a): the full worker rows — the same rows
+    /// `/derived` embeds, served under the §1 client permission set.
+    func workers() async throws -> [Worker] {
+        try await send(request("workers"), as: [Worker].self)
+    }
+
     func job(_ id: String) async throws -> Job {
         try await send(request("jobs/\(id)"), as: Job.self)
     }

@@ -11,7 +11,8 @@ final class DecodeTests: XCTestCase {
         XCTAssertEqual(d.fleetVerdict.level, "alert")
         XCTAssertTrue(d.fleetVerdict.isAlert)
         XCTAssertEqual(d.runs.count, 6)
-        XCTAssertEqual(d.workers.count, 1)
+        // R121: the fixture fleet is busy + idle-GPU + offline (API.md §2a).
+        XCTAssertEqual(d.workers.count, 3)
         // Locate runs by goal/state — ids are random per fixture recording.
         // Run-row `result` is a STRING here (not the job-detail object).
         let verified = d.runs.first { $0.state == "succeeded" }
@@ -66,7 +67,9 @@ final class DecodeTests: XCTestCase {
 
     func testJobsListAndTree() throws {
         let list = try dec.decode([Job].self, from: Fixtures.data("jobs_list.json"))
-        XCTAssertEqual(list.count, 5)
+        // 6 = the five R85 jobs + R86's long-`command` job; the golden lagged
+        // the scenario until the R121 regen (values-only drift).
+        XCTAssertEqual(list.count, 6)
         let tree = try dec.decode([Job].self, from: Fixtures.data("job_tree.json"))
         XCTAssertEqual(tree.count, 1)
         // Ids are random per recording; pin shape, not value.
@@ -114,6 +117,10 @@ final class DecodeTests: XCTestCase {
         let workers = try dec.decode([Worker].self, from: Fixtures.data("workers.json"))
         XCTAssertEqual(workers.first?.status, "busy")
         XCTAssertTrue(workers.first?.isLive ?? false)
+        // R121: the offline row is NOT live (FleetTests covers the full rows).
+        XCTAssertEqual(workers.count, 3)
+        XCTAssertEqual(workers.last?.status, "offline")
+        XCTAssertFalse(workers.last?.isLive ?? true)
     }
 
     func testHealthzPairAndCancel() throws {

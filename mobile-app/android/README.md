@@ -92,6 +92,12 @@ deprecated `security-crypto` artifact. A later `401` unpairs you back to this sc
   preferred, live partials, haptics, mic hidden if unavailable, runtime RECORD_AUDIO
   prompt), `auto` vs pin-worker target, `agent` vs `command` kind, last-10-prompt chips.
   Dispatches `POST /jobs` and jumps into the session.
+- **Fleet screen** (R121) — dashboard overflow → polls `GET /workers` every 5 s
+  (lifecycle-paused): "N of M up" headline, then per-worker name, status,
+  capability summary (hostname · gpu · arch · cpus), `running/capacity` load and
+  a ticking last-seen age. Stale/offline pills mirror the server's 45/120 s
+  heartbeat thresholds against the client wall clock (the R75 ticker pattern) —
+  the pure judgment lives in `model/Fleet.kt`, JVM-tested by `FleetTest`.
 
 ## Tests
 

@@ -194,9 +194,10 @@ YAML
 The accessibility identifiers the suite keys on are defined additively in the
 views (`dashboard-list`, `run-row-<id>`, `verdict-bar`, `new-session-button`,
 `new-session-prompt`/`-dispatch`/`-cancel`, `session-header`/`-tree`/`-cancel`,
-`session-composer-field`/`-send`, `overflow-menu` + `overflow-{publish,
+`session-composer-field`/`-send`, `overflow-menu` + `overflow-{fleet,publish,
 notifications,schedules,unpair}`, `notifications-topic-field`/`-done`,
-`schedules-task-field`/`-done`).
+`schedules-task-field`/`-done`, `fleet-list`/`fleet-headline`/`fleet-done` +
+`worker-row-<id>`).
 
 ## Pairing (no in-app QR scanner)
 

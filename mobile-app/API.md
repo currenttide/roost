@@ -94,8 +94,47 @@ Run row (fixture has every field; the app renders a subset):
 
 Sort for display: running/assigned first, then by `created_at` desc.
 
-Worker rows (`workers.json`): render `name`, `status` (`idle`|`busy`|`offline`),
+Worker rows (`workers.json`): render `name`, `status`
+(`idle`|`busy`|`stale`|`offline` — full vocabulary + row shape in §2a),
 `last_seen`. Count `idle`+`busy` as live for the "N nodes" chip.
+
+### 2a. Fleet — `GET /workers` (R121)
+
+The Fleet screen reads the full worker list — the **same rows** `/derived`
+embeds (one server function feeds both, so the two surfaces can't diverge).
+Already inside the §1 client permission set — mobile and agent tokens read it
+with no extra scope (pinned by `tests/test_tokens.py::test_mobile_token_unchanged`
+and `::test_agent_token_can_observe_and_submit`). Fixture: `workers.json`
+(a busy, an idle-with-GPU and an offline row).
+
+Array of worker objects, newest-registered first. The apps render:
+
+```
+{
+  "id": "a7bb28a6fcf1", "name": "fixture-node",
+  "status": "idle"|"busy"|"stale"|"offline",  // see staleness note below
+  "last_seen": <epoch float>,
+  "capacity": <int>,            // concurrency slots (>= 1)
+  "running": <int>,             // in-flight jobs — render "running/capacity"
+  "capabilities": { … },        // free-form map: summarize known keys, ignore
+                                // the rest. Common: hostname, os, arch, cpus,
+                                // ram_gb, gpu_vram_gb, gpu_count, tools[],
+                                // gpu_detection ("failed" = broken GPU probe
+                                // on a node that HAS nvidia-smi — flag it,
+                                // it's not a bare node), load {loadavg1, …}
+  "registered_at"|"last_assigned_at"|"enroll_id"|"policy"|"revoked": informational
+}
+```
+
+**Staleness (the R75 pattern).** The server recomputes `status` from
+`last_seen` at read time: a heartbeat gap ≥ **45 s** reads `stale`, ≥ **120 s**
+reads `offline`. Clients mirror those thresholds against their own
+ticker-driven wall clock (exactly like the §2 staleness pill), so a node that
+dies while a payload sits in hand degrades honestly on screen — idle/busy →
+stale pill → offline pill — instead of staying green. The server's word always
+wins in the offline direction (a `status: "offline"` row is offline however
+fresh the payload); unknown `status` values render as plain text and never
+count as up (§9).
 
 ## 3. Submit — `POST /jobs`
 
@@ -375,7 +414,7 @@ advances in whole intervals so the original cadence is preserved — not a burst
 | `job_logs.json`, `job_logs_since_2.json` | full + resumed log page |
 | `job_tree.json` | lineage tree |
 | `job_derived_running.json` | single-run story (session header) |
-| `workers.json`, `healthz.json` | fleet list, reachability probe |
+| `workers.json`, `healthz.json` | fleet list (busy + idle-GPU + offline rows, §2a), reachability probe |
 | `stream_succeeded.sse.txt` | full SSE transcript incl. `event` log rows + `done` |
 | `job_cancel_response.json` | cancel ack |
 | `blob_upload_response.json` | staged bundle (`POST /blobs`) |
