@@ -527,7 +527,7 @@ mac-app surface), then R120; R121–R123 parallel-safe (different surfaces); R12
 Surface: mac-app/feature. fb6b95a (pushed) restructures the app ground-up (WindowKind registry, console PTY ownership fix, DesignSystem declutter); the commit honestly states "Not yet compiled on macOS". RoostKit untouched per the commit message — verify.
 Done-when: branch rebased on master if needed; Linux RoostKit `swift test` green; Mac-node (`mac-mini-m4`) `swift build` + `swift test` green via a roost job; render evidence per the evidence table (headless RenderShots pattern if R120 lands first, else capped honestly); judge reviews the full diff; PR from the branch merged (squash); pytest green (server untouched).
 
-### R120. Commit the headless SwiftUI render harness as a supported mac-app test utility — `in-progress` *(dispatched 2026-06-09)* `human-promoted`
+### R120. Commit the headless SwiftUI render harness as a supported mac-app test utility — `done` *(2026-06-09, PR #134 — harness recovered from the Mac node's ~/uxtest-mac, adapted to the R119 redesign; 8/9 views rendered headless with live data, blob round-trip proven; sidebar/Settings/PTY limits documented in README)* `human-promoted`
 Surface: mac-app/tests. Promotes the standing Proposed item (the product call is now made by the user's mac focus): RenderShots.swift + a 1-line App.swift hook gated on `ROOST_RENDER_DIR`, rendering real views with live `GET /derived` data via `NSHostingView.cacheDisplay` — the only screenshot path on the TCC-less Mac worker.
 Done-when: harness committed + documented (mac-app/README: how to run it via a roost job); produces PNGs of ≥3 key views on mac-mini-m4 as blob artifacts linked in the PR; future mac-app PRs can cite it as render evidence; Linux swift test still green; pytest green.
 
@@ -539,7 +539,7 @@ Done-when: API.md gains the workers surface (additive) + golden fixtures via rec
 Surface: mobile/UX. UAT P3 carryover, now cheap: R107's distilled SPEC + fixtures exist; failure results on the phones still show raw JSON walls.
 Done-when: failure-result rendering on both platforms reuses the distilled transform/truncation rules (SPEC.md cross-ref; new golden cases only if a new SPEC branch is exercised — values-only additive regen); Linux-harness tests on both platforms; screenshots per evidence paths; pytest green.
 
-### R123. Android: keyboard occludes Publish/Dispatch/Pair CTAs — `in-progress` *(dispatched 2026-06-09)* `human-promoted`
+### R123. Android: keyboard occludes Publish/Dispatch/Pair CTAs — `done` *(2026-06-09, PR #136 — root cause: R74 consumed systemBars but never the IME inset; imePadding() at the root + per-sheet handling for the two ModalBottomSheets + Pair scroll; 16 before/after emulator shots, mInputShown verified per shot; session composer was fully occluded and is fixed by the root change)* `human-promoted`
 Surface: mobile/Android/UX. UAT P3: the IME pushes the primary CTA off-screen on the three input-heavy sheets (R74 fixed the inset root cause for the TopAppBar; the IME case remains).
 Done-when: imePadding/scroll behavior fixed app-wide (the three known sheets + audit siblings); Linux-testable state logic asserted where any exists; emulator screenshots keyboard-up per the R74 path; pytest green.
 
