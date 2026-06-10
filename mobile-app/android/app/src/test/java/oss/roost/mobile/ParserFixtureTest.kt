@@ -40,9 +40,11 @@ class ParserFixtureTest {
         assertEquals("alert", d.fleetVerdict.level)
         assertFalse(d.fleetVerdict.isOk)
         assertEquals(6, d.runs.size)
-        assertEquals(1, d.workers.size)
-        // worker is busy → live.
+        // R121: the fixture fleet is busy + idle-GPU + offline (API.md §2a).
+        assertEquals(3, d.workers.size)
+        // first worker is busy → live; the offline row is not.
         assertTrue(d.workers.first().isLive)
+        assertFalse(d.workers.last().isLive)
 
         // Locate runs by goal/state — ids are random per fixture recording.
         val unplaceable = d.runs.first { it.goal == "train on the gpu box" }
@@ -79,9 +81,11 @@ class ParserFixtureTest {
 
     @Test fun workers() {
         val w = Parsers.parseWorkers(Fixtures.read("workers.json"))
-        assertEquals(1, w.size)
+        // R121: busy + idle-GPU + offline rows (FleetTest covers the full shape).
+        assertEquals(3, w.size)
         assertEquals("fixture-node", w.first().name)
         assertEquals("busy", w.first().status)
+        assertEquals("offline", w.last().status)
     }
 
     @Test fun jobDetailStates() {
@@ -115,7 +119,9 @@ class ParserFixtureTest {
 
     @Test fun jobsList() {
         val jobs = Parsers.parseJobs(Fixtures.read("jobs_list.json"))
-        assertEquals(5, jobs.size)
+        // 6 = the five R85 jobs + R86's long-`command` job; the golden lagged
+        // the scenario until the R121 regen (values-only drift).
+        assertEquals(6, jobs.size)
     }
 
     @Test fun tree() {

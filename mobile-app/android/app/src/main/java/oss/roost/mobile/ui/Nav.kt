@@ -9,6 +9,7 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import oss.roost.mobile.AppContainer
 import oss.roost.mobile.ui.dashboard.DashboardScreen
+import oss.roost.mobile.ui.fleet.FleetScreen
 import oss.roost.mobile.ui.pair.PairScreen
 import oss.roost.mobile.ui.schedules.SchedulesScreen
 import oss.roost.mobile.ui.session.SessionScreen
@@ -21,6 +22,7 @@ object Routes {
     const val SESSION = "session"
     const val SETTINGS = "settings"   // R55: notification settings
     const val SCHEDULES = "schedules" // R61: interval schedules
+    const val FLEET = "fleet"         // R121: workers / fleet view
     fun session(jobId: String) = "session/$jobId"
 }
 
@@ -66,10 +68,17 @@ fun RoostNavHost(
                 onOpenSession = { id -> nav.navigate(Routes.session(id)) },
                 onOpenSettings = { nav.navigate(Routes.SETTINGS) },   // R55
                 onOpenSchedules = { nav.navigate(Routes.SCHEDULES) }, // R61
+                onOpenFleet = { nav.navigate(Routes.FLEET) },         // R121
             )
         }
         composable(Routes.SETTINGS) {   // R55: notification settings
             NotificationSettingsScreen(
+                container = container,
+                onBack = { nav.popBackStack() },
+            )
+        }
+        composable(Routes.FLEET) {   // R121: workers / fleet view
+            FleetScreen(
                 container = container,
                 onBack = { nav.popBackStack() },
             )

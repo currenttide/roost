@@ -7,15 +7,62 @@
       ]
     },
     "capacity": 1,
-    "enroll_id": "f593d4d9c5745c0b39a4ac04833469fd289078cf7413602c2282dcf34e19b5b6",
-    "id": "d8d58b202358",
-    "last_assigned_at": 1780862528.178538,
-    "last_seen": 1780862528.1966317,
+    "enroll_id": "290d7c709978bc431b0c792ea7d9b4f522a7515d560ee1abf5aa33f7ba316f21",
+    "id": "a7bb28a6fcf1",
+    "last_assigned_at": 1781048743.0123754,
+    "last_seen": 1781048743.0301383,
     "name": "fixture-node",
     "policy": {},
-    "registered_at": 1780862528.1003878,
+    "registered_at": 1781048742.9413445,
     "revoked": 0,
     "running": 1,
     "status": "busy"
+  },
+  {
+    "capabilities": {
+      "arch": "x86_64",
+      "cpus": 8,
+      "gpu_count": 1,
+      "gpu_vram_gb": 16,
+      "hostname": "gpu-host",
+      "os": "linux",
+      "ram_gb": 64,
+      "tools": [
+        "python3"
+      ]
+    },
+    "capacity": 1,
+    "enroll_id": "dd4b1b4df1727c0298e34bb1001142b561dd78828bbd274caad2f061559c9403",
+    "id": "39c3e4142bdc",
+    "last_assigned_at": null,
+    "last_seen": 1781048743.070638,
+    "name": "fixture-gpu-node",
+    "policy": {},
+    "registered_at": 1781048741.9413445,
+    "revoked": 0,
+    "running": 0,
+    "status": "idle"
+  },
+  {
+    "capabilities": {
+      "arch": "aarch64",
+      "cpus": 2,
+      "hostname": "attic-pi",
+      "os": "linux",
+      "tools": [
+        "python3"
+      ]
+    },
+    "capacity": 1,
+    "enroll_id": "dc15f2ca82f5dfef49f15cd8345b06c88d481bcd876bca8043123d34137d73c8",
+    "id": "9b9e68e4c42e",
+    "last_assigned_at": null,
+    "last_seen": 1781048143.0888736,
+    "name": "fixture-offline-node",
+    "policy": {},
+    "registered_at": 1781048740.9413445,
+    "revoked": 0,
+    "running": 0,
+    "status": "offline"
   }
 ]

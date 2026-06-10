@@ -19,6 +19,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Notifications
@@ -71,6 +72,7 @@ fun DashboardScreen(
     onOpenSession: (String) -> Unit,
     onOpenSettings: () -> Unit = {},    // R55: notification settings entry point
     onOpenSchedules: () -> Unit = {},   // R61: interval schedules entry point
+    onOpenFleet: () -> Unit = {},       // R121: fleet / workers entry point
 ) {
     val vm = remember { DashboardViewModel(container) }
     val state by vm.state.collectAsState()
@@ -97,8 +99,9 @@ fun DashboardScreen(
     }
 
     Scaffold(
-        topBar = {   // R53 publish + R55 notifications + R61 schedules share one overflow menu
+        topBar = {   // R121 fleet + R53 publish + R55 notifications + R61 schedules share one overflow menu
             DashboardTopBar(
+                onOpenFleet = onOpenFleet,
                 onPublish = { showPublish = true },
                 onOpenSettings = onOpenSettings,
                 onOpenSchedules = onOpenSchedules,
@@ -325,13 +328,15 @@ private fun subtitle(run: Run): String {
 
 /**
  * The dashboard top bar. Title + an overflow menu mirroring the iOS DashboardView's
- * `ellipsis.circle` menu: "Publish a site" (R53), "Notifications" (R55, the
- * notification-settings entry per DESIGN.md §6 v1.1), and "Schedules" (R61, the
- * interval-schedules entry per API.md §7).
+ * `ellipsis.circle` menu: "Fleet" (R121, the workers view per API.md §2a),
+ * "Publish a site" (R53), "Notifications" (R55, the notification-settings entry
+ * per DESIGN.md §6 v1.1), and "Schedules" (R61, the interval-schedules entry per
+ * API.md §7).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun DashboardTopBar(
+    onOpenFleet: () -> Unit,
     onPublish: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenSchedules: () -> Unit,
@@ -344,6 +349,11 @@ private fun DashboardTopBar(
                 Icon(Icons.Filled.MoreVert, contentDescription = "More")
             }
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                DropdownMenuItem(
+                    text = { Text("Fleet") },
+                    leadingIcon = { Icon(Icons.Filled.Dns, contentDescription = null) },
+                    onClick = { menu = false; onOpenFleet() },
+                )
                 DropdownMenuItem(
                     text = { Text("Publish a site") },
                     leadingIcon = { Icon(Icons.Filled.Public, contentDescription = null) },

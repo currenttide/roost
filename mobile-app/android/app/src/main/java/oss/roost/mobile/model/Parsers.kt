@@ -140,6 +140,9 @@ object Parsers {
         name = o.str("name") ?: (o.str("id") ?: "worker"),
         status = o.str("status") ?: "offline",
         lastSeen = o.dbl("last_seen"),
+        running = o.intOrNull("running"),
+        capacity = o.intOrNull("capacity"),
+        capabilities = o.optJSONObject("capabilities")?.toMap() ?: emptyMap(),
     )
 
     fun parseWorkers(json: String): List<Worker> =

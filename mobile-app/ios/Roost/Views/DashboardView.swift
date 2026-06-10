@@ -8,6 +8,7 @@ struct DashboardView: View {
     @Environment(\.scenePhase) private var scenePhase
 
     @State private var showNew = false
+    @State private var showFleet = false
     @State private var showPublish = false
     @State private var showNotifySettings = false
     @State private var showSchedules = false
@@ -47,6 +48,10 @@ struct DashboardView: View {
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
                         Button {
+                            showFleet = true
+                        } label: { Label("Fleet", systemImage: "server.rack") }
+                        .accessibilityIdentifier("overflow-fleet")
+                        Button {
                             showPublish = true
                         } label: { Label("Publish a site", systemImage: "globe") }
                         .accessibilityIdentifier("overflow-publish")
@@ -73,6 +78,9 @@ struct DashboardView: View {
                     showNew = false
                     path.append(newId)
                 }
+            }
+            .sheet(isPresented: $showFleet) {
+                FleetView()
             }
             .sheet(isPresented: $showPublish) {
                 PublishView()

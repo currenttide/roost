@@ -18,8 +18,10 @@ from __future__ import annotations
 
 import io
 import json
+import sqlite3
 import sys
 import tarfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -128,6 +130,43 @@ def capture(db_path: Path) -> dict[str, Any]:
                        "'http://192.168.1.193:8787/blobs/deadbeef' && bash run.sh",
             "hierarchy": {"can_dispatch": True},
         })
+
+        # -- two more fleet rows (R121) so the Fleet screens' fixture covers
+        # the status vocabulary: a fresh idle GPU node and an offline node.
+        # Enrolled AFTER every placement above so they can never out-compete
+        # fixture-node for a job, and backdated below fixture-node's
+        # registered_at so the /workers ordering (registered_at DESC) keeps
+        # the original busy row FIRST — the goldens stay values-only additive
+        # (rows appended, nothing reordered). The GPU node's 16 GB stays under
+        # the queued job's `gpu_vram_gb: ">=24"`, so it remains unplaceable.
+        def _enroll_extra(name: str, caps: dict) -> str:
+            r = c.post("/enroll-tokens", json={"label": f"fixture-{name}"})
+            r = c.post("/enroll", json={"token": r.json()["token"], "name": name,
+                                        "capabilities": caps},
+                       headers={"Authorization": ""})
+            return r.json()["worker_id"]
+
+        gpu_wid = _enroll_extra("fixture-gpu-node", {
+            "tools": ["python3"], "cpus": 8, "hostname": "gpu-host",
+            "os": "linux", "arch": "x86_64", "ram_gb": 64,
+            "gpu_vram_gb": 16, "gpu_count": 1})
+        off_wid = _enroll_extra("fixture-offline-node", {
+            "tools": ["python3"], "cpus": 2, "hostname": "attic-pi",
+            "os": "linux", "arch": "aarch64"})
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "UPDATE workers SET registered_at = "
+                "(SELECT registered_at - 1 FROM workers WHERE id=?) WHERE id=?",
+                (wid, gpu_wid))
+            # The offline row: registered before the GPU row (stable ordering)
+            # and last seen 10 minutes ago, past the server's 120 s OFFLINE
+            # threshold — /workers and /derived recompute its status to
+            # "offline" at read time (API.md §2a staleness).
+            conn.execute(
+                "UPDATE workers SET registered_at = "
+                "(SELECT registered_at - 2 FROM workers WHERE id=?), "
+                "last_seen = ? WHERE id=?",
+                (wid, time.time() - 600.0, off_wid))
 
         # -- snapshots the apps render -------------------------------------
         out["derived.json"] = c.get("/derived", headers=mh).json()

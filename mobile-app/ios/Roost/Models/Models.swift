@@ -144,14 +144,21 @@ struct Worker: Codable, Equatable, Identifiable {
     let lastSeen: Double?
     let running: Int?
     let capacity: Int?
+    /// Free-form capability map (API.md §2a) — heterogeneous values
+    /// (`"x86_64"`, `16`, `["python3"]`), carried type-erased and summarized
+    /// for the Fleet screen by `Fleet.capsSummary`.
+    let capabilities: [String: JSONValue]?
 
     enum CodingKeys: String, CodingKey {
-        case id, name, status, running, capacity
+        case id, name, status, running, capacity, capabilities
         case lastSeen = "last_seen"
     }
 
     /// idle + busy count toward the live "N nodes" chip (API.md §2).
     var isLive: Bool { status == "idle" || status == "busy" }
+
+    /// Best display name (the server may register a worker without one).
+    var displayName: String { (name?.isEmpty == false ? name : nil) ?? id }
 }
 
 // MARK: - Job detail (API.md §3/§4)

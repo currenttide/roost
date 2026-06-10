@@ -216,6 +216,21 @@ final class SmokeTests: XCTestCase {
         attachScreenshot(app, name: "05-schedules")
         app.buttons["schedules-done"].tap()
 
+        // Fleet (R121): the workers list with live rows from the scratch CP.
+        XCTAssertTrue(app.buttons["overflow-menu"].waitForExistence(timeout: appearTimeout))
+        app.buttons["overflow-menu"].tap()
+        app.buttons["overflow-fleet"].tap()
+        let fleetHeadline = app.staticTexts["fleet-headline"]
+        XCTAssertTrue(fleetHeadline.waitForExistence(timeout: appearTimeout),
+                      "Fleet sheet never rendered its 'N of M up' headline.")
+        let firstWorker = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH 'worker-row-'"))
+            .firstMatch
+        XCTAssertTrue(firstWorker.waitForExistence(timeout: appearTimeout),
+                      "Fleet sheet rendered no worker rows from /workers.")
+        attachScreenshot(app, name: "06-fleet")
+        app.buttons["fleet-done"].tap()
+
         XCTAssertTrue(app.buttons["new-session-button"].waitForExistence(timeout: appearTimeout),
                       "Did not return to the dashboard after closing the sheets.")
     }
