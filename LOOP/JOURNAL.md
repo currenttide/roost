@@ -3094,3 +3094,34 @@ Entries are written by the loop; humans read, never need to edit.
   killed by harness failures (classifier timeout), NOT work failures. Second
   continuation dispatched after a user pause — evidence/judge/landing in flight.
 - Models: orchestrator claude-opus-4-8[1m]; implementers opus; judges sonnet
+
+## 2026-06-09 ~19:00 PT — R121: fleet/workers screen on both phones
+- Verdict: shipped
+- Branch/PR: loop/r121-fleet-screen / https://github.com/currenttide/roost/pull/138 (merged 259e91e)
+- What changed: API.md §2a (GET /workers contract; NO server change — mobile/agent
+  scope already reads /workers, pinned by tests/test_tokens.py); fixture regen
+  (two extra fleet rows, values-only additive; two stale master goldens refreshed);
+  iOS Net/Fleet.swift presenter + FleetStore + FleetView + overflow entry +
+  FleetTests; Android model/Fleet.kt + FleetViewModel/FleetScreen + Routes.FLEET +
+  FleetTest; cross-platform parity strings pinned identical in both test suites.
+  43 files, all mobile-app/.
+- Evidence:
+  - pytest 1214 ×2 (per rebase); drift guard 28/28 incl. new workers.json
+  - iOS Linux harness 131 (FleetTests 10/10); Android harness 112 (FleetTest 10/10)
+  - mac-mini-m4: iOS XCUITest 4/4 incl. new 06-fleet flow; Android Pixel_8
+    deep-link pair → Fleet → screencap, uiautomator dump contains the exact
+    parity strings. Screenshots (sha256-verified blob round-trip): both platforms
+    show "2 of 3 up", identical row strings, red offline pill. Honest cap: the
+    transient stale pill (45-120s window) unit-tested, not screenshotted.
+- Judge: approve r2, model claude-sonnet-4-6. Round-1 `revise` was a FALSE
+  POSITIVE: the orchestrator's LOOP-only journal commit (57dae7d) landed mid-
+  review, making the branch look behind on LOOP state; resolved by re-rebasing.
+- Models: implementer opus / judge sonnet
+- Notes: process — the original agent and first continuation were killed by
+  harness classifier timeouts; the work itself was sound both times (handoff
+  test-count claim was off: 10+10, not 12+11 — reported honestly). The
+  predecessor's scratch CP (port 8799, seeded worker states) survived and was
+  reused. Mac launchd worker PATH lacks Java — Android jobs need explicit
+  JAVA_HOME (/opt/homebrew/opt/openjdk@17); recorded for future evidence runs.
+  Cleanup verified: sim deleted, scratch CP killed, /tmp scrubbed, no live
+  tokens minted.
