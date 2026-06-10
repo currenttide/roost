@@ -3037,3 +3037,60 @@ Entries are written by the loop; humans read, never need to edit.
   isWorkspaceOrFleetKey, Run.metaLine; pre-existing RECENT RUNS placeholder).
   Next iteration dispatched: R120 + R121 + R123 (R122 deferred one iteration to
   avoid Android-file overlap with R121/R123).
+
+## 2026-06-09 ~17:05 PT — R120: headless render harness committed (the mac-app render-evidence gap closes)
+- Verdict: shipped
+- Branch/PR: loop/r120-render-harness / https://github.com/currenttide/roost/pull/134 (merged 899b463)
+- What changed: RenderShots.swift (recovered from the Mac node's ~/uxtest-mac —
+  the user-testing evidence pack only had the report; the source survived on the
+  node) adapted to the R119 redesign (PopoverRootView, WorkspaceWindowView,
+  FleetWindowView ×4 sections, RunDetailView, OnboardingView, SettingsView); live
+  data through the real FleetStore.configure() poll loop, no injection seam;
+  1-line App.swift hook gated on ROOST_RENDER_DIR; scripts/render_shots.sh driver
+  (per-view process + watchdog, --stage POSTs PNGs to /blobs); README "Render
+  evidence" section. Entirely #if os(macOS).
+- Evidence:
+  - mac-mini-m4: swift build 29s; full driver run exit 0 → 8/9 views rendered;
+    8 blob artifacts staged/downloaded/inspected (ids in the PR) — self-evidently
+    live (popover shows the render job itself; Transfers lists the harness's own
+    just-staged blobs with correct TTLs)
+  - Linux: swift test 123/123; pytest 1214/1214
+- Judge: approve r1, model claude-sonnet-4-6 (stated in final verdict block —
+  the new stdin/final-block judge protocol works)
+- Notes: documented headless limits (NavigationSplitView sidebar blank at 0
+  displays; Settings Form hangs, watchdog-contained; Console PTY can't draw).
+  Debt noted: the fleet verifier mis-diagnosed a roost-exec timeout kill as
+  "memory exhaustion" — future hunt candidate. Orchestrator note: the agent's
+  completion race produced a duplicate PR #135 (closed unmerged, no delta);
+  a stale R108 judge process from 2026-06-08 was found still running and killed.
+
+## 2026-06-09 ~17:45 PT — R123: Android IME insets (keyboard occlusion fixed app-wide)
+- Verdict: shipped
+- Branch/PR: loop/r123-android-ime / https://github.com/currenttide/roost/pull/136 (merged a086fc6)
+- What changed: ROOT CAUSE found — R74 consumed systemBars at the app root but
+  never the IME inset, and with enableEdgeToEdge() the manifest's adjustResize
+  doesn't resize Compose content. Fix: imePadding() once at the root (Theme.kt,
+  pad-and-consume); ModalBottomSheets live in their own windows where root
+  padding can't reach → skipPartiallyExpanded + verticalScroll + imePadding on
+  NewSessionSheet/PublishSheet; PairScreen gains verticalScroll. 4 files, Android only.
+- Evidence:
+  - pytest 1214 (pre+post rebase); Android Linux harness OK (102) pre+post
+  - emulator (R74 path): 16 before/after screencaps, every IME shot adb-verified
+    mInputShown=true; Dispatch/Publish/Pair CTAs hidden→visible; session composer
+    was ENTIRELY under the keyboard → visible. Sibling audit: Notifications/
+    Schedules-create had a latent scroll-impossibility (hash-identical before
+    shots prove it) — fixed by the root change.
+  - Honesty: no new tests — the fix is purely declarative modifiers; flagged
+    rather than writing tautologies; judge concurred.
+- Judge: approve r1, model claude-sonnet-4-6
+- Notes: emulator-drive gotchas recorded (uiautomator can't see Compose FAB text
+  → geometric taps; log lines can spoof naive needle matching). Brew gradle
+  regenerates the wrapper at 9.4.1 ignoring the committed 8.9 pin — drift point.
+  Test pairing token revoked after use.
+
+## 2026-06-09 — Iteration status note
+- R121 (phones fleet screen): implementation commit complete and pushed
+  (loop/r121-fleet-screen); the original agent and first continuation were both
+  killed by harness failures (classifier timeout), NOT work failures. Second
+  continuation dispatched after a user pause — evidence/judge/landing in flight.
+- Models: orchestrator claude-opus-4-8[1m]; implementers opus; judges sonnet
