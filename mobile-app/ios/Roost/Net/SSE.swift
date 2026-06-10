@@ -18,6 +18,18 @@ struct SSEDonePayload: Codable, Equatable {
         case exitCode = "exit_code"
         case tokensUsed = "tokens_used"
     }
+
+    /// The result-card summary (SessionView). R122: a FAILED job's
+    /// `result.output`/`error` can be a raw stream-json wall (the UAT
+    /// "failed-agent rows render raw JSON" finding), so failures distil it
+    /// through the shared SPEC.md transform + truncation rules — falling
+    /// through to the (distilled) error when the output distils to nothing.
+    /// Non-failed results are shown verbatim, exactly as before.
+    var displaySummary: String? {
+        guard state == "failed" else { return result?.output ?? error }
+        return DistilledLine.failureSummary(result?.output)
+            ?? DistilledLine.failureSummary(error)
+    }
 }
 
 struct SSEErrorPayload: Codable, Equatable {

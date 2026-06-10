@@ -150,6 +150,52 @@ enum DistilledLine {
         return isTruthy(item["is_error"]) ? "  ⎿ ✗ \(summary)" : "  ⎿ \(summary)"
     }
 
+    // MARK: - Failure-result rendering (R122)
+
+    /// Distil a FAILED job's result/error text for the failure panes — the
+    /// dashboard row subtitle (via `failureLine`) and the session result card.
+    /// UAT found failed-agent rows rendering raw stream-json walls: a worker can
+    /// report a failure whose `result.output`/`error` IS one or more raw
+    /// Anthropic stream-json lines (e.g. the final `result` envelope), which the
+    /// phones previously displayed verbatim.
+    ///
+    /// This REUSES the SPEC.md contract unchanged (it adds no new transform
+    /// branch): each line of `text` goes through `from(_:)` (SPEC rules 1–4) —
+    /// recognised stream-json envelopes distil, noise suppresses — and a line
+    /// that passed through VERBATIM (not stream-json) is whitespace-collapsed
+    /// and capped at `resultMax` per SPEC rule 5, so a one-line non-JSON wall
+    /// can't render either. Already-distilled lines are kept as-is (they are
+    /// within the SPEC caps by construction; re-truncating would drift from the
+    /// transcript rendering). Returns nil for nil/blank input or when every
+    /// line is suppressed — callers then fall back to their state/health line.
+    ///
+    /// Cross-platform: Android mirrors this exactly
+    /// (`model/DistilledLine.kt failureSummary`); both platforms pin the same
+    /// parity cases in their Linux-harness tests.
+    static func failureSummary(_ text: String?) -> String? {
+        guard let text,
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return nil }
+        var out: [String] = []
+        for line in text.components(separatedBy: "\n") {
+            guard let d = from(line) else { continue }   // suppressed noise
+            if d == line {
+                // Passthrough (not stream-json): SPEC rule-5 collapse + cap.
+                let flat = firstLine(line, resultMax)
+                if !flat.isEmpty { out.append(flat) }
+            } else {
+                out.append(d)
+            }
+        }
+        return out.isEmpty ? nil : out.joined(separator: "\n")
+    }
+
+    /// One-line variant for a dashboard run row: the first surviving line of
+    /// `failureSummary` (each surviving line is already collapsed + capped).
+    static func failureLine(_ text: String?) -> String? {
+        failureSummary(text)?.components(separatedBy: "\n").first
+    }
+
     // MARK: - Helpers (Rule 5: collapse + truncate)
 
     /// Whitespace-collapse `text` (split on any whitespace, rejoin with single

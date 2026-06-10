@@ -139,6 +139,53 @@ object DistilledLine {
         return if (isTruthy(item.opt("is_error"))) "  ⎿ ✗ $summary" else "  ⎿ $summary"
     }
 
+    // ---- Failure-result rendering (R122) ----
+
+    /**
+     * Distil a FAILED job's result/error text for the failure panes — the
+     * dashboard row line (via [failureLine]) and the session result card. UAT
+     * found failed-agent rows rendering raw stream-json walls: a worker can
+     * report a failure whose `result.output`/`error` IS one or more raw
+     * Anthropic stream-json lines (e.g. the final `result` envelope), which the
+     * phones previously displayed verbatim.
+     *
+     * This REUSES the SPEC.md contract unchanged (no new transform branch):
+     * each line of `text` goes through [from] (SPEC rules 1–4) — recognised
+     * stream-json envelopes distil, noise suppresses — and a line that passed
+     * through VERBATIM (not stream-json) is whitespace-collapsed and capped at
+     * RESULT_MAX per SPEC rule 5, so a one-line non-JSON wall can't render
+     * either. Already-distilled lines are kept as-is (within the SPEC caps by
+     * construction; re-truncating would drift from the transcript rendering).
+     * Returns null for null/blank input or when every line is suppressed —
+     * callers then fall back to their state/health line.
+     *
+     * Cross-platform: iOS mirrors this exactly (`Net/Distill.swift
+     * failureSummary`); both platforms pin the same parity cases in their
+     * Linux-harness tests.
+     */
+    fun failureSummary(text: String?): String? {
+        if (text == null || text.isBlank()) return null
+        val out = ArrayList<String>()
+        for (line in text.split("\n")) {
+            val d = from(line) ?: continue   // suppressed noise
+            if (d == line) {
+                // Passthrough (not stream-json): SPEC rule-5 collapse + cap.
+                val flat = firstLine(line, RESULT_MAX)
+                if (flat.isNotEmpty()) out.add(flat)
+            } else {
+                out.add(d)
+            }
+        }
+        return if (out.isEmpty()) null else out.joinToString("\n")
+    }
+
+    /**
+     * One-line variant for a dashboard run row: the first surviving line of
+     * [failureSummary] (each surviving line is already collapsed + capped).
+     */
+    fun failureLine(text: String?): String? =
+        failureSummary(text)?.split("\n")?.first()
+
     /** First line of `text`, whitespace-collapsed to a single line, capped at `limit`. */
     private fun firstLine(text: String, limit: Int): String {
         // Split on ANY whitespace and rejoin with single spaces (flattens multi-line).

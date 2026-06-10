@@ -132,8 +132,19 @@ struct Run: Codable, Equatable, Identifiable {
     }
 
     /// Best one-liner to show under the title.
+    ///
+    /// R122: a FAILED row's best line can be a raw stream-json wall (a worker
+    /// may report the final `result`/`assistant` envelope verbatim as the
+    /// failure result — the UAT "failed-agent rows render raw JSON" finding),
+    /// so failed rows distil it through the shared SPEC.md transform +
+    /// truncation rules (`DistilledLine.failureLine`). Non-failed rows are
+    /// unchanged; nil when distillation suppresses everything (the meta line
+    /// still shows the state).
     var subtitle: String? {
-        narration ?? lastActivity ?? health?.reason ?? (result?.isEmpty == false ? result : nil)
+        let best = narration ?? lastActivity ?? health?.reason
+            ?? (result?.isEmpty == false ? result : nil)
+        guard state == "failed", let raw = best else { return best }
+        return DistilledLine.failureLine(raw)
     }
 }
 

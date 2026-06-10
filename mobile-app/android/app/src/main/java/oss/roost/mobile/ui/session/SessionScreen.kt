@@ -50,6 +50,7 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
 import oss.roost.mobile.AppContainer
 import oss.roost.mobile.model.Composer
+import oss.roost.mobile.model.DistilledLine
 import oss.roost.mobile.model.Subtitle
 import oss.roost.mobile.sse.RenderedLine
 import oss.roost.mobile.sse.SessionLines
@@ -265,15 +266,22 @@ private fun LogRow(line: RenderedLine) {
 
 @Composable
 private fun ResultCard(done: DoneResult) {
+    // R122: a FAILED job's result/error can be a raw stream-json wall (the UAT
+    // "failed-agent rows render raw JSON" finding) — distil it through the
+    // shared SPEC.md transform + truncation rules (model/DistilledLine.kt,
+    // harness-tested). Non-failed results render verbatim, exactly as before.
+    val failed = done.state == "failed"
+    val resultText = if (failed) DistilledLine.failureSummary(done.result) else done.result
+    val errorText = if (failed) DistilledLine.failureSummary(done.error) else done.error
     Card(Modifier.padding(16.dp).fillMaxWidth()) {
         Column(Modifier.padding(16.dp)) {
             Text(done.state.uppercase(), fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(6.dp))
             done.exitCode?.let { Text("exit code: $it", style = MaterialTheme.typography.bodySmall) }
-            done.result?.takeIf { it.isNotBlank() }?.let {
+            resultText?.takeIf { it.isNotBlank() }?.let {
                 Text(it, style = MaterialTheme.typography.bodyMedium)
             }
-            done.error?.takeIf { it.isNotBlank() }?.let {
+            errorText?.takeIf { it.isNotBlank() }?.let {
                 Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
             }
             done.tokensUsed?.takeIf { it > 0 }?.let {

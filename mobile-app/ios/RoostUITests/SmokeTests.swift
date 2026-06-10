@@ -189,6 +189,55 @@ final class SmokeTests: XCTestCase {
         app.buttons["session-raw-toggle"].tap()
     }
 
+    // MARK: - Flow 3b: FAILED job renders distilled, not a raw JSON wall (R122)
+
+    /// A job id whose state is FAILED with a stream-json `result.output`, if the
+    /// runner seeded one (env `ROOST_FAILED_SESSION`).
+    private var injectedFailedSession: String? {
+        let v = ProcessInfo.processInfo.environment["ROOST_FAILED_SESSION"]
+        return (v?.isEmpty == false) ? v : nil
+    }
+
+    func testFailedSessionRendersDistilledNotRawJSON() throws {
+        guard let failedId = injectedFailedSession else {
+            throw XCTSkip("No ROOST_FAILED_SESSION in the environment — seed a "
+                          + "failed agent job whose result is a raw stream-json "
+                          + "line to run the R122 failure-rendering flow.")
+        }
+        let app = try launchPaired(extraEnv: ["ROOST_OPEN_SESSION": failedId])
+
+        // The deep link lands on the failed job's session. Its result card must
+        // show the DISTILLED failure ("✗ failed" — the SPEC.md phase divider for
+        // an is_error result envelope), not the raw JSON wall the worker
+        // reported (which contains `"duration_ms"`).
+        let header = app.otherElements["session-header"]
+        XCTAssertTrue(header.waitForExistence(timeout: appearTimeout),
+                      "Failed job's session never appeared.")
+        let distilled = app.staticTexts.containing(
+            NSPredicate(format: "label CONTAINS '✗ failed'")).firstMatch
+        XCTAssertTrue(distilled.waitForExistence(timeout: appearTimeout),
+                      "Result card did not show the distilled '✗ failed' summary.")
+        let wall = app.staticTexts.containing(
+            NSPredicate(format: "label CONTAINS 'duration_ms'")).firstMatch
+        XCTAssertFalse(wall.exists,
+                       "Raw stream-json wall leaked into the failed result pane.")
+        attachScreenshot(app, name: "07-failed-session-distilled")
+
+        // Back on the dashboard, the failed run's ROW subtitle must be the
+        // distilled line too (R122 wires Run.subtitle through failureLine).
+        app.navigationBars.buttons.firstMatch.tap()
+        let row = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier == 'run-row-\(failedId)'"))
+            .firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: appearTimeout),
+                      "Failed run's dashboard row never appeared.")
+        let rowWall = row.staticTexts.containing(
+            NSPredicate(format: "label CONTAINS 'duration_ms'")).firstMatch
+        XCTAssertFalse(rowWall.exists,
+                       "Raw stream-json wall leaked into the failed run's row.")
+        attachScreenshot(app, name: "08-failed-row-distilled")
+    }
+
     // MARK: - Flow 4: Notifications + Schedules sheets from the overflow menu
 
     func testOverflowSheetsOpen() throws {

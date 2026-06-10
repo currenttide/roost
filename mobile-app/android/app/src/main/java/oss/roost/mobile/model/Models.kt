@@ -82,11 +82,23 @@ data class Run(
     val displayGoal: String
         get() = goalDisplay?.takeIf { it.isNotBlank() } ?: goal
 
-    /** Best one-liner for a row's subtitle. */
+    /** Best one-liner for a row's subtitle.
+     *
+     *  R122: a FAILED row's best line can be a raw stream-json wall (a worker
+     *  may report the final `result`/`assistant` envelope verbatim as the
+     *  failure result — the UAT "failed-agent rows render raw JSON" finding),
+     *  so failed rows distil it through the shared SPEC.md transform +
+     *  truncation rules ([DistilledLine.failureLine]). Non-failed rows are
+     *  unchanged; null when distillation suppresses everything (the subtitle
+     *  still shows the state). */
     val bestLine: String?
-        get() = narration?.takeIf { it.isNotBlank() }
-            ?: lastActivity?.takeIf { it.isNotBlank() }
-            ?: result.takeIf { it.isNotBlank() }
+        get() {
+            val best = narration?.takeIf { it.isNotBlank() }
+                ?: lastActivity?.takeIf { it.isNotBlank() }
+                ?: result.takeIf { it.isNotBlank() }
+            if (state != "failed" || best == null) return best
+            return DistilledLine.failureLine(best)
+        }
 
     val isActive: Boolean
         get() = state == "running" || state == "assigned"

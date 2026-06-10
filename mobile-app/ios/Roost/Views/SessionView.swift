@@ -144,7 +144,9 @@ struct SessionView: View {
                 Spacer()
                 if let code = d.exitCode { Text("exit \(code)").font(.caption.monospaced()) }
             }
-            if let summary = d.result?.output ?? d.error, !summary.isEmpty {
+            // R122: failed jobs distil a raw stream-json result/error wall
+            // through the shared SPEC.md rules (`SSEDonePayload.displaySummary`).
+            if let summary = d.displaySummary, !summary.isEmpty {
                 Text(summary).font(.caption).foregroundStyle(.secondary)
             }
             if let ev = d.result?.evidence, !ev.isEmpty {
