@@ -5,6 +5,7 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.MaterialTheme
@@ -56,11 +57,21 @@ fun RoostTheme(content: @Composable () -> Unit) {
         // every screen sits below the status bar / above the nav bar and the per-screen
         // TopAppBar default insets downstream resolve to zero (no double padding). One
         // source of truth fixes the dashboard blocker and the session crowding together.
+        //
+        // R123: also consume the IME inset here. With enableEdgeToEdge() the manifest's
+        // adjustResize no longer resizes Compose content, so the keyboard OVERLAYED the
+        // bottom of every screen — the Pair CTA, the session follow-up composer, and the
+        // Save/Create CTAs on Notifications/Schedules were typed-over. imePadding() pads
+        // (and consumes) only the part of the IME not already covered by the system-bar
+        // padding above, so screens shrink above the keyboard and their scroll containers
+        // can bring the CTA into view. NOTE: ModalBottomSheet content lives in its OWN
+        // window and never sees this — the sheets apply their own imePadding().
         Box(
             Modifier
                 .fillMaxSize()
                 .background(colors.background)
-                .windowInsetsPadding(WindowInsets.systemBars),
+                .windowInsetsPadding(WindowInsets.systemBars)
+                .imePadding(),
         ) {
             content()
         }
