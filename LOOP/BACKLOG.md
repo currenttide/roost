@@ -531,11 +531,11 @@ Done-when: branch rebased on master if needed; Linux RoostKit `swift test` green
 Surface: mac-app/tests. Promotes the standing Proposed item (the product call is now made by the user's mac focus): RenderShots.swift + a 1-line App.swift hook gated on `ROOST_RENDER_DIR`, rendering real views with live `GET /derived` data via `NSHostingView.cacheDisplay` — the only screenshot path on the TCC-less Mac worker.
 Done-when: harness committed + documented (mac-app/README: how to run it via a roost job); produces PNGs of ≥3 key views on mac-mini-m4 as blob artifacts linked in the PR; future mac-app PRs can cite it as render evidence; Linux swift test still green; pytest green.
 
-### R121. Phones: fleet/workers screen (both platforms) — `in-progress` *(dispatched 2026-06-09)* `human-promoted` `feature`
+### R121. Phones: fleet/workers screen (both platforms) — `done` *(2026-06-09, PR #138 — API.md §2a, no server change needed (mobile scope already read /workers); Fleet screens both platforms with pinned cross-platform parity strings; sim+emulator screenshots; survived two harness-killed agents)* `human-promoted` `feature`
 Surface: mobile/feature. Top remaining UAT gap: no workers/GPU view on the phones — an operator can't answer "is my fleet up" from the couch. Server `GET /workers` exists; verify the mobile token scope reaches it (if not, that's an additive scope decision documented in API.md).
 Done-when: API.md gains the workers surface (additive) + golden fixtures via record_fixtures.py; iOS + Android Fleet screens (name/status/caps/load/last-seen, offline pill consistent with R75's staleness pattern) following the established screen/sheet patterns; pure logic Linux-tested on both harnesses; emulator + sim screenshots per the proven paths; pytest green.
 
-### R122. Phones: failed-agent rows render raw JSON → distilled failure rendering — `open` `human-promoted` `feature`
+### R122. Phones: failed-agent rows render raw JSON → distilled failure rendering — `in-progress` *(dispatched 2026-06-09)* `human-promoted` `feature`
 Surface: mobile/UX. UAT P3 carryover, now cheap: R107's distilled SPEC + fixtures exist; failure results on the phones still show raw JSON walls.
 Done-when: failure-result rendering on both platforms reuses the distilled transform/truncation rules (SPEC.md cross-ref; new golden cases only if a new SPEC branch is exercised — values-only additive regen); Linux-harness tests on both platforms; screenshots per evidence paths; pytest green.
 
@@ -543,7 +543,7 @@ Done-when: failure-result rendering on both platforms reuses the distilled trans
 Surface: mobile/Android/UX. UAT P3: the IME pushes the primary CTA off-screen on the three input-heavy sheets (R74 fixed the inset root cause for the TopAppBar; the IME case remains).
 Done-when: imePadding/scroll behavior fixed app-wide (the three known sheets + audit siblings); Linux-testable state logic asserted where any exists; emulator screenshots keyboard-up per the R74 path; pytest green.
 
-### R124. mac-app: schedule-create + single-instance guard + version single-sourcing — `open` `human-promoted` `feature`
+### R124. mac-app: schedule-create + single-instance guard + version single-sourcing — `in-progress` *(dispatched 2026-06-09; scope grew: + the R119-judge dead-code cleanup per the Proposed note)* `human-promoted` `feature`
 Surface: mac-app/feature. Bundle of the judge-sanctioned R62 deferral (schedule CREATE from the menu bar; list/toggle landed) + two UAT nits: a second app launch should focus the running instance, and Info.plist hardcodes 0.1.0 while the CP self-reports `__version__` (single-source per R32 precedent — pick the seam, justify).
 Done-when: create-schedule UI per existing sheet patterns with RoostKit logic Linux-tested; single-instance guard + version fix; Mac-node build + swift test green; render evidence per the R120 harness or capped honestly; pytest green.
 
