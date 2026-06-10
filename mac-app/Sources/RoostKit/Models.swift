@@ -645,6 +645,25 @@ public struct JobInputSubmit: Encodable, Sendable {
     public init(text: String) { self.text = text }
 }
 
+/// Body for `POST /schedules` (server `ScheduleCreate`): the job spec the CP
+/// re-submits each interval, the `every` grammar string, and an optional label.
+/// A nil `name` is omitted (synthesized `encodeIfPresent`), matching
+/// `roost schedule` without `--name`.
+public struct ScheduleCreateBody: Encodable, Sendable {
+    public let spec: [String: JSONValue]
+    public let every: String
+    public let name: String?
+    public let enabled: Bool
+
+    public init(spec: [String: JSONValue], every: String,
+                name: String? = nil, enabled: Bool = true) {
+        self.spec = spec
+        self.every = every
+        self.name = name
+        self.enabled = enabled
+    }
+}
+
 /// Body for `PATCH /schedules/{id}` — enable/disable (server `SchedulePatch`).
 public struct SchedulePatchBody: Encodable, Sendable {
     public let enabled: Bool

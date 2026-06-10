@@ -94,14 +94,6 @@ final class WindowManager: NSObject, NSWindowDelegate {
         }
     }
 
-    var isWorkspaceOrFleetKey: Bool {
-        guard let key = NSApp.keyWindow,
-              let kind = kindByWindow[ObjectIdentifier(key)] else { return false }
-        if case .workspace = kind { return true }
-        if case .runDetail = kind { return true }
-        return false
-    }
-
     // MARK: construction
 
     private func create(_ kind: WindowKind) -> NSWindow {

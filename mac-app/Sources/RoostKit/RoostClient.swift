@@ -280,6 +280,19 @@ public final class RoostClient: @unchecked Sendable {
         return rows.compactMap(\.value)
     }
 
+    /// Create an interval schedule (`POST /schedules`). `every` is seconds or
+    /// "<N>[smhd]" (e.g. "30m"; 30 s floor server-side); `spec` is a root-job
+    /// submit shape (see `ScheduleDraft.spec()`). Returns the new schedule —
+    /// its first run fires one interval from now.
+    public func createSchedule(
+        spec: [String: JSONValue], every: String,
+        name: String? = nil, enabled: Bool = true
+    ) async throws -> Schedule {
+        try await send("POST", "/schedules",
+                       body: ScheduleCreateBody(
+                           spec: spec, every: every, name: name, enabled: enabled))
+    }
+
     /// Enable/disable a schedule (`PATCH /schedules/{id}`). Re-enabling restarts the
     /// clock server-side. Returns the updated schedule.
     @discardableResult

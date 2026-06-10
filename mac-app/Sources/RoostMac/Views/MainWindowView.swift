@@ -321,7 +321,7 @@ struct WorkersPane: View {
             .filter { $0.worker == worker.id }
             .prefix(5)
         if !runs.isEmpty {
-            Text("RECENT RUNS HERE")
+            Text("RECENT RUNS")
                 .font(.caption2.weight(.semibold))
                 .foregroundStyle(.tertiary)
             ForEach(Array(runs)) { run in
