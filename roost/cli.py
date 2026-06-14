@@ -33,6 +33,7 @@ Jobs:
     roost logs <id>          dump or follow a job's logs
     roost cancel <id>        cancel a job (or its whole subtree with --tree)
     roost workers            list registered workers
+    roost dash               full-screen terminal dashboard (the Linux console)
     roost ping               check the control plane is reachable
 
 URL/token resolution everywhere: explicit flag → env (ROOST_URL/ROOST_TOKEN) →
@@ -2328,6 +2329,22 @@ def ping(ctx: click.Context) -> None:
     if r.status_code >= 400:
         raise click.ClickException(f"HTTP {r.status_code}: {r.text}")
     click.echo(r.json())
+
+
+@cli.command()
+@click.pass_context
+def dash(ctx: click.Context) -> None:
+    """Full-screen terminal dashboard for the fleet.
+
+    The Linux/SSH-native sibling of the macOS app: a glanceable fleet verdict, a
+    goal box, live run logs, and Workers / Transfers / Publish / Schedules /
+    Console screens — all over the same control plane. Switch screens with
+    1-7 or Tab, press `g` to give the fleet a goal, `q` to quit.
+    """
+    # Lazy import: `curses` and the TUI only load when actually launched, so the
+    # rest of the CLI stays import-light (and `import roost.tui` needs no TTY).
+    from . import tui
+    tui.run(ctx)
 
 
 # ---------- distilled live-stream view (R107) ----------

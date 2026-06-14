@@ -11,6 +11,7 @@ report results. Jobs are `command`, `claude` (agent), or `docker` (isolated/GPU)
 - `roost/matcher.py` — `requires:` ↔ capability matching.
 - `roost/captain.py`, `roost/mcp.py` — captain agent (`roost dispatch`) + its MCP tools.
 - `roost/cli.py` — the `roost` command. `roost/config.py` — `~/.config/roost/config.toml`. `roost/schema.py` — DB schema + migrations.
+- `roost/tui.py` — `roost dash`, the full-screen curses dashboard (Linux sibling of `mac-app/`). Pure-logic layer (formatting/staleness/sort/console-wiring/`TuiClient`) is TTY-free and tested in `tests/test_tui.py`; reuses `cli.distill_log_line`.
 - `roost/service.py` — durable worker/CP services (systemd / launchd).
 - `.claude/skills/` — `roost-quickstart` (first-run setup), `roost-onboard` (add a node), `roost-oversee` (monitor).
 - `docker/` — worker container + full stack. `mac-app/` — optional macOS control app. `examples/` — runnable job specs.
