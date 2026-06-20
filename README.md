@@ -188,13 +188,24 @@ and self-heal **always** use Sonnet — correctness is never delegated to the ch
 
 ## Dashboard
 
-The control plane serves a live web panel — open it at:
+Two glanceable surfaces, same model. In a terminal (great over SSH):
+
+```
+roost dash
+```
+
+A full-screen TUI — the Linux/console sibling of the macOS app: a fleet verdict
+header, a goal box (`g`), live distilled run logs with a phase rail, and
+Workers / Transfers / Publish / Schedules / Console screens. Switch with `1`–`7`
+or Tab; `q` quits. (Needs only the Python stdlib — no extra dependency.)
+
+Or open the live **web panel** in a browser:
 
 ```
 http://<control-plane-host>:8787/panel?token=<admin-token>
 ```
 
-It gives you, at a glance:
+Both give you, at a glance:
 
 - A **fleet verdict bar** — one line that answers "is anything wrong?"
 - A **task board** where each job shows its *story*: its phase (running · verifying ·
@@ -202,8 +213,8 @@ It gives you, at a glance:
   verification evidence when it finishes.
 - **Node health cards** — each machine, what it's running, free VRAM, load.
 
-The panel, the terminal dashboard (`scripts/fleet`), and the MCP inbox all render the same
-single `GET /derived` model, so they never disagree. Set `ROOST_NARRATE=1` on the control
+The `roost dash` TUI, the web panel, the `scripts/fleet` watcher, and the MCP inbox all
+render the same single `GET /derived` model, so they never disagree. Set `ROOST_NARRATE=1` on the control
 plane to add agentic per-job narration to the story. Each active job is re-narrated at most
 once per `ROOST_NARRATE_INTERVAL` seconds (default `20`; busy fleets can raise it to cut
 token cost, demos can lower it); values below the `5`s floor — the sweep cadence — are
